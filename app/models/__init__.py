@@ -1,10 +1,18 @@
-from app.models.inspection import InspectionItem
+from app.models.inspection import (
+    DetectionApiCall,
+    DetectionItemResult,
+    DetectionTask,
+    InspectionItem,
+)
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceImage
 from app.models.system import AlgorithmConfig, Product, Station
 
 __all__ = [
     "AlgorithmConfig",
+    "DetectionApiCall",
+    "DetectionItemResult",
+    "DetectionTask",
     "InspectionItem",
     "Product",
     "Recipe",
@@ -13,4 +21,3 @@ __all__ = [
     "RegionOfInterest",
     "Station",
 ]
-

@@ -14,4 +14,6 @@ detection_results/*
 !detection_results/.gitkeep
 embeddings/*
 !embeddings/.gitkeep
-
+vision-models/**
+!vision-models/README.md
+vision-models/**/.cache/

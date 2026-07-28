@@ -30,3 +30,11 @@ def dashboard(request: Request):
         },
     )
 
+
+@router.get("/workspace")
+def workspace(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="workspace.html",
+        context={"app_name": settings.app_name},
+    )
