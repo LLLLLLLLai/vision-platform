@@ -1,0 +1,36 @@
+:root {
+  --vp-bg: #f4f7fb;
+  --vp-card-border: #e3e9f2;
+  --vp-primary: #1769e0;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top right, rgba(23, 105, 224, 0.08), transparent 32rem),
+    var(--vp-bg);
+}
+
+.metric-card,
+.module-card {
+  border: 1px solid var(--vp-card-border);
+  border-radius: 1rem;
+  box-shadow: 0 0.35rem 1.2rem rgba(33, 50, 79, 0.05);
+}
+
+.module-card {
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.module-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0.65rem 1.5rem rgba(33, 50, 79, 0.09);
+}
+
+.module-index {
+  color: var(--vp-primary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}控制台 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+  <div>
+    <p class="text-uppercase text-primary fw-semibold mb-1 small">Vision Platform V1.0</p>
+    <h1 class="h3 mb-1">检测平台控制台</h1>
+    <p class="text-secondary mb-0">围绕 ROI、检测项、算法能力和规则组织生产检测。</p>
+  </div>
+  <div class="d-flex gap-2">
+    <a class="btn btn-outline-secondary" href="/docs">查看 API</a>
+    <button class="btn btn-primary" data-health-check>检查系统状态</button>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-12 col-md-4">
+    <div class="card metric-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">平台状态</div>
+        <div class="fs-4 fw-semibold mt-2" data-health-status>等待检查</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card metric-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">当前阶段</div>
+        <div class="fs-4 fw-semibold mt-2">基础框架</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card metric-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">核心流程</div>
+        <div class="fs-6 fw-semibold mt-2">配方 → ROI → 算法 → 规则</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  {% for item in navigation %}
+  <div class="col-12 col-sm-6 col-xl-3">
+    <div class="card module-card h-100">
+      <div class="card-body">
+        <div class="module-index">{{ "%02d"|format(loop.index) }}</div>
+        <h2 class="h5 mt-3">{{ item }}</h2>
+        <p class="text-secondary small mb-0">模块接口与页面将在后续阶段逐步启用。</p>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
+

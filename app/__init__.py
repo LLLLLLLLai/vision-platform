@@ -1,0 +1,2 @@
+"""Vision Platform application package."""
+
