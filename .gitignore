@@ -1,4 +1,6 @@
 .venv/
+.venv-*/
+**/.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -7,7 +9,11 @@ __pycache__/
 .env
 data/*.db
 data/*.sqlite3
+data/model_services/
 logs/*.log
+logs/*.json
+logs/*.pid
+logs/model_services/
 uploads/*
 !uploads/.gitkeep
 detection_results/*
@@ -17,3 +23,6 @@ embeddings/*
 vision-models/**
 !vision-models/README.md
 vision-models/**/.cache/
+test_images/*
+!test_images/.gitkeep
+third_party/

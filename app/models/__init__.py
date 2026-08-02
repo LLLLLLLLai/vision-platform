@@ -7,6 +7,7 @@ from app.models.inspection import (
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceImage
 from app.models.system import AlgorithmConfig, Product, Station
+from app.models.world import ModelRegistry, ObjectRelation, ProductScene, SceneObject
 
 __all__ = [
     "AlgorithmConfig",
@@ -14,10 +15,14 @@ __all__ = [
     "DetectionItemResult",
     "DetectionTask",
     "InspectionItem",
+    "ModelRegistry",
+    "ObjectRelation",
     "Product",
+    "ProductScene",
     "Recipe",
     "ReferenceGroup",
     "ReferenceImage",
     "RegionOfInterest",
+    "SceneObject",
     "Station",
 ]

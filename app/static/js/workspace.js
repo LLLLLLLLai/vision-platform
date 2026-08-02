@@ -6,7 +6,14 @@ const state = {
   references: [],
   details: new Map(),
   recipe: null,
+  worldScene: null,
   selectedRoiId: null,
+  discoveryCandidates: [],
+  harnessSegments: [],
+  harnessSegmentation: null,
+  discoveryEngine: null,
+  selectedCandidateId: null,
+  discovering: false,
   pendingRect: null,
   drawing: false,
   startPoint: null,
@@ -16,9 +23,14 @@ const state = {
   originalRect: null,
   savingRoi: false,
   draftRules: [],
+  vlmPromptDirty: false,
   detectionRecords: [],
+  modelServices: [],
+  activeModelServiceLogCode: null,
+  modelServiceLogTimer: null,
   testRecipe: null,
   testFile: null,
+  testDraft: null,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -145,7 +157,13 @@ function setRecipeStatus(status, recipe = null) {
 
 function resetEditor() {
   state.recipe = null;
+  state.worldScene = null;
   state.selectedRoiId = null;
+  state.discoveryCandidates = [];
+  state.harnessSegments = [];
+  state.harnessSegmentation = null;
+  state.discoveryEngine = null;
+  state.selectedCandidateId = null;
   state.pendingRect = null;
   state.workingRect = null;
   state.interactionMode = null;
@@ -157,14 +175,24 @@ function resetEditor() {
   baseImage.removeAttribute("src");
   baseImage.style.display = "none";
   byId("emptyStage").style.display = "grid";
+  byId("autoDiscoverButton").disabled = true;
+  renderDiscoveryCandidates();
   clearCanvas();
   renderConfiguredObjects();
 }
 
 async function loadRecipe(recipeId) {
-  state.recipe = await request(`${api}/configuration/recipes/${recipeId}`);
+  const recipeUrl = `${api}/configuration/recipes/${recipeId}`;
+  state.recipe = await request(recipeUrl);
+  state.worldScene = await request(`${api}/world/recipes/${recipeId}/scene`);
+  state.recipe = await request(recipeUrl);
   state.details.set(state.recipe.id, state.recipe);
   state.selectedRoiId = null;
+  state.discoveryCandidates = [];
+  state.harnessSegments = [];
+  state.harnessSegmentation = null;
+  state.discoveryEngine = null;
+  state.selectedCandidateId = null;
   state.pendingRect = null;
   state.workingRect = null;
   state.interactionMode = null;
@@ -174,12 +202,15 @@ async function loadRecipe(recipeId) {
     baseImage.src = `${state.recipe.base_image_url}?v=${Date.now()}`;
     baseImage.style.display = "block";
     byId("emptyStage").style.display = "none";
+    byId("autoDiscoverButton").disabled = false;
   } else {
     baseImage.removeAttribute("src");
     baseImage.style.display = "none";
     byId("emptyStage").style.display = "grid";
+    byId("autoDiscoverButton").disabled = true;
     clearCanvas();
   }
+  renderDiscoveryCandidates();
   renderConfiguredObjects();
 }
 
@@ -298,13 +329,226 @@ async function uploadBaseImage(file) {
     byId("baseImageInput").value = "";
     byId("emptyImageInput").value = "";
     await loadRecipe(recipe.id);
-    notify(
-      result.cleared_roi_count
-        ? `图片更换成功，已清除 ${result.cleared_roi_count} 个旧 ROI 及其校验规则，请重新框选`
-        : "图片上传成功，请在左侧拖动鼠标框出检测物体",
-    );
+    notify("图片上传成功，正在自动解析可检测物体……", "info", false);
+    await discoverObjects();
   } catch (error) {
     notify(error.message, "danger");
+  }
+}
+
+async function discoverObjects() {
+  if (!state.recipe?.base_image_url || state.discovering) return;
+  state.discovering = true;
+  state.discoveryCandidates = [];
+  state.harnessSegments = [];
+  state.harnessSegmentation = null;
+  state.discoveryEngine = null;
+  state.selectedCandidateId = null;
+  byId("discoveryOverlay").hidden = false;
+  byId("autoDiscoverButton").disabled = true;
+  renderDiscoveryCandidates();
+  drawCanvas();
+  try {
+    const result = await request(`${api}/algorithms/discover`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipe_id: state.recipe.id,
+        object_types: [
+          "fuse", "screw", "connector", "wiring harness connection",
+          "PCBA", "busbar", "relay", "terminal", "label",
+        ],
+        max_objects: 60,
+      }),
+    });
+    const allCandidates = [
+      ...(result.candidates || []),
+      ...(result.segmentation_candidates || []),
+    ];
+    state.discoveryCandidates = allCandidates.map((candidate) => ({
+      ...candidate,
+      selected: true,
+    }));
+    state.harnessSegmentation = result.harness_segmentation || null;
+    state.harnessSegments = result.harness_segmentation?.segments || [];
+    state.discoveryEngine = result.engine || "QWEN3_VL + GROUNDING_DINO";
+    state.selectedCandidateId = state.discoveryCandidates[0]?.candidate_id || null;
+    renderDiscoveryCandidates();
+    drawCanvas();
+    notify(
+      state.discoveryCandidates.length
+        ? `自动解析完成：生成 ${state.discoveryCandidates.length} 个候选物体，其中包含 ${state.harnessSegments.length} 段线束分割坐标。请检查后确认。`
+        : "自动解析未找到可靠候选物体，你仍可直接在图片上手动画框。",
+      state.discoveryCandidates.length ? "success" : "warning",
+      false,
+    );
+  } catch (error) {
+    state.discoveryCandidates = [];
+    state.harnessSegments = [];
+    state.harnessSegmentation = null;
+    state.discoveryEngine = null;
+    renderDiscoveryCandidates();
+    drawCanvas();
+    notify(`${error.message}。当前仍可直接在图片上手动画框。`, "warning", false);
+  } finally {
+    state.discovering = false;
+    byId("discoveryOverlay").hidden = true;
+    byId("autoDiscoverButton").disabled = false;
+  }
+}
+
+function candidateRect(candidate) {
+  return {
+    x: candidate.x_ratio * canvas.width,
+    y: candidate.y_ratio * canvas.height,
+    width: candidate.width_ratio * canvas.width,
+    height: candidate.height_ratio * canvas.height,
+  };
+}
+
+function selectedCandidate() {
+  return state.discoveryCandidates.find(
+    (candidate) => candidate.candidate_id === state.selectedCandidateId,
+  ) || null;
+}
+
+function selectCandidate(candidateId) {
+  state.selectedCandidateId = candidateId;
+  state.selectedRoiId = null;
+  state.pendingRect = null;
+  state.workingRect = null;
+  renderDiscoveryCandidates();
+  renderConfiguredObjects();
+  drawCanvas();
+}
+
+function deleteDiscoveryCandidate(candidateId) {
+  const candidate = state.discoveryCandidates.find((item) => item.candidate_id === candidateId);
+  if (!candidate) return;
+  state.discoveryCandidates = state.discoveryCandidates.filter(
+    (item) => item.candidate_id !== candidateId,
+  );
+  if (candidate.source_segment_id) {
+    state.harnessSegments = state.harnessSegments.filter(
+      (segment) => segment.segment_id !== candidate.source_segment_id,
+    );
+    if (state.harnessSegmentation?.segments) {
+      state.harnessSegmentation.segments = state.harnessSegmentation.segments.filter(
+        (segment) => segment.segment_id !== candidate.source_segment_id,
+      );
+    }
+  }
+  if (state.selectedCandidateId === candidateId) {
+    state.selectedCandidateId = state.discoveryCandidates[0]?.candidate_id || null;
+    state.workingRect = null;
+    state.originalRect = null;
+    state.pointerCandidateRoi = null;
+    state.interactionMode = null;
+  }
+  renderDiscoveryCandidates();
+  drawCanvas();
+  notify(`候选框“${candidate.label || candidateId}”已删除`, "info", false);
+}
+
+function renderDiscoveryCandidates() {
+  const candidates = state.discoveryCandidates;
+  byId("candidateObjectSection").hidden = !candidates.length && !state.harnessSegments.length;
+  const segmentSummary = byId("harnessSegmentSummary");
+  segmentSummary.hidden = !state.harnessSegments.length;
+  const supportedScope = state.harnessSegmentation?.supported_scope || "线束";
+  byId("harnessSegmentCount").textContent = state.harnessSegments.length
+    ? `${state.harnessSegments.length} 段 · ${supportedScope} · 已叠加像素级轮廓`
+    : "未分割到线束";
+  byId("candidateEngineBadge").textContent = state.discoveryEngine
+    ? "Grounding + SAM2 定位结果"
+    : "等待定位";
+  byId("candidateObjectList").innerHTML = candidates.map((candidate) => {
+    const isSegment = candidate.target_kind === "HARNESS_SEGMENT";
+    const recommended = candidate.batch_confirmable !== false && (
+      candidate.review_status === "RECOMMENDED"
+      || (candidate.confidence || 0) >= 0.40
+    );
+    const source = isSegment
+      ? (candidate.engine === "SAM2.1_HIERA_SMALL" ? "SAM2 像素分割" : "OpenCV 颜色分割")
+      : "Grounding DINO 定位";
+    const coordinates = `X ${Number(candidate.x_ratio || 0).toFixed(3)} · Y ${Number(candidate.y_ratio || 0).toFixed(3)} · W ${Number(candidate.width_ratio || 0).toFixed(3)} · H ${Number(candidate.height_ratio || 0).toFixed(3)}`;
+    return `
+    <article class="candidate-object-card ${candidate.candidate_id === state.selectedCandidateId ? "selected" : ""}"
+      data-candidate-id="${escapeHtml(candidate.candidate_id)}">
+      <div>
+        <strong>${escapeHtml(candidate.label)}</strong>
+        <small>${escapeHtml(candidate.object_type)} · ${escapeHtml(source)} · ${escapeHtml(coordinates)}</small>
+      </div>
+      <span class="candidate-confidence ${recommended ? "recommended" : "review-required"}">
+        ${recommended ? "建议确认" : "待人工复核"} · ${isSegment ? "分割" : "定位"} ${Math.round((candidate.confidence || 0) * 100)}%
+      </span>
+      <div class="candidate-card-actions">
+        <button class="btn btn-sm btn-outline-primary confirm-candidate" type="button">确认为检测对象</button>
+        <button class="btn btn-sm btn-outline-danger delete-candidate" type="button" title="删除此候选框">删除</button>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+function candidateCode(candidate, usedCodes) {
+  const prefix = normalizeCode(candidate.object_type || "OBJECT") || "OBJECT";
+  let index = 1;
+  let code = `${prefix}_${String(index).padStart(2, "0")}`;
+  while (usedCodes.has(code)) {
+    index += 1;
+    code = `${prefix}_${String(index).padStart(2, "0")}`;
+  }
+  usedCodes.add(code);
+  return code;
+}
+
+async function confirmCandidates(candidates) {
+  if (!candidates.length || state.savingRoi) return;
+  state.savingRoi = true;
+  const createdIds = [];
+  const usedCodes = new Set((state.recipe?.rois || []).map((roi) => roi.code));
+  try {
+    for (const [index, candidate] of candidates.entries()) {
+      const created = await request(`${api}/configuration/recipes/${state.recipe.id}/rois`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: candidateCode(candidate, usedCodes),
+          name: candidate.label,
+          object_type: candidate.object_type || "OBJECT",
+          padding: 0,
+          sort_order: state.recipe.rois.length + index,
+          x_ratio: candidate.x_ratio,
+          y_ratio: candidate.y_ratio,
+          width_ratio: candidate.width_ratio,
+          height_ratio: candidate.height_ratio,
+        }),
+      });
+      createdIds.push(created.id);
+      try {
+        await request(`${api}/configuration/rois/${created.id}/capture-reference`, {
+          method: "POST",
+        });
+      } catch (_error) {
+        // The ROI remains usable even if its reference crop is generated later.
+      }
+    }
+    const confirmedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
+    const remainingCandidates = state.discoveryCandidates.filter(
+      (candidate) => !confirmedIds.has(candidate.candidate_id),
+    );
+    await loadRecipe(state.recipe.id);
+    await waitForBaseImage();
+    state.discoveryCandidates = remainingCandidates;
+    state.selectedCandidateId = remainingCandidates[0]?.candidate_id || null;
+    renderDiscoveryCandidates();
+    drawCanvas();
+    if (createdIds.length === 1) openObjectModal(createdIds[0]);
+    notify(`已确认 ${createdIds.length} 个候选物体，检测框已写入产品世界模型。`, "success", false);
+  } catch (error) {
+    notify(error.message, "danger", false);
+  } finally {
+    state.savingRoi = false;
   }
 }
 
@@ -361,6 +605,45 @@ function drawHandles(rect) {
 function drawCanvas() {
   clearCanvas();
   if (!state.recipe) return;
+  state.harnessSegments.forEach((segment) => {
+    const polygon = segment.polygon || [];
+    if (polygon.length < 3) return;
+    context.beginPath();
+    polygon.forEach(([xRatio, yRatio], pointIndex) => {
+      const x = xRatio * canvas.width;
+      const y = yRatio * canvas.height;
+      if (pointIndex === 0) context.moveTo(x, y);
+      else context.lineTo(x, y);
+    });
+    context.closePath();
+    const sam2Segment = segment.engine === "SAM2.1_HIERA_SMALL";
+    context.fillStyle = sam2Segment ? "rgba(6,182,212,.22)" : "rgba(249,115,22,.25)";
+    context.strokeStyle = sam2Segment ? "#0891b2" : "#f97316";
+    context.lineWidth = 3;
+    context.fill();
+    context.stroke();
+  });
+  state.discoveryCandidates.forEach((candidate) => {
+    const selected = candidate.candidate_id === state.selectedCandidateId;
+    const segmented = candidate.target_kind === "HARNESS_SEGMENT";
+    const rect = selected && state.workingRect ? state.workingRect : candidateRect(candidate);
+    const { x, y, width, height } = rect;
+    context.fillStyle = segmented
+      ? (selected ? "rgba(6,182,212,.16)" : "rgba(6,182,212,.06)")
+      : (selected ? "rgba(124,58,237,.14)" : "rgba(124,58,237,.07)");
+    context.strokeStyle = segmented
+      ? (selected ? "#0e7490" : "#0891b2")
+      : (selected ? "#6d28d9" : "#8b5cf6");
+    context.lineWidth = selected ? 4 : 2;
+    context.setLineDash([8, 5]);
+    context.fillRect(x, y, width, height);
+    context.strokeRect(x, y, width, height);
+    context.setLineDash([]);
+    context.fillStyle = segmented ? "#0e7490" : "#5b21b6";
+    context.font = "700 12px Segoe UI, sans-serif";
+    context.fillText(`${segmented ? "分割" : "AI"} · ${candidate.label}`, x + 7, y + 17);
+    if (selected) drawHandles(rect);
+  });
   state.recipe.rois.forEach((roi) => {
     const selected = roi.id === state.selectedRoiId;
     const rect = selected && state.workingRect ? state.workingRect : roiRect(roi);
@@ -398,10 +681,18 @@ function hitRoi(point) {
   });
 }
 
+function hitCandidate(point) {
+  return [...state.discoveryCandidates].reverse().find((candidate) => {
+    const { x, y, width, height } = candidateRect(candidate);
+    return point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height;
+  });
+}
+
 function hitResizeHandle(point) {
+  const candidate = selectedCandidate();
   const roi = selectedRoi();
-  if (!roi) return null;
-  const rect = state.workingRect || roiRect(roi);
+  if (!candidate && !roi) return null;
+  const rect = state.workingRect || (candidate ? candidateRect(candidate) : roiRect(roi));
   const handles = {
     nw: [rect.x, rect.y],
     ne: [rect.x + rect.width, rect.y],
@@ -417,21 +708,31 @@ canvas.addEventListener("pointerdown", (event) => {
   const point = pointerPosition(event);
   const handle = hitResizeHandle(point);
   const existing = hitRoi(point);
+  const candidate = existing ? null : hitCandidate(point);
   state.drawing = true;
   state.startPoint = point;
-  state.pointerCandidateRoi = existing;
+  state.pointerCandidateRoi = existing || candidate;
   state.pendingRect = null;
   state.workingRect = null;
-  if (handle && selectedRoi()) {
+  if (handle && selectedCandidate()) {
+    state.interactionMode = `candidate-resize-${handle}`;
+    state.originalRect = candidateRect(selectedCandidate());
+  } else if (handle && selectedRoi()) {
     state.interactionMode = `resize-${handle}`;
     state.originalRect = roiRect(selectedRoi());
   } else if (existing) {
+    state.selectedCandidateId = null;
     if (existing.id !== state.selectedRoiId) selectRoi(existing.id);
     state.interactionMode = "potential-move";
     state.originalRect = roiRect(existing);
+  } else if (candidate) {
+    if (candidate.candidate_id !== state.selectedCandidateId) selectCandidate(candidate.candidate_id);
+    state.interactionMode = "candidate-potential-move";
+    state.originalRect = candidateRect(candidate);
   } else {
     state.interactionMode = "draw";
     state.selectedRoiId = null;
+    state.selectedCandidateId = null;
   }
   canvas.setPointerCapture(event.pointerId);
 });
@@ -444,6 +745,9 @@ canvas.addEventListener("pointermove", (event) => {
   if (state.interactionMode === "potential-move" && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
     state.interactionMode = "move";
   }
+  if (state.interactionMode === "candidate-potential-move" && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    state.interactionMode = "candidate-move";
+  }
   if (state.interactionMode === "draw") {
     state.pendingRect = clampRect({
       x: Math.min(state.startPoint.x, point.x),
@@ -451,14 +755,14 @@ canvas.addEventListener("pointermove", (event) => {
       width: Math.abs(dx),
       height: Math.abs(dy),
     });
-  } else if (state.interactionMode === "move") {
+  } else if (["move", "candidate-move"].includes(state.interactionMode)) {
     state.workingRect = clampRect({
       ...state.originalRect,
       x: state.originalRect.x + dx,
       y: state.originalRect.y + dy,
     });
-  } else if (state.interactionMode?.startsWith("resize-")) {
-    const handle = state.interactionMode.replace("resize-", "");
+  } else if (state.interactionMode?.includes("resize-")) {
+    const handle = state.interactionMode.replace("candidate-resize-", "").replace("resize-", "");
     const original = state.originalRect;
     const next = { ...original };
     if (handle.includes("n")) {
@@ -491,9 +795,15 @@ canvas.addEventListener("pointerup", async () => {
     await persistRoiRect(selectedRoi(), state.workingRect);
     return;
   }
+  if ((mode === "candidate-move" || mode?.startsWith("candidate-resize-")) && state.workingRect && selectedCandidate()) {
+    persistCandidateRect(selectedCandidate(), state.workingRect);
+    return;
+  }
   state.pendingRect = null;
   state.workingRect = null;
-  if (candidate) {
+  if (candidate?.candidate_id) {
+    selectCandidate(candidate.candidate_id);
+  } else if (candidate) {
     selectRoi(candidate.id);
   } else {
     drawCanvas();
@@ -511,10 +821,28 @@ function selectedRoi() {
 
 function selectRoi(roiId) {
   state.selectedRoiId = roiId;
+  state.selectedCandidateId = null;
   state.pendingRect = null;
   state.workingRect = null;
   renderConfiguredObjects();
   drawCanvas();
+}
+
+function persistCandidateRect(candidate, rect) {
+  candidate.x_ratio = rect.x / canvas.width;
+  candidate.y_ratio = rect.y / canvas.height;
+  candidate.width_ratio = rect.width / canvas.width;
+  candidate.height_ratio = rect.height / canvas.height;
+  candidate.bbox = [
+    candidate.x_ratio,
+    candidate.y_ratio,
+    candidate.x_ratio + candidate.width_ratio,
+    candidate.y_ratio + candidate.height_ratio,
+  ];
+  state.workingRect = null;
+  renderDiscoveryCandidates();
+  drawCanvas();
+  notify("AI 候选框位置和大小已调整，确认后才会写入正式配方。", "info", false);
 }
 
 async function createRoiFromRect(rect) {
@@ -592,11 +920,24 @@ async function persistRoiRect(roi, rect) {
         height_ratio: rect.height / canvas.height,
       }),
     });
+    let referenceWarning = null;
+    try {
+      const reference = await request(`${api}/configuration/rois/${roi.id}/capture-reference`, {
+        method: "POST",
+      });
+      referenceWarning = reference.embedding_warning || null;
+    } catch (error) {
+      referenceWarning = error.message;
+    }
     const roiId = roi.id;
     state.workingRect = null;
     await loadRecipe(state.recipe.id);
     selectRoi(roiId);
-    notify("检测区域位置和大小已自动保存", "success", false);
+    if (referenceWarning) {
+      notify(`检测区域已保存，标准参考图已更新；特征向量待重试：${referenceWarning}`, "warning", false);
+    } else {
+      notify("检测区域、标准参考图和特征向量已同步更新", "success", false);
+    }
   } catch (error) {
     state.workingRect = null;
     drawCanvas();
@@ -611,7 +952,22 @@ const capabilityMeta = {
   REFERENCE_SIMILARITY: ["型号相似度", "◫"],
   COLOR_RATIO: ["颜色校验", "●"],
   OCR_TEXT: ["OCR 文字", "Aa"],
+  VLM_JUDGEMENT: ["复杂装配判断", "AI"],
 };
+
+const sceneMeta = {
+  OBJECT_EXISTENCE: { model: "DINOv2", ruleType: "EXISTENCE", label: "物体存在" },
+  COLOR_ATTRIBUTE: { model: "OpenCV", ruleType: "COLOR", label: "颜色" },
+  TEXT_OCR: { model: "PaddleOCR", ruleType: "TEXT", label: "OCR 文字识别" },
+};
+
+function inferItemScene(item, roi) {
+  const configured = item?.rule_json?.scene_type;
+  if (configured && sceneMeta[configured]) return configured;
+  if (item?.capability === "OCR_TEXT") return "TEXT_OCR";
+  if (item?.capability === "COLOR_RATIO") return "COLOR_ATTRIBUTE";
+  return "OBJECT_EXISTENCE";
+}
 
 function itemCapability(item) {
   return ["PRESENCE", "EXISTENCE"].includes(item.inspection_type)
@@ -641,7 +997,7 @@ function renderConfiguredObjects() {
           <div class="configured-object-heading">
             <span>${String(index + 1).padStart(2, "0")}</span>
             <div>
-              <small>${escapeHtml(roi.code)} · ${escapeHtml(roi.object_type || "OBJECT")}</small>
+              <small>${escapeHtml(roi.code)} · ${escapeHtml(roi.object_type || "OBJECT")} · WORLD#${escapeHtml(roi.scene_object_id || "AUTO")}</small>
               <strong>${escapeHtml(roi.name)}</strong>
             </div>
             <b>${roi.inspection_items.length} 条规则</b>
@@ -651,6 +1007,9 @@ function renderConfiguredObjects() {
               ? roi.inspection_items.map((item) => `
                   <span>${escapeHtml(capabilityMeta[itemCapability(item)]?.[0] || item.capability)}-${escapeHtml(describeRule(item))}</span>`).join("")
               : "<em>尚未配置校验规则</em>"}
+            ${roi.inspection_items.some((item) => item.rule_json.vlm_review_enabled)
+              ? '<span>Qwen 边界复核</span>'
+              : ""}
           </div>
           <div class="configured-object-actions">
             <button class="btn btn-sm btn-outline-primary edit-object" type="button">编辑规则</button>
@@ -694,11 +1053,12 @@ function closeObjectModal() {
 function populateObjectEditor() {
   const roi = selectedRoi();
   if (!roi) return;
+  resetInlineRoiTest();
   byId("roiRuleStatus").textContent = "";
   byId("roiRuleStatus").className = "roi-rule-status";
-  byId("selectedObjectTitle").textContent = roi.name;
+  byId("selectedObjectTitle").textContent = roi.code;
+  byId("roiObjectType").value = roi.object_type || "OBJECT";
   const rect = roiRect(roi);
-  byId("roiCode").value = roi.code;
   byId("roiPointX").value = `${Math.round(rect.x)} px`;
   byId("roiPointY").value = `${Math.round(rect.y)} px`;
   byId("roiPointWidth").value = `${Math.round(rect.width)} px`;
@@ -710,20 +1070,42 @@ function populateObjectEditor() {
       return {
         type: "EXISTENCE",
         value: String(item.rule_json.min_similarity ?? 0.9),
-        locked: true,
+        scene: inferItemScene(item, roi),
       };
     }
     if (capability === "COLOR_RATIO") {
-      return { type: "COLOR", value: String(item.expected_json.color || "").toLowerCase() };
+      return { type: "COLOR", scene: inferItemScene(item, roi), value: String(item.expected_json.color || "").toLowerCase() };
     }
-    return { type: "TEXT", value: String(item.expected_json.text || "") };
-  });
-  const existenceRule = configuredRules.find((rule) => rule.type === "EXISTENCE");
-  state.draftRules = [
-    existenceRule || { type: "EXISTENCE", value: "0.9", locked: true },
-    ...configuredRules.filter((rule) => rule.type !== "EXISTENCE"),
-  ];
+    if (capability === "VLM_JUDGEMENT") return null;
+    return { type: "TEXT", scene: inferItemScene(item, roi), value: String(item.expected_json.text || "") };
+  }).filter(Boolean);
+  const existenceItem = roi.inspection_items.find(
+    (item) => itemCapability(item) === "EXISTENCE" || item.capability === "REFERENCE_SIMILARITY",
+  );
+  const reviewItem = roi.inspection_items.find((item) => item.rule_json.vlm_review_enabled)
+    || existenceItem;
+  const reviewRule = reviewItem?.rule_json || {};
+  const minimumSimilarity = Number(reviewRule.min_similarity ?? 0.9);
+  byId("vlmReviewEnabled").checked = Boolean(reviewRule.vlm_review_enabled);
+  byId("vlmReviewMode").value = String(reviewRule.vlm_review_mode || "ALWAYS");
+  byId("vlmReviewLower").value = String(
+    reviewRule.vlm_review_lower ?? Math.max(0, minimumSimilarity - 0.05).toFixed(2),
+  );
+  byId("vlmReviewUpper").value = String(
+    reviewRule.vlm_review_upper ?? Math.min(1, minimumSimilarity + 0.03).toFixed(2),
+  );
+  state.vlmPromptDirty = reviewRule.vlm_prompt_auto === false;
+  byId("vlmReviewPrompt").value = String(reviewRule.vlm_prompt || "");
+  state.draftRules = configuredRules.length
+    ? configuredRules
+    : [{
+        type: "EXISTENCE",
+        scene: "OBJECT_EXISTENCE",
+        value: "0.9",
+      }];
   renderRuleRows();
+  refreshVlmPrompt(!reviewRule.vlm_prompt || !state.vlmPromptDirty);
+  syncVlmReviewMode();
 }
 
 function updateRoiReferencePreview(roi) {
@@ -772,8 +1154,83 @@ const validationTypeLabels = {
 
 function ruleValuePlaceholder(type) {
   if (type === "EXISTENCE") return "0.9";
-  if (type === "COLOR") return "例如 yellow";
+  if (type === "COLOR") return "自动识别，可手动修改";
   return "输入需要校验的文字";
+}
+
+const colorDisplayNames = {
+  yellow: "黄色",
+  red: "红色",
+  blue: "蓝色",
+  green: "绿色",
+  white: "白色",
+  black: "黑色",
+  orange: "橙色",
+  gray: "灰色",
+};
+
+function colorRuleValueEditor(rule, index) {
+  const color = String(rule.value || "").toLowerCase();
+  const colorName = colorDisplayNames[color] || color || "待识别";
+  const detail = rule.colorAnalysis
+    ? `${rule.colorAnalysis.display_name} · ${(Number(rule.colorAnalysis.ratio) * 100).toFixed(1)}%`
+    : colorName;
+  return `
+    <div class="color-rule-editor">
+      <span class="color-rule-swatch" style="background:${escapeHtml(rule.colorAnalysis?.hex || color || "#e2e8f0")}"></span>
+      <input class="form-control rule-row-value" value="${escapeHtml(rule.value)}" placeholder="${ruleValuePlaceholder(rule.type)}">
+      <button class="btn btn-sm btn-outline-primary detect-rule-color" type="button" data-color-rule-index="${index}">自动识别</button>
+      <small>${escapeHtml(detail)}</small>
+    </div>`;
+}
+
+const objectTypeLabels = {
+  FUSE: "保险丝",
+  SCREW: "螺丝",
+  CONNECTOR: "连接器",
+  HARNESS: "线束",
+  PCBA: "PCBA",
+  BUSBAR: "铜排",
+  LABEL: "标签",
+  OBJECT: "目标物体",
+};
+
+function rulePromptDescription(rule) {
+  const scene = sceneMeta[rule.scene]?.label || "检测场景";
+  if (rule.type === "EXISTENCE") return `${scene}：目标必须存在且与标准参考图一致，相似度阈值为${rule.value || "未填写"}`;
+  if (rule.type === "COLOR") return `${scene}：目标颜色应为${rule.value || "未填写"}`;
+  if (rule.type === "TEXT") return `${scene}：识别文字必须包含“${rule.value || "未填写"}”`;
+  return `${scene}：${rule.value || "未填写"}`;
+}
+
+function generatedVlmPrompt() {
+  const objectType = byId("roiObjectType").value || "OBJECT";
+  const objectName = objectTypeLabels[objectType] || objectType;
+  const requirements = state.draftRules.map((rule, index) => `${index + 1}. ${rulePromptDescription(rule)}`).join("\n");
+  return `只检查图片中的${objectName}检测区域，不要分析区域外内容。\n请复核以下规则：\n${requirements || "1. 检查目标状态是否符合要求"}\n不得根据常识猜测；看不清时返回UNCERTAIN。只返回结构化JSON，包含result、confidence和reason。`;
+}
+
+function refreshVlmPrompt(force = false) {
+  if (state.vlmPromptDirty && !force) return;
+  byId("vlmReviewPrompt").value = generatedVlmPrompt();
+  state.vlmPromptDirty = false;
+}
+
+function syncVlmReviewMode() {
+  const enabled = byId("vlmReviewEnabled").checked;
+  const lowConfidence = byId("vlmReviewMode").value === "LOW_CONFIDENCE";
+  byId("vlmReviewMode").disabled = !enabled;
+  byId("vlmReviewLower").disabled = !enabled || !lowConfidence;
+  byId("vlmReviewUpper").disabled = !enabled || !lowConfidence;
+  byId("vlmReviewLowerField").hidden = !enabled || !lowConfidence;
+  byId("vlmReviewUpperField").hidden = !enabled || !lowConfidence;
+  byId("vlmReviewPrompt").disabled = !enabled;
+  byId("regenerateVlmPrompt").disabled = !enabled;
+  byId("vlmReviewModeNote").textContent = !enabled
+    ? "未启用 VLM 复核，生产检测和当前 ROI 测试均只显示主模型结果。"
+    : lowConfidence
+      ? "生产检测仅在主模型分数处于下限与上限之间时复核；低于下限直接 NG，高于上限直接采用主模型。测试当前 ROI 时仍强制执行复核，便于对比。"
+      : "生产检测每次都执行 VLM 复核，不参考上下限。测试当前 ROI 时同样执行复核。";
 }
 
 function renderRuleRows() {
@@ -781,15 +1238,14 @@ function renderRuleRows() {
     ? state.draftRules.map((rule, index) => `
         <div class="rule-table-row" data-rule-index="${index}">
           <span class="rule-row-index">${index + 1}</span>
-          <select class="form-select rule-row-type" ${rule.locked ? "disabled" : ""}>
-            ${rule.locked ? '<option value="EXISTENCE" selected>存在校验</option>' : ""}
-            <option value="COLOR" ${rule.type === "COLOR" ? "selected" : ""}>颜色校验</option>
-            <option value="TEXT" ${rule.type === "TEXT" ? "selected" : ""}>文本校验</option>
+          <select class="form-select rule-row-scene">
+            ${Object.entries(sceneMeta).map(([value, meta]) => `<option value="${value}" ${rule.scene === value ? "selected" : ""}>${escapeHtml(meta.label)}</option>`).join("")}
           </select>
-          <input class="form-control rule-row-value" value="${escapeHtml(rule.value)}" placeholder="${ruleValuePlaceholder(rule.type)}" ${rule.type === "EXISTENCE" ? 'type="number" min="0" max="1" step="0.01"' : ""}>
-          ${rule.locked
-            ? '<span class="default-rule-label">默认规则</span>'
-            : '<button class="btn btn-sm btn-outline-danger remove-rule-row" type="button">删除</button>'}
+          <span class="rule-capability-label">${escapeHtml(validationTypeLabels[rule.type])}</span>
+          ${rule.type === "COLOR"
+            ? colorRuleValueEditor(rule, index)
+            : `<input class="form-control rule-row-value" value="${escapeHtml(rule.value)}" placeholder="${ruleValuePlaceholder(rule.type)}" ${rule.type === "EXISTENCE" ? 'type="number" min="0" max="1" step="0.01"' : ""}>`}
+          <button class="btn btn-sm btn-outline-danger remove-rule-row" type="button">删除</button>
         </div>`).join("")
     : `
       <div class="empty-rule-state table-empty">
@@ -799,39 +1255,119 @@ function renderRuleRows() {
 }
 
 function addRuleRow() {
-  state.draftRules.push({ type: "COLOR", value: "" });
+  const index = state.draftRules.length;
+  state.draftRules.push({ type: "COLOR", scene: "COLOR_ATTRIBUTE", value: "", colorAnalysis: null });
   renderRuleRows();
+  refreshVlmPrompt();
+  detectColorForRule(index);
+}
+
+async function detectColorForRule(index) {
+  const roi = selectedRoi();
+  const rule = state.draftRules[index];
+  if (!roi || !rule || rule.type !== "COLOR") return;
+  const button = byId("ruleRows").querySelector(`[data-color-rule-index="${index}"]`);
+  if (button) {
+    button.disabled = true;
+    button.textContent = "识别中...";
+  }
+  try {
+    const result = await request(`${api}/configuration/rois/${roi.id}/analyze-color`, {
+      method: "POST",
+    });
+    rule.value = String(result.color || "").toLowerCase();
+    rule.colorAnalysis = result;
+    renderRuleRows();
+    refreshVlmPrompt();
+    notify(`已识别为${result.display_name}，颜色占比 ${(Number(result.ratio) * 100).toFixed(1)}%，可手动修改`, "success", false);
+  } catch (error) {
+    notify(`颜色自动识别失败：${error.message}`, "warning", false);
+    renderRuleRows();
+  }
 }
 
 async function saveRoiRules() {
   const roi = selectedRoi();
-  if (!roi) return;
+  if (!roi) return false;
+  if (!state.draftRules.length) {
+    notify("请至少配置一条检测场景规则", "warning", false);
+    return false;
+  }
   for (const rule of state.draftRules) {
     const value = rule.value.trim();
-    if (!value) return notify("每条规则都必须填写校验值", "warning", false);
+    if (!value) {
+      notify("每条规则都必须填写校验值", "warning", false);
+      return false;
+    }
     if (rule.type === "EXISTENCE" && (!Number.isFinite(Number(value)) || Number(value) <= 0 || Number(value) > 1)) {
-      return notify("存在校验的相似度阈值必须大于 0 且不超过 1", "warning", false);
+      notify("存在校验的相似度阈值必须大于 0 且不超过 1", "warning", false);
+      return false;
     }
     if (rule.type === "COLOR" && !/^[a-zA-Z]+$/.test(value)) {
-      return notify("颜色校验请填写英文颜色名称，例如 yellow", "warning", false);
+      notify("颜色校验请填写英文颜色名称，例如 yellow", "warning", false);
+      return false;
     }
+  }
+  const objectName = roi.code;
+  const objectType = byId("roiObjectType").value;
+  const reviewEnabled = byId("vlmReviewEnabled").checked;
+  const reviewMode = byId("vlmReviewMode").value;
+  const reviewLower = Number(byId("vlmReviewLower").value);
+  const reviewUpper = Number(byId("vlmReviewUpper").value);
+  if (reviewEnabled && !byId("vlmReviewPrompt").value.trim()) refreshVlmPrompt(true);
+  const reviewPrompt = byId("vlmReviewPrompt").value.trim();
+  if (
+    reviewEnabled
+    && reviewMode === "LOW_CONFIDENCE"
+    && (!Number.isFinite(reviewLower)
+      || !Number.isFinite(reviewUpper)
+      || reviewLower < 0
+      || reviewUpper > 1
+      || reviewLower > reviewUpper)
+  ) {
+    notify("VLM 复核区间必须位于 0 到 1，且下限不能大于上限", "warning", false);
+    return false;
   }
 
   const saveButton = byId("saveRoiRules");
+  const testButton = byId("testRoiRules");
   const status = byId("roiRuleStatus");
   saveButton.disabled = true;
+  testButton.disabled = true;
   saveButton.textContent = "正在保存…";
   status.textContent = "正在保存规则并生成标准参考图…";
   status.className = "roi-rule-status working";
   try {
-    const reference = await request(`${api}/configuration/rois/${roi.id}/capture-reference`, {
-      method: "POST",
+    const rect = roiRect(roi);
+    await request(`${api}/configuration/rois/${roi.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: roi.code,
+        name: objectName,
+        object_type: objectType,
+        padding: roi.padding || 0,
+        sort_order: roi.sort_order || 0,
+        x_ratio: rect.x / canvas.width,
+        y_ratio: rect.y / canvas.height,
+        width_ratio: rect.width / canvas.width,
+        height_ratio: rect.height / canvas.height,
+      }),
     });
+    let reference = roi.reference || null;
+    let embeddingWarning = null;
+    if (state.draftRules.some((rule) => rule.type === "EXISTENCE")) {
+      reference = await request(`${api}/configuration/rois/${roi.id}/capture-reference`, {
+        method: "POST",
+      });
+      embeddingWarning = reference.embedding_warning || null;
+    }
     for (const item of roi.inspection_items) {
       await request(`${api}/configuration/inspection-items/${item.id}`, { method: "DELETE" });
     }
     for (const [index, rule] of state.draftRules.entries()) {
       const value = rule.value.trim();
+      const sceneType = rule.scene || "OBJECT_EXISTENCE";
       let payload;
       if (rule.type === "EXISTENCE") {
         payload = {
@@ -843,7 +1379,18 @@ async function saveRoiRules() {
             class_code: reference.class_code,
             reference_image_url: reference.image_url,
           },
-          rule_json: { min_similarity: Number(value) },
+          rule_json: {
+            min_similarity: Number(value),
+            scene_type: sceneType,
+            primary_model: "DINOv2",
+            vlm_review_enabled: reviewEnabled,
+            vlm_review_mode: reviewMode,
+            vlm_review_lower: reviewLower,
+            vlm_review_upper: reviewUpper,
+            vlm_prompt: reviewPrompt,
+            vlm_prompt_auto: !state.vlmPromptDirty,
+            vlm_uncertain_result: "NG",
+          },
         };
       } else if (rule.type === "COLOR") {
         payload = {
@@ -851,15 +1398,39 @@ async function saveRoiRules() {
           capability: "COLOR_RATIO",
           reference_group_id: null,
           expected_json: { color: value.toUpperCase() },
-          rule_json: { min_ratio: 0.15, max_ratio: 1 },
+          rule_json: {
+            min_ratio: 0.15,
+            max_ratio: 1,
+            scene_type: sceneType,
+            primary_model: "OpenCV",
+            vlm_review_enabled: reviewEnabled,
+            vlm_review_mode: reviewMode,
+            vlm_review_lower: reviewLower,
+            vlm_review_upper: reviewUpper,
+            vlm_prompt: reviewPrompt,
+            vlm_prompt_auto: !state.vlmPromptDirty,
+            vlm_uncertain_result: "NG",
+          },
         };
-      } else {
+      } else if (rule.type === "TEXT") {
         payload = {
           inspection_type: "TEXT",
           capability: "OCR_TEXT",
           reference_group_id: null,
           expected_json: { text: value },
-          rule_json: { operator: "CONTAINS", case_sensitive: false },
+          rule_json: {
+            operator: "CONTAINS",
+            case_sensitive: false,
+            scene_type: sceneType,
+            primary_model: "PaddleOCR",
+            vlm_review_enabled: reviewEnabled,
+            vlm_review_mode: reviewMode,
+            vlm_review_lower: reviewLower,
+            vlm_review_upper: reviewUpper,
+            vlm_prompt: reviewPrompt,
+            vlm_prompt_auto: !state.vlmPromptDirty,
+            vlm_uncertain_result: "NG",
+          },
         };
       }
       await request(`${api}/configuration/rois/${roi.id}/inspection-items`, {
@@ -874,21 +1445,273 @@ async function saveRoiRules() {
         }),
       });
     }
+    const scene = await request(`${api}/world/recipes/${state.recipe.id}/sync`, {
+      method: "POST",
+    });
+    const worldObject = scene.objects.find((item) => item.roi_ids.includes(roi.id));
+    if (worldObject) {
+      await request(`${api}/world/objects/${worldObject.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: objectName,
+          object_type: objectType,
+          parent_object_id: worldObject.parent_object_id,
+          location_mode: "FIXED_ROI",
+          expected_state: worldObject.expected_state,
+          perception_config: {
+            ...worldObject.perception_config,
+            vlm_review_enabled: reviewEnabled,
+            vlm_review_mode: reviewMode,
+            vlm_review_lower: reviewLower,
+            vlm_review_upper: reviewUpper,
+          },
+          sort_order: roi.sort_order || 0,
+          enabled: true,
+        }),
+      });
+    }
     const roiId = roi.id;
     await loadRecipe(state.recipe.id);
     selectRoi(roiId);
     populateObjectEditor();
     status.textContent = "保存成功";
     status.className = "roi-rule-status success";
-    notify("当前 ROI 的校验规则已保存", "success", false);
+    notify(
+      embeddingWarning
+        ? "规则已保存；DINOv2当前不可用，参考向量已标记为待生成"
+        : "当前 ROI 的校验规则已保存",
+      embeddingWarning ? "warning" : "success",
+      false,
+    );
+    return true;
   } catch (error) {
     status.textContent = `保存失败：${error.message}`;
     status.className = "roi-rule-status error";
     notify(error.message, "danger", false);
+    return false;
   } finally {
     saveButton.disabled = false;
+    testButton.disabled = false;
     saveButton.textContent = "保存当前 ROI 规则";
   }
+}
+
+async function testCurrentRoiRules() {
+  const roi = selectedRoi();
+  const roiId = state.selectedRoiId;
+  const recipeId = state.recipe?.id;
+  if (!roi || !roiId || !recipeId) return;
+  if (!state.draftRules.length) {
+    notify("请至少配置一条校验规则后再测试", "warning", false);
+    return;
+  }
+  for (const rule of state.draftRules) {
+    const value = rule.value.trim();
+    if (!value) {
+      notify("每条规则都必须填写校验值", "warning", false);
+      return;
+    }
+    if (rule.type === "EXISTENCE" && (!Number.isFinite(Number(value)) || Number(value) <= 0 || Number(value) > 1)) {
+      notify("存在校验的相似度阈值必须大于 0 且不超过 1", "warning", false);
+      return;
+    }
+  }
+  const review = {
+    enabled: byId("vlmReviewEnabled").checked,
+    mode: byId("vlmReviewMode").value,
+    lower: Number(byId("vlmReviewLower").value),
+    upper: Number(byId("vlmReviewUpper").value),
+    prompt: byId("vlmReviewPrompt").value.trim(),
+    prompt_auto: !state.vlmPromptDirty,
+  };
+  const testButton = byId("testRoiRules");
+  const status = byId("roiRuleStatus");
+  testButton.disabled = true;
+  testButton.textContent = "正在测试…";
+  status.textContent = "正在执行当前 ROI 的临时规则，请稍候…";
+  status.className = "roi-rule-status working";
+  showInlineRoiTestLoading(roi, state.draftRules, review);
+  try {
+    let reference = roi.reference || null;
+    if (state.draftRules.some((rule) => rule.type === "EXISTENCE") && !reference?.group_id) {
+      reference = await request(`${api}/configuration/rois/${roi.id}/capture-reference`, {
+        method: "POST",
+      });
+    }
+    const rules = state.draftRules.map((rule) => ({
+      type: rule.type,
+      scene: rule.scene,
+      value: rule.value.trim(),
+      reference_group_id: rule.type === "EXISTENCE" ? reference?.group_id : null,
+      class_code: rule.type === "EXISTENCE" ? reference?.class_code : null,
+    }));
+    const response = await fetch(state.recipe.base_image_url);
+    if (!response.ok) throw new Error("无法读取当前配方图片");
+    const blob = await response.blob();
+    const file = new File([blob], `roi-${roiId}-test.jpg`, {
+      type: blob.type || "image/jpeg",
+    });
+    const data = new FormData();
+    data.append("recipe_id", recipeId);
+    data.append("roi_id", roiId);
+    data.append("draft_rules", JSON.stringify(rules));
+    data.append("review_config", JSON.stringify(review));
+    data.append("file", file);
+    const result = await request(`${api}/inspection/test`, { method: "POST", body: data });
+    renderInlineRoiTestResult(result, roi, state.draftRules, review);
+    status.textContent = `测试完成：${result.result}，共 ${state.draftRules.length} 条规则`;
+    status.className = `roi-rule-status ${result.result === "OK" ? "success" : "error"}`;
+  } catch (error) {
+    renderInlineRoiTestError(error, roi);
+    status.textContent = `测试失败：${error.message}`;
+    status.className = "roi-rule-status error";
+  } finally {
+    testButton.disabled = false;
+    testButton.textContent = "测试当前 ROI";
+  }
+}
+
+function resetInlineRoiTest() {
+  const panel = byId("roiInlineTestPanel");
+  if (!panel) return;
+  panel.hidden = true;
+  byId("roiInlineTestTitle").textContent = "等待测试";
+  byId("roiInlineTestSummary").textContent = "测试不会保存规则，也不会离开当前配置页面。";
+  byId("roiInlineTestBadge").className = "result-badge waiting";
+  byId("roiInlineTestBadge").textContent = "WAITING";
+  byId("roiInlineTestOverview").innerHTML = "";
+  byId("roiInlineRuleResults").innerHTML = "";
+  byId("roiInlineTestImage").removeAttribute("src");
+}
+
+function showInlineRoiTestLoading(roi, rules, review) {
+  const panel = byId("roiInlineTestPanel");
+  panel.hidden = false;
+  byId("roiInlineTestTitle").textContent = `${roi.code} 正在测试`;
+  byId("roiInlineTestSummary").textContent = `正在执行 ${rules.length} 条规则${review.enabled ? "，并同步执行 Qwen3-VL 复核" : ""}。`;
+  byId("roiInlineTestBadge").className = "result-badge waiting";
+  byId("roiInlineTestBadge").textContent = "RUNNING";
+  byId("roiInlineTestOverview").innerHTML = `
+    <div><small>当前区域</small><strong>${escapeHtml(roi.code)}</strong></div>
+    <div><small>规则数量</small><strong>${rules.length}</strong></div>
+    <div><small>VLM 复核</small><strong>${review.enabled ? "已启用" : "未启用"}</strong></div>`;
+  byId("roiInlineRuleResults").innerHTML = '<div class="roi-inline-loading"><span></span>正在读取图片并执行检测…</div>';
+  panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function ruleExpectedDisplay(rule) {
+  if (rule.type === "EXISTENCE") return `相似度 ≥ ${Number(rule.value).toFixed(4)}`;
+  if (rule.type === "COLOR") return `目标颜色 = ${rule.value}`;
+  if (rule.type === "TEXT") return `识别文字包含“${rule.value}”`;
+  return rule.value || "-";
+}
+
+function resultValueRows(values) {
+  return Object.entries(values)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+    .join("");
+}
+
+function primaryResultValues(primary) {
+  const details = primary.details || {};
+  const values = {};
+  if (details.similarity != null) values["相似度"] = Number(details.similarity).toFixed(4);
+  if (details.matched_class) values["匹配类别"] = details.matched_class;
+  if (details.matched_reference) values["命中参考图"] = String(details.matched_reference).split(/[\\/]/).pop();
+  if (details.color) values["识别颜色"] = details.color;
+  if (details.ratio != null) values["颜色占比"] = `${(Number(details.ratio) * 100).toFixed(2)}%`;
+  if (details.text !== undefined) values["识别文字"] = details.text || "未识别到文字";
+  if (String(primary.model || "").toUpperCase().includes("OCR")) values["OCR 执行方式"] = "专用 OCR 模型";
+  if (details.confidence != null) values["OCR 置信度"] = Number(details.confidence).toFixed(4);
+  if (!Object.keys(values).length && primary.score != null) values["模型分数"] = Number(primary.score).toFixed(4);
+  return values;
+}
+
+function reviewResultValues(review) {
+  const parsed = review?.parsed || {};
+  const values = {};
+  if (parsed.actual_text !== undefined) values["识别文字"] = parsed.actual_text || "未识别到文字";
+  else if (parsed.text !== undefined) values["识别文字"] = parsed.text || "未识别到文字";
+  else if (parsed.actual !== undefined) values["实际结果"] = typeof parsed.actual === "object" ? JSON.stringify(parsed.actual) : parsed.actual;
+  if (parsed.color !== undefined) values["识别颜色"] = parsed.color;
+  if (parsed.confidence != null) values["复核置信度"] = Number(parsed.confidence).toFixed(4);
+  values["复核说明"] = parsed.reason || review?.error || (review?.parsed ? "模型未提供说明" : "模型返回内容无法解析，已按安全策略判定");
+  return values;
+}
+
+function renderInlineRoiTestResult(result, roi, rules, reviewConfig) {
+  const items = result.image_results?.[0]?.inspection_items || [];
+  const passed = items.filter((item) => item.status === "OK").length;
+  const badge = byId("roiInlineTestBadge");
+  byId("roiInlineTestPanel").hidden = false;
+  byId("roiInlineTestTitle").textContent = `${roi.code} 测试完成`;
+  byId("roiInlineTestSummary").textContent = `${passed}/${items.length} 条规则通过；以下结果使用当前未保存的配置。`;
+  badge.className = `result-badge ${String(result.result || "ERROR").toLowerCase()}`;
+  badge.textContent = result.result || "ERROR";
+  byId("roiInlineTestOverview").innerHTML = `
+    <div><small>最终结论</small><strong>${result.result === "OK" ? "当前 ROI 通过" : "当前 ROI 未通过"}</strong></div>
+    <div><small>规则通过</small><strong>${passed} / ${items.length}</strong></div>
+    <div><small>总耗时</small><strong>${Number(result.elapsed_ms || 0).toFixed(2)} ms</strong></div>
+    <div><small>VLM 复核</small><strong>${reviewConfig.enabled ? "已执行" : "未启用"}</strong></div>`;
+  const roiImageUrl = result.image_results?.[0]?.roi_image_url;
+  byId("roiInlineTestImage").src = `${roiImageUrl || `/results/${result.request_id}/${encodeURIComponent(roi.code)}.jpg`}?v=${Date.now()}`;
+  byId("roiInlineRuleResults").innerHTML = items.map((item, index) => {
+    const rule = rules[index] || {};
+    const actual = item.actual || {};
+    const primary = actual.primary_result || {
+      model: item.primary_model || item.capability,
+      status: actual.primary_status || item.status,
+      score: item.score,
+      details: actual,
+      message: item.message,
+    };
+    const vlmReview = actual.vlm_review;
+    const sceneLabel = sceneMeta[rule.scene]?.label || sceneMeta[item.scene_type]?.label || item.inspection_type;
+    const primaryValues = resultValueRows(primaryResultValues(primary)) || '<div><span>模型输出</span><strong>无结构化输出</strong></div>';
+    const reviewValues = vlmReview ? resultValueRows(reviewResultValues(vlmReview)) : "";
+    return `
+      <article class="roi-inline-rule-card ${String(item.status).toLowerCase()}">
+        <header>
+          <div><span>规则 ${index + 1} · ${escapeHtml(sceneLabel)}</span><strong>${escapeHtml(item.item_name)}</strong></div>
+          <span class="result-badge ${String(item.status).toLowerCase()}">${escapeHtml(item.status)}</span>
+        </header>
+        <div class="roi-inline-rule-condition">
+          <span>当前规则</span><strong>${escapeHtml(ruleExpectedDisplay(rule))}</strong>
+        </div>
+        <div class="roi-inline-model-grid ${reviewConfig.enabled ? "with-review" : ""}">
+          <section class="roi-inline-model-card primary">
+            <header><span>主检测模型</span><strong>${escapeHtml(primary.model || "未指定")}</strong><b class="${String(primary.status || "ERROR").toLowerCase()}">${escapeHtml(primary.status || "ERROR")}</b></header>
+            <div class="roi-inline-value-grid">${primaryValues}</div>
+            <p>${escapeHtml(primary.message || item.message || "无模型说明")}</p>
+            <details><summary>查看主模型原始输出</summary><pre>${escapeHtml(JSON.stringify(primary.details || {}, null, 2))}</pre></details>
+          </section>
+          ${reviewConfig.enabled ? `<section class="roi-inline-model-card review ${vlmReview ? "executed" : "error"}">
+            <header><span>VLM 复核</span><strong>${escapeHtml(vlmReview?.model || "Qwen3-VL")}</strong><b class="${String(vlmReview?.status || "ERROR").toLowerCase()}">${escapeHtml(vlmReview?.status || "ERROR")}</b></header>
+            <div class="roi-inline-value-grid">${reviewValues || '<div><span>复核结果</span><strong>未返回结果</strong></div>'}</div>
+            <div class="roi-inline-review-prompt"><span>复核要求</span><p>${escapeHtml(vlmReview?.prompt || reviewConfig.prompt || "未配置复核要求")}</p></div>
+            <details><summary>查看 VLM 原始输出</summary><pre>${escapeHtml(JSON.stringify(vlmReview?.parsed || {
+              status: vlmReview?.status || "ERROR",
+              error: vlmReview?.error || "模型未返回可解析的结构化结果",
+            }, null, 2))}</pre></details>
+          </section>` : ""}
+        </div>
+        <footer><span>本规则最终判定</span><strong class="${String(item.status).toLowerCase()}">${escapeHtml(item.status)}</strong><small>${Number(item.elapsed_ms || 0).toFixed(2)} ms</small></footer>
+      </article>`;
+  }).join("") || '<div class="library-no-results">当前 ROI 没有返回可展示的规则结果</div>';
+}
+
+function renderInlineRoiTestError(error, roi) {
+  const panel = byId("roiInlineTestPanel");
+  panel.hidden = false;
+  byId("roiInlineTestTitle").textContent = `${roi.code} 测试失败`;
+  byId("roiInlineTestSummary").textContent = "配置仍保留在当前页面，可修正后重新测试。";
+  byId("roiInlineTestBadge").className = "result-badge error";
+  byId("roiInlineTestBadge").textContent = "ERROR";
+  byId("roiInlineTestOverview").innerHTML = `<div><small>错误信息</small><strong>${escapeHtml(error.message)}</strong></div>`;
+  byId("roiInlineRuleResults").innerHTML = `<div class="roi-inline-test-error"><strong>测试未完成</strong><p>${escapeHtml(error.message)}</p></div>`;
+  byId("roiInlineTestImage").removeAttribute("src");
 }
 
 function renderLibrary() {
@@ -975,7 +1798,142 @@ async function loadDetectionRecords() {
   }
 }
 
+const modelServiceStatusLabels = {
+  READY: "运行正常",
+  STARTING: "正在启动",
+  STOPPED: "已停止",
+  ERROR: "运行异常",
+};
+
+function renderModelServices(payload) {
+  const summary = payload.summary || {};
+  byId("modelServicesSummary").innerHTML = [
+    ["服务总数", summary.total || 0],
+    ["运行正常", summary.ready || 0],
+    ["正在启动", summary.starting || 0],
+    ["异常 / 已停止", Number(summary.problem || 0) + Number(summary.stopped || 0)],
+  ].map(([label, value]) => `
+    <div class="model-service-summary-card"><small>${label}</small><strong>${value}</strong></div>`).join("");
+
+  const ready = Number(summary.ready || 0);
+  const total = Number(summary.total || 0);
+  const chip = byId("serviceSummaryChip");
+  chip.textContent = total && ready === total ? `全部 ${total} 个模型服务正常` : `${ready}/${total} 个模型服务正常`;
+
+  byId("modelServicesList").innerHTML = state.modelServices.map((service) => {
+    const status = String(service.status || "ERROR").toUpperCase();
+    const canStart = ["STOPPED", "ERROR"].includes(status)
+      && !service.pid
+      && service.script_exists
+      && service.python_exists;
+    const canStop = Boolean(service.pid);
+    const environmentProblem = !service.script_exists
+      ? "启动脚本不存在"
+      : !service.python_exists ? "模型运行环境不存在" : "";
+    return `
+      <article class="model-service-card ${status.toLowerCase()}" data-model-service="${escapeHtml(service.code)}">
+        <header>
+          <div><strong>${escapeHtml(service.name)}</strong><small>${escapeHtml(service.category)} · ${escapeHtml(service.code)}</small></div>
+          <span class="model-service-status ${status.toLowerCase()}">${escapeHtml(modelServiceStatusLabels[status] || status)}</span>
+        </header>
+        <div class="model-service-address">
+          <div><span>服务 IP</span><strong>${escapeHtml(service.host)}</strong></div>
+          <div><span>端口</span><strong>${escapeHtml(service.port)}</strong></div>
+          <div><span>完整地址</span><strong>${escapeHtml(service.url)}</strong></div>
+        </div>
+        <div class="model-service-process">
+          <div><span>进程 PID</span><strong>${escapeHtml(service.pid || "-")}</strong></div>
+          <div><span>管理方式</span><strong>${service.managed ? "平台启动" : service.pid ? "外部启动" : "未运行"}</strong></div>
+        </div>
+        ${(environmentProblem || service.last_error) ? `<pre class="model-service-error-preview">${escapeHtml(environmentProblem || service.last_error)}</pre>` : ""}
+        <footer>
+          <button class="btn btn-sm btn-light model-service-logs" type="button" data-service-code="${escapeHtml(service.code)}">查看日志</button>
+          <button class="btn btn-sm btn-outline-danger model-service-stop" type="button" data-service-code="${escapeHtml(service.code)}" ${canStop ? "" : "disabled"}>停止</button>
+          <button class="btn btn-sm btn-primary model-service-start" type="button" data-service-code="${escapeHtml(service.code)}" ${canStart ? "" : "disabled"}>启动</button>
+        </footer>
+      </article>`;
+  }).join("") || '<div class="library-no-results">暂无模型服务配置</div>';
+}
+
+async function loadModelServices(silent = false) {
+  const refreshButton = byId("refreshModelServices");
+  if (!silent) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = "正在检查…";
+  }
+  try {
+    const payload = await request(`${api}/model-services`);
+    state.modelServices = payload.services || [];
+    renderModelServices(payload);
+  } catch (error) {
+    byId("modelServicesList").innerHTML = `<div class="library-no-results">${escapeHtml(error.message)}</div>`;
+    byId("serviceSummaryChip").textContent = "模型服务状态不可用";
+    if (!silent) notify(`模型服务状态读取失败：${error.message}`, "danger", false);
+  } finally {
+    refreshButton.disabled = false;
+    refreshButton.textContent = "刷新状态";
+  }
+}
+
+async function controlModelService(code, action) {
+  const service = state.modelServices.find((item) => item.code === code);
+  try {
+    const result = await request(`${api}/model-services/${encodeURIComponent(code)}/${action}`, { method: "POST" });
+    notify(result.message, "success", false);
+    await loadModelServices(true);
+    if (action === "start") {
+      window.setTimeout(() => loadModelServices(true), 3500);
+    }
+  } catch (error) {
+    notify(`${service?.name || code}${action === "start" ? "启动" : "停止"}失败：${error.message}`, "danger", false);
+    await loadModelServices(true);
+  }
+}
+
+function scrollModelLogsToLatest() {
+  ["modelServiceCalls", "modelServiceStdout", "modelServiceStderr"].forEach((id) => {
+    const element = byId(id);
+    element.scrollTop = element.scrollHeight;
+  });
+}
+
+function stopModelServiceLogRefresh() {
+  if (state.modelServiceLogTimer) window.clearInterval(state.modelServiceLogTimer);
+  state.modelServiceLogTimer = null;
+  state.activeModelServiceLogCode = null;
+}
+
+function startModelServiceLogRefresh(code) {
+  stopModelServiceLogRefresh();
+  state.activeModelServiceLogCode = code;
+  state.modelServiceLogTimer = window.setInterval(() => {
+    if (!byId("modelServiceLogPanel").hidden && state.activeModelServiceLogCode === code) {
+      showModelServiceLogs(code, true);
+    }
+  }, 3000);
+}
+
+async function showModelServiceLogs(code, silent = false) {
+  try {
+    const logs = await request(`${api}/model-services/${encodeURIComponent(code)}/logs?lines=300`);
+    byId("modelServiceLogTitle").textContent = logs.name;
+    byId("modelServiceLogPaths").textContent = `调用日志：${logs.call_log_path}　标准输出：${logs.stdout_path}　错误输出：${logs.stderr_path}`;
+    byId("modelServiceCalls").textContent = logs.calls || "暂无测试调用记录";
+    byId("modelServiceStdout").textContent = logs.stdout || "暂无标准输出日志";
+    byId("modelServiceStderr").textContent = logs.stderr || "暂无错误日志";
+    byId("modelServiceLogPanel").hidden = false;
+    scrollModelLogsToLatest();
+    if (!silent) {
+      startModelServiceLogRefresh(code);
+      byId("modelServiceLogPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  } catch (error) {
+    if (!silent) notify(`读取模型服务日志失败：${error.message}`, "danger", false);
+  }
+}
+
 function switchView(viewId) {
+  if (viewId !== "servicesView" && state.modelServiceLogTimer) stopModelServiceLogRefresh();
   document.querySelectorAll(".workspace-switch").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === viewId);
   });
@@ -987,6 +1945,7 @@ function switchView(viewId) {
 function openTest(recipeId) {
   state.testRecipe = state.details.get(recipeId);
   state.testFile = null;
+  state.testDraft = null;
   byId("testRecipeName").textContent = state.testRecipe.name;
   byId("testFile").value = "";
   byId("testPreviewImage").hidden = true;
@@ -1032,22 +1991,62 @@ function renderTestResult(result) {
           <span class="result-badge ${status.toLowerCase()}">${status}</span>
         </div>
         <div class="test-rule-details">
-          ${roiItems.map((item) => `
+          ${roiItems.map((item) => {
+            const actual = item.actual || {};
+            const primary = actual.primary_result || {
+              model: item.primary_model || item.capability,
+              status: actual.primary_status || item.status,
+              score: item.score,
+              message: item.message,
+            };
+            const review = actual.vlm_review;
+            const reviewEnabled = Boolean(item.vlm_review_enabled);
+            const reviewReason = review?.parsed?.reason || review?.error || "未执行VLM复核";
+            const reviewPrompt = review?.prompt || "未配置复核内容";
+            const reviewDetails = review?.parsed
+              ? JSON.stringify(review.parsed, null, 2)
+              : JSON.stringify({ error: review?.error || "未执行" }, null, 2);
+            return `
             <div class="test-rule-row">
               <span class="rule-result-icon ${item.status.toLowerCase()}">${item.status === "OK" ? "✓" : "!"}</span>
-              <div><strong>${escapeHtml(item.item_name)}</strong><small>${escapeHtml(item.message)}</small></div>
-              <b>${item.score == null ? item.status : Number(item.score).toFixed(4)}</b>
-            </div>`).join("")}
+              <div class="test-rule-content">
+                <strong>${escapeHtml(item.item_name)}</strong>
+                <small>${escapeHtml(sceneMeta[item.scene_type]?.label || item.inspection_type || "检测规则")}</small>
+                <div class="model-result-comparison">
+                  <div class="model-result-card primary">
+                    <span>主模型 · ${escapeHtml(primary.model || "未指定")}</span>
+                    <b class="${String(primary.status || "ERROR").toLowerCase()}">${escapeHtml(primary.status || "ERROR")}</b>
+                    <small>${primary.score == null ? escapeHtml(primary.message || item.message) : `置信度 / 分数 ${Number(primary.score).toFixed(4)}`}</small>
+                  </div>
+                  ${reviewEnabled ? `<div class="model-result-card review ${review ? "executed" : "skipped"}">
+                    <span>VLM复核 · ${escapeHtml(review?.model || "Qwen3-VL")}</span>
+                    <b class="${String(review?.status || "SKIPPED").toLowerCase()}">${escapeHtml(review?.status || "未执行")}</b>
+                    <small><strong>复核内容：</strong>${escapeHtml(reviewPrompt)}</small>
+                    <small><strong>复核说明：</strong>${escapeHtml(reviewReason)}</small>
+                    <pre>${escapeHtml(reviewDetails)}</pre>
+                  </div>` : ""}
+                </div>
+              </div>
+              <b>最终 ${escapeHtml(item.status)}</b>
+            </div>`;
+          }).join("")}
         </div>
       </section>`;
   }).join("") || '<div class="library-no-results">该配方没有可执行规则</div>';
   byId("testPreviewImage").src = `/results/${result.request_id}/result_1.jpg?v=${Date.now()}`;
 }
 
-async function runTest() {
+async function runTest(roiId = null) {
   if (!state.testRecipe || !state.testFile) return;
+  const draft = state.testDraft;
+  const targetRoiId = roiId || draft?.roiId || null;
   const data = new FormData();
   data.append("recipe_id", state.testRecipe.id);
+  if (targetRoiId) data.append("roi_id", targetRoiId);
+  if (draft) {
+    data.append("draft_rules", JSON.stringify(draft.rules));
+    data.append("review_config", JSON.stringify(draft.review));
+  }
   data.append("file", state.testFile);
   byId("runRecipeTest").disabled = true;
   byId("runRecipeTest").textContent = "正在执行检测…";
@@ -1072,11 +2071,13 @@ document.querySelectorAll(".workspace-switch").forEach((button) => {
   button.addEventListener("click", async () => {
     switchView(button.dataset.view);
     if (button.dataset.view === "recordsView") await loadDetectionRecords();
+    if (button.dataset.view === "servicesView") await loadModelServices();
   });
 });
 
 byId("newRecipe").addEventListener("click", resetEditor);
 byId("saveRecipe").addEventListener("click", saveRecipe);
+byId("autoDiscoverButton").addEventListener("click", discoverObjects);
 byId("baseImageInput").addEventListener("change", (event) => uploadBaseImage(event.target.files[0]));
 byId("emptyImageInput").addEventListener("change", (event) => uploadBaseImage(event.target.files[0]));
 byId("imageStage").addEventListener("dragover", (event) => event.preventDefault());
@@ -1104,33 +2105,115 @@ byId("configuredObjectList").addEventListener("click", async (event) => {
   selectRoi(roiId);
 });
 
+byId("candidateObjectList").addEventListener("click", async (event) => {
+  const card = event.target.closest("[data-candidate-id]");
+  if (!card) return;
+  const candidate = state.discoveryCandidates.find(
+    (item) => item.candidate_id === card.dataset.candidateId,
+  );
+  if (!candidate) return;
+  if (event.target.closest(".delete-candidate")) {
+    deleteDiscoveryCandidate(candidate.candidate_id);
+    return;
+  }
+  if (event.target.closest(".confirm-candidate")) {
+    await confirmCandidates([candidate]);
+    return;
+  }
+  selectCandidate(candidate.candidate_id);
+});
+
+byId("confirmAllCandidates").addEventListener("click", async () => {
+  const recommended = state.discoveryCandidates.filter(
+    (candidate) => candidate.batch_confirmable !== false && (
+      candidate.review_status === "RECOMMENDED"
+      || (candidate.confidence || 0) >= 0.40
+    ),
+  );
+  if (!recommended.length) {
+    notify("当前没有建议批量确认的候选框，请逐个检查并确认。", "warning", false);
+    return;
+  }
+  await confirmCandidates(recommended);
+});
+
+byId("clearCandidates").addEventListener("click", () => {
+  state.discoveryCandidates = [];
+  state.harnessSegments = [];
+  state.harnessSegmentation = null;
+  state.selectedCandidateId = null;
+  renderDiscoveryCandidates();
+  drawCanvas();
+  notify("AI 候选框已清空，已确认的正式检测对象不会受影响。", "info", false);
+});
+
 byId("objectConfigModal").querySelector(".btn-close").addEventListener("click", closeObjectModal);
 byId("addRuleRow").addEventListener("click", addRuleRow);
-byId("saveRoiRules").addEventListener("click", saveRoiRules);
-byId("ruleRows").addEventListener("change", (event) => {
+byId("saveRoiRules").addEventListener("click", () => saveRoiRules());
+byId("testRoiRules").addEventListener("click", testCurrentRoiRules);
+byId("roiObjectType").addEventListener("change", () => refreshVlmPrompt());
+byId("regenerateVlmPrompt").addEventListener("click", () => refreshVlmPrompt(true));
+byId("vlmReviewPrompt").addEventListener("input", () => {
+  state.vlmPromptDirty = true;
+});
+byId("vlmReviewEnabled").addEventListener("change", () => {
+  if (byId("vlmReviewEnabled").checked) refreshVlmPrompt();
+  syncVlmReviewMode();
+});
+byId("vlmReviewMode").addEventListener("change", syncVlmReviewMode);
+byId("ruleRows").addEventListener("change", async (event) => {
   const row = event.target.closest("[data-rule-index]");
-  if (!row || !event.target.classList.contains("rule-row-type")) return;
+  if (!row || !event.target.classList.contains("rule-row-scene")) return;
   const index = Number(row.dataset.ruleIndex);
-  const type = event.target.value;
-  state.draftRules[index].type = type;
-  state.draftRules[index].value = "";
+  const sceneCode = event.target.value;
+  const scene = sceneMeta[sceneCode] || sceneMeta.OBJECT_EXISTENCE;
+  const defaults = {
+    EXISTENCE: "0.9",
+    COLOR: "",
+    TEXT: "",
+  };
+  state.draftRules[index].scene = sceneCode;
+  state.draftRules[index].type = scene.ruleType;
+  state.draftRules[index].value = defaults[scene.ruleType];
   renderRuleRows();
+  refreshVlmPrompt();
+  if (scene.ruleType === "COLOR") await detectColorForRule(index);
 });
 byId("ruleRows").addEventListener("input", (event) => {
   const row = event.target.closest("[data-rule-index]");
   if (!row || !event.target.classList.contains("rule-row-value")) return;
   state.draftRules[Number(row.dataset.ruleIndex)].value = event.target.value;
+  refreshVlmPrompt();
 });
-byId("ruleRows").addEventListener("click", (event) => {
+byId("ruleRows").addEventListener("click", async (event) => {
+  const colorButton = event.target.closest(".detect-rule-color");
+  if (colorButton) {
+    await detectColorForRule(Number(colorButton.dataset.colorRuleIndex));
+    return;
+  }
   const button = event.target.closest(".remove-rule-row");
   if (!button) return;
   const row = button.closest("[data-rule-index]");
   state.draftRules.splice(Number(row.dataset.ruleIndex), 1);
   renderRuleRows();
+  refreshVlmPrompt();
 });
 
 byId("librarySearch").addEventListener("input", renderLibrary);
 byId("refreshDetectionRecords").addEventListener("click", loadDetectionRecords);
+byId("refreshModelServices").addEventListener("click", () => loadModelServices());
+byId("closeModelServiceLogs").addEventListener("click", () => {
+  byId("modelServiceLogPanel").hidden = true;
+  stopModelServiceLogRefresh();
+});
+byId("modelServicesList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-service-code]");
+  if (!button) return;
+  const code = button.dataset.serviceCode;
+  if (button.classList.contains("model-service-start")) await controlModelService(code, "start");
+  if (button.classList.contains("model-service-stop")) await controlModelService(code, "stop");
+  if (button.classList.contains("model-service-logs")) await showModelServiceLogs(code);
+});
 byId("configurationLibrary").addEventListener("click", async (event) => {
   const card = event.target.closest("[data-recipe-id]");
   if (!card) return;
@@ -1150,7 +2233,7 @@ byId("editTestRecipe").addEventListener("click", async () => {
   await loadRecipe(state.testRecipe.id);
 });
 byId("testFile").addEventListener("change", (event) => previewTestFile(event.target.files[0]));
-byId("runRecipeTest").addEventListener("click", runTest);
+byId("runRecipeTest").addEventListener("click", () => runTest());
 
 loadData()
   .then(async () => {
@@ -1158,3 +2241,6 @@ loadData()
     else resetEditor();
   })
   .catch((error) => notify(error.message, "danger"));
+
+syncVlmReviewMode();
+loadModelServices(true);

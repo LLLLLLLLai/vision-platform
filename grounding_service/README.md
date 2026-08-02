@@ -1,11 +1,12 @@
 # Grounding DINO Service
 
-保留给现有 Grounding DINO 独立服务。
-
-平台约定接口：
+负责把 Qwen3-VL 生成的物体类型和英文视觉短语定位成候选框。
 
 - `GET /health`
 - `POST /v1/localize`
 
-请保留已有模型加载和推理代码；平台通过 `.env` 中的 `GROUNDING_SERVICE_URL` 调用。
+启动：
 
+```powershell
+.\.venv-qwen\Scripts\python.exe -m uvicorn grounding_service.main:app --host 127.0.0.1 --port 9021
+```

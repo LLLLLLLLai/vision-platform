@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/vision_platform.db"
     grounding_service_url: str = "http://127.0.0.1:9021"
     dinov2_service_url: str = "http://127.0.0.1:9022"
+    qwen_vl_service_url: str = "http://127.0.0.1:9023"
     paddleocr_service_url: str = "http://127.0.0.1:9024"
+    sam2_service_url: str = "http://127.0.0.1:9025"
     algorithm_timeout_seconds: float = 15.0
 
     model_config = SettingsConfigDict(
@@ -32,4 +34,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-

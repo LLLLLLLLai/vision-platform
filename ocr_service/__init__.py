@@ -1,0 +1,1 @@
+"""Dedicated PaddleOCR inference service."""

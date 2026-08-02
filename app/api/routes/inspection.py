@@ -1,3 +1,4 @@
+import json
 import shutil
 import re
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -60,8 +61,56 @@ class ExecuteRequest(BaseModel):
 
 
 class PublicDetectRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     sn: str = Field(min_length=1)
     image_paths: list[str] = Field(min_length=1)
+    line: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("line", "line_code"),
+    )
+    materialcode: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("materialcode", "material_code"),
+    )
+    operation: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("operation", "process_code"),
+    )
+    camera: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("camera", "camera_code"),
+    )
+    picture: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices(
+            "picture",
+            "capture_index",
+            "picture_index",
+            "photo_index",
+        ),
+    )
+
+    @property
+    def line_code(self) -> str | None:
+        return self.line
+
+    @property
+    def material_code(self) -> str | None:
+        return self.materialcode
+
+    @property
+    def process_code(self) -> str | None:
+        return self.operation
+
+    @property
+    def camera_code(self) -> str | None:
+        return self.camera
+
+    @property
+    def capture_index(self) -> int | None:
+        return self.picture
 
 
 def normalize_filename_part(value: str) -> str:
@@ -73,6 +122,24 @@ def image_filename_key(image_path: str) -> str:
     return normalize_filename_part(Path(filename).stem)
 
 
+def parse_camera_picture_from_filename(
+    image_path: str,
+) -> tuple[str, int] | None:
+    filename = image_path.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = Path(filename).stem.upper()
+    match = re.search(
+        r"CAMERA[\s_-]*0*(\d+)[\s_-]*PICTURE[\s_-]*0*(\d+)",
+        stem,
+    )
+    if match is None:
+        return None
+    camera_number = int(match.group(1))
+    picture_number = int(match.group(2))
+    if camera_number < 1 or picture_number < 1:
+        return None
+    return f"CAMERA{camera_number}", picture_number
+
+
 def recipe_filename_signatures(
     recipe: Recipe,
     product: Product,
@@ -80,9 +147,9 @@ def recipe_filename_signatures(
 ) -> set[str]:
     signatures = {normalize_filename_part(recipe.code)}
     values = (
-        station.line_code,
-        product.code,
-        station.process_code,
+        recipe.line_code or station.line_code,
+        recipe.material_code or product.code,
+        recipe.process_code or station.process_code,
         recipe.camera_code,
     )
     if all(values):
@@ -126,18 +193,129 @@ def match_published_recipe_by_filename(
     return max(matches, key=lambda item: (item[0], item[1]))[2]
 
 
+def match_published_recipe_by_parameters(
+    database: Session,
+    payload: PublicDetectRequest,
+) -> Recipe | None:
+    return match_published_recipe_by_values(
+        database,
+        line=payload.line_code,
+        materialcode=payload.material_code,
+        operation=payload.process_code,
+        camera=payload.camera_code,
+        picture=payload.capture_index,
+    )
+
+
+def match_published_recipe_by_values(
+    database: Session,
+    *,
+    line: str | None,
+    materialcode: str | None,
+    operation: str | None,
+    camera: str | None,
+    picture: int | None,
+) -> Recipe | None:
+    values = (line, materialcode, operation, camera, picture)
+    if not all(value is not None for value in values):
+        return None
+    return database.scalar(
+        select(Recipe)
+        .where(
+            Recipe.status == "PUBLISHED",
+            Recipe.line_code == line,
+            Recipe.material_code == materialcode,
+            Recipe.process_code == operation,
+            Recipe.camera_code == camera,
+            Recipe.capture_index == picture,
+        )
+        .order_by(Recipe.id.desc())
+    )
+
+
 async def execute_filename_routed_inspection(
     payload: PublicDetectRequest,
     database: Session,
 ) -> dict[str, Any]:
+    business_fields = (
+        payload.line_code,
+        payload.material_code,
+        payload.process_code,
+    )
+    image_fields = (
+        payload.camera_code,
+        payload.capture_index,
+    )
+    has_any_business_field = any(value is not None for value in business_fields)
+    has_all_business_fields = all(value is not None for value in business_fields)
+    has_any_image_field = any(value is not None for value in image_fields)
+    has_all_image_fields = all(value is not None for value in image_fields)
+    if has_any_business_field and not has_all_business_fields:
+        return {
+            "code": 1001,
+            "message": "line, materialcode and operation must be provided together.",
+            "result": "ERROR",
+            "image_paths": [],
+        }
+    if has_any_image_field and not has_all_image_fields:
+        return {
+            "code": 1001,
+            "message": "camera and picture must be provided together.",
+            "result": "ERROR",
+            "image_paths": [],
+        }
+    if has_any_image_field and not has_all_business_fields:
+        return {
+            "code": 1001,
+            "message": "The five recipe parameters must include line, materialcode and operation.",
+            "result": "ERROR",
+            "image_paths": [],
+        }
+
+    parameter_recipe = (
+        match_published_recipe_by_parameters(database, payload)
+        if has_all_business_fields and has_all_image_fields
+        else None
+    )
+    if has_all_business_fields and has_all_image_fields and parameter_recipe is None:
+        return {
+            "code": 2001,
+            "message": "No published recipe matched structured parameters.",
+            "result": "ERROR",
+            "image_paths": [],
+        }
+
     recipe_groups: dict[int, dict[str, Any]] = {}
     for image_path in payload.image_paths:
-        recipe = match_published_recipe_by_filename(database, image_path)
+        recipe = parameter_recipe
+        if recipe is None and has_all_business_fields:
+            parsed = parse_camera_picture_from_filename(image_path)
+            if parsed is None:
+                return {
+                    "code": 1001,
+                    "message": (
+                        "camera and picture were not provided and could not be "
+                        "parsed from image filename. Expected CAMERA1PICTURE1."
+                    ),
+                    "result": "ERROR",
+                    "image_paths": [],
+                }
+            camera, picture = parsed
+            recipe = match_published_recipe_by_values(
+                database,
+                line=payload.line_code,
+                materialcode=payload.material_code,
+                operation=payload.process_code,
+                camera=camera,
+                picture=picture,
+            )
+        if recipe is None and not has_all_business_fields:
+            recipe = match_published_recipe_by_filename(database, image_path)
         if recipe is None:
             return {
                 "code": 2001,
                 "message": (
-                    "No published recipe matched image filename: "
+                    "No published recipe matched parameters or image filename: "
                     f"{image_path.replace('\\', '/').rsplit('/', 1)[-1]}"
                 ),
                 "result": "ERROR",
@@ -230,6 +408,9 @@ def detection_call_records(
 @router.post("/test")
 async def test_recipe(
     recipe_id: int = Form(...),
+    roi_id: int | None = Form(None),
+    draft_rules: str | None = Form(None),
+    review_config: str | None = Form(None),
     file: UploadFile = File(...),
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -248,12 +429,38 @@ async def test_recipe(
     with destination.open("wb") as output:
         shutil.copyfileobj(file.file, output)
     try:
+        if draft_rules is not None:
+            if roi_id is None:
+                raise HTTPException(status_code=400, detail="roi_id is required.")
+            roi = next((item for item in recipe.rois if item.id == roi_id), None)
+            if roi is None:
+                raise HTTPException(status_code=404, detail="ROI not found.")
+            rules = json.loads(draft_rules)
+            review = json.loads(review_config or "{}")
+            if not isinstance(rules, list) or not rules:
+                raise HTTPException(status_code=400, detail="Draft rules are required.")
+            if not isinstance(review, dict):
+                raise HTTPException(status_code=400, detail="Invalid review config.")
+            return await engine.test_draft_roi(
+                database,
+                recipe,
+                roi,
+                str(destination),
+                rules,
+                review,
+            )
         return await engine.execute(
             database,
             recipe,
             sn="TEST",
             image_paths=[str(destination)],
+            force_vlm_review=True,
+            roi_ids={roi_id} if roi_id is not None else None,
         )
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid draft test JSON.") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

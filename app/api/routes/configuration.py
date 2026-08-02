@@ -18,6 +18,11 @@ from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceImage
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
+from app.services.image_processing import analyze_roi_color
+from app.services.world_model_service import (
+    sync_recipe_world_model,
+    sync_roi_to_world_object,
+)
 
 
 router = APIRouter()
@@ -39,21 +44,27 @@ class StationCreate(BaseModel):
 
 
 class RecipeCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=100)
+    code: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     version: str = "1.0"
     product_id: int
     station_id: int
+    line_code: str | None = None
+    material_code: str | None = None
+    process_code: str | None = None
     camera_code: str | None = None
     capture_index: int = Field(default=1, ge=1)
 
 
 class RecipeUpdate(BaseModel):
-    code: str = Field(min_length=1, max_length=100)
+    code: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     version: str = "1.0"
     product_id: int
     station_id: int
+    line_code: str | None = None
+    material_code: str | None = None
+    process_code: str | None = None
     camera_code: str | None = None
     capture_index: int = Field(default=1, ge=1)
 
@@ -96,6 +107,49 @@ def _commit(database: Session) -> None:
     except IntegrityError as exc:
         database.rollback()
         raise HTTPException(status_code=409, detail="Code already exists.") from exc
+
+
+def _normalize_code(value: str) -> str:
+    return "_".join(value.strip().upper().replace("-", "_").split())
+
+
+def _recipe_values(
+    database: Session,
+    payload: RecipeCreate | RecipeUpdate,
+) -> dict[str, Any]:
+    product = database.get(Product, payload.product_id)
+    station = database.get(Station, payload.station_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found.")
+
+    values = payload.model_dump()
+    values["line_code"] = payload.line_code or station.line_code
+    values["material_code"] = payload.material_code or product.code
+    values["process_code"] = payload.process_code or station.process_code
+    required_parts = (
+        values["line_code"],
+        values["material_code"],
+        values["process_code"],
+        values["camera_code"],
+    )
+    if not all(required_parts):
+        raise HTTPException(
+            status_code=400,
+            detail="line, material, process and camera codes are required.",
+        )
+    if not values["code"]:
+        values["code"] = "_".join(
+            [
+                _normalize_code(str(values["line_code"])),
+                _normalize_code(str(values["material_code"])),
+                _normalize_code(str(values["process_code"])),
+                _normalize_code(str(values["camera_code"])),
+                f"P{int(values['capture_index']):02d}",
+            ]
+        )[:100]
+    return values
 
 
 def _save_upload(upload: UploadFile, directory: Path) -> Path:
@@ -159,6 +213,7 @@ def _item_payload(item: InspectionItem) -> dict[str, Any]:
 
 
 def _roi_payload(roi: RegionOfInterest) -> dict[str, Any]:
+    world_object = roi.scene_object
     return {
         "id": roi.id,
         "code": roi.code,
@@ -171,6 +226,20 @@ def _roi_payload(roi: RegionOfInterest) -> dict[str, Any]:
         "padding": roi.padding,
         "sort_order": roi.sort_order,
         "enabled": roi.enabled,
+        "scene_object_id": roi.scene_object_id,
+        "world_object": (
+            {
+                "id": world_object.id,
+                "code": world_object.code,
+                "name": world_object.name,
+                "object_type": world_object.object_type,
+                "location_mode": world_object.location_mode,
+                "expected_state": world_object.expected_state,
+                "perception_config": world_object.perception_config,
+            }
+            if world_object is not None
+            else None
+        ),
         "inspection_items": [_item_payload(item) for item in roi.inspection_items],
     }
 
@@ -191,7 +260,7 @@ def _latest_auto_reference(
         .where(
             ReferenceImage.group_id == group.id,
             ReferenceImage.enabled.is_(True),
-            ReferenceImage.quality_status == "READY",
+            ReferenceImage.quality_status.in_(["READY", "PENDING", "PENDING_RETRY"]),
         )
         .order_by(ReferenceImage.id.desc())
     )
@@ -199,6 +268,7 @@ def _latest_auto_reference(
         return None
     return {
         "group_id": group.id,
+        "class_code": group.class_code,
         "image_url": _file_url(reference.image_path),
         "embedding_status": reference.quality_status,
     }
@@ -283,9 +353,9 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "base_image_url": _file_url(item.base_image_path),
             "roi_count": len(item.rois),
             "rule_count": sum(len(roi.inspection_items) for roi in item.rois),
-            "material_code": product.code if product else "",
-            "line_code": station.line_code if station else "",
-            "process_code": station.process_code if station else "",
+            "material_code": item.material_code or (product.code if product else ""),
+            "line_code": item.line_code or (station.line_code if station else ""),
+            "process_code": item.process_code or (station.process_code if station else ""),
             "station_code": station.code if station else "",
             "camera_code": item.camera_code or "",
             "capture_index": item.capture_index,
@@ -298,7 +368,7 @@ def create_recipe(
     payload: RecipeCreate,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    recipe = Recipe(**payload.model_dump())
+    recipe = Recipe(**_recipe_values(database, payload))
     database.add(recipe)
     _commit(database)
     database.refresh(recipe)
@@ -314,7 +384,7 @@ def update_recipe(
     recipe = database.get(Recipe, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
-    for field, value in payload.model_dump().items():
+    for field, value in _recipe_values(database, payload).items():
         setattr(recipe, field, value)
     database.commit()
     return {"id": recipe.id, "code": recipe.code, "status": recipe.status}
@@ -346,9 +416,9 @@ def recipe_detail(
         "status": recipe.status,
         "product_id": recipe.product_id,
         "station_id": recipe.station_id,
-        "material_code": product.code if product else "",
-        "line_code": station.line_code if station else "",
-        "process_code": station.process_code if station else "",
+        "material_code": recipe.material_code or (product.code if product else ""),
+        "line_code": recipe.line_code or (station.line_code if station else ""),
+        "process_code": recipe.process_code or (station.process_code if station else ""),
         "station_code": station.code if station else "",
         "camera_code": recipe.camera_code,
         "capture_index": recipe.capture_index,
@@ -438,6 +508,8 @@ def create_roi(
     }
     roi = RegionOfInterest(recipe_id=recipe_id, **values)
     database.add(roi)
+    database.flush()
+    sync_roi_to_world_object(database, recipe, roi)
     database.commit()
     database.refresh(roi)
     return _roi_payload(roi)
@@ -454,6 +526,10 @@ def update_roi(
         raise HTTPException(status_code=404, detail="ROI not found.")
     for field, value in payload.model_dump().items():
         setattr(roi, field, value)
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    sync_roi_to_world_object(database, recipe, roi)
     database.commit()
     database.refresh(roi)
     return _roi_payload(roi)
@@ -521,6 +597,8 @@ async def capture_roi_reference(
         quality_status="PENDING",
     )
     database.add(reference)
+    for existing_image in existing_images:
+        existing_image.enabled = False
     database.commit()
     database.refresh(reference)
     try:
@@ -536,16 +614,18 @@ async def capture_roi_reference(
         reference.embedding_path = str(embedding_path)
         reference.embedding_dimension = int(response["dimension"])
         reference.quality_status = "READY"
-        for existing_image in existing_images:
-            existing_image.enabled = False
         database.commit()
     except Exception as exc:
-        reference.quality_status = "FAILED"
+        reference.quality_status = "PENDING_RETRY"
         database.commit()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Reference embedding failed: {exc}",
-        ) from exc
+        return {
+            "group_id": group.id,
+            "group_code": group.code,
+            "class_code": group.class_code,
+            "image_url": _file_url(str(reference_path)),
+            "embedding_status": reference.quality_status,
+            "embedding_warning": str(exc),
+        }
     return {
         "group_id": group.id,
         "group_code": group.code,
@@ -553,6 +633,27 @@ async def capture_roi_reference(
         "image_url": _file_url(str(reference_path)),
         "embedding_status": reference.quality_status,
     }
+
+
+@router.post("/rois/{roi_id}/analyze-color")
+def analyze_color(
+    roi_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    roi = database.get(RegionOfInterest, roi_id)
+    if roi is None:
+        raise HTTPException(status_code=404, detail="ROI not found.")
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is None or not recipe.base_image_path:
+        raise HTTPException(status_code=400, detail="Recipe image is required.")
+    try:
+        return {
+            "code": 0,
+            "message": "success",
+            **analyze_roi_color(recipe.base_image_path, roi),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/rois/{roi_id}")
@@ -571,10 +672,15 @@ def create_inspection_item(
     payload: InspectionItemCreate,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if database.get(RegionOfInterest, roi_id) is None:
+    roi = database.get(RegionOfInterest, roi_id)
+    if roi is None:
         raise HTTPException(status_code=404, detail="ROI not found.")
     item = InspectionItem(roi_id=roi_id, **payload.model_dump())
     database.add(item)
+    database.flush()
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is not None:
+        sync_roi_to_world_object(database, recipe, roi)
     database.commit()
     database.refresh(item)
     return _item_payload(item)
@@ -588,7 +694,14 @@ def delete_inspection_item(
     item = database.get(InspectionItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Inspection item not found.")
+    roi = database.get(RegionOfInterest, item.roi_id)
     database.delete(item)
+    database.flush()
+    if roi is not None:
+        database.expire(roi, ["inspection_items"])
+        recipe = database.get(Recipe, roi.recipe_id)
+        if recipe is not None:
+            sync_roi_to_world_object(database, recipe, roi)
     database.commit()
     return {"deleted": True}
 
@@ -612,14 +725,18 @@ def publish_recipe(
         )
     other_recipes = database.scalars(
         select(Recipe).where(
-            Recipe.product_id == recipe.product_id,
-            Recipe.station_id == recipe.station_id,
+            Recipe.line_code == recipe.line_code,
+            Recipe.material_code == recipe.material_code,
+            Recipe.process_code == recipe.process_code,
+            Recipe.camera_code == recipe.camera_code,
+            Recipe.capture_index == recipe.capture_index,
             Recipe.status == "PUBLISHED",
             Recipe.id != recipe.id,
         )
     ).all()
     for other in other_recipes:
         other.status = "ARCHIVED"
+    sync_recipe_world_model(database, recipe)
     recipe.status = "PUBLISHED"
     database.commit()
     return {"id": recipe.id, "status": recipe.status}

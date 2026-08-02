@@ -10,8 +10,10 @@ from app.api.routes.inspection import (
     execute_filename_routed_inspection,
     filename_contains_signature,
     image_filename_key,
+    match_published_recipe_by_parameters,
     match_published_recipe_by_filename,
     normalize_filename_part,
+    parse_camera_picture_from_filename,
 )
 from app.models.recipe import Recipe
 from app.models.system import Product, Station
@@ -48,6 +50,43 @@ class FilenameRecipeRoutingTest(unittest.TestCase):
             )
         )
 
+    def test_parses_camera_and_picture_from_compact_filename(self) -> None:
+        self.assertEqual(
+            parse_camera_picture_from_filename(
+                r"C:\images\ASSY-CAMERA1PICTURE1.png"
+            ),
+            ("CAMERA1", 1),
+        )
+
+    def test_public_request_accepts_new_and_legacy_field_names(self) -> None:
+        modern = PublicDetectRequest.model_validate(
+            {
+                "sn": "SN001",
+                "image_paths": ["image.png"],
+                "line": "L01",
+                "materialcode": "MAT001",
+                "operation": "OP20",
+                "camera": "CAMERA1",
+                "picture": 1,
+            }
+        )
+        legacy = PublicDetectRequest.model_validate(
+            {
+                "sn": "SN001",
+                "image_paths": ["image.png"],
+                "line_code": "L01",
+                "material_code": "MAT001",
+                "process_code": "OP20",
+                "camera_code": "CAMERA1",
+                "capture_index": 1,
+            }
+        )
+        self.assertEqual(modern.line_code, legacy.line_code)
+        self.assertEqual(modern.material_code, legacy.material_code)
+        self.assertEqual(modern.process_code, legacy.process_code)
+        self.assertEqual(modern.camera_code, legacy.camera_code)
+        self.assertEqual(modern.capture_index, legacy.capture_index)
+
 
 class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -69,6 +108,9 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                     code="LINE01-MAT001-OP20-CAM01-P1",
                     name="Photo 1",
                     status="PUBLISHED",
+                    line_code="LINE01",
+                    material_code="MAT001",
+                    process_code="OP20",
                     product_id=product.id,
                     station_id=station.id,
                     camera_code="CAM01",
@@ -78,6 +120,9 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                     code="LINE01-MAT001-OP20-CAM01-P2",
                     name="Photo 2",
                     status="PUBLISHED",
+                    line_code="LINE01",
+                    material_code="MAT001",
+                    process_code="OP20",
                     product_id=product.id,
                     station_id=station.id,
                     camera_code="CAM01",
@@ -87,10 +132,25 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                     code="LINE01-MAT001-OP20-CAM01-P3",
                     name="Draft",
                     status="DRAFT",
+                    line_code="LINE01",
+                    material_code="MAT001",
+                    process_code="OP20",
                     product_id=product.id,
                     station_id=station.id,
                     camera_code="CAM01",
                     capture_index=3,
+                ),
+                Recipe(
+                    code="LINE01-MAT001-OP20-CAMERA1-P1",
+                    name="Compact filename photo 1",
+                    status="PUBLISHED",
+                    line_code="LINE01",
+                    material_code="MAT001",
+                    process_code="OP20",
+                    product_id=product.id,
+                    station_id=station.id,
+                    camera_code="CAMERA1",
+                    capture_index=1,
                 ),
             ]
         )
@@ -113,6 +173,36 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                 r"D:\images\LINE01_MAT001_OP20_CAM01_P3_001.jpg",
             )
         )
+
+    def test_structured_parameters_match_business_recipe(self) -> None:
+        recipe = match_published_recipe_by_parameters(
+            self.database,
+            PublicDetectRequest(
+                sn="SN001",
+                line_code="LINE01",
+                material_code="MAT001",
+                process_code="OP20",
+                camera_code="CAM01",
+                capture_index=1,
+                image_paths=["current.jpg"],
+            ),
+        )
+        self.assertIsNotNone(recipe)
+        self.assertEqual(recipe.code, "LINE01-MAT001-OP20-CAM01-P1")
+
+        draft = match_published_recipe_by_parameters(
+            self.database,
+            PublicDetectRequest(
+                sn="SN001",
+                line_code="LINE01",
+                material_code="MAT001",
+                process_code="OP20",
+                camera_code="CAM01",
+                capture_index=3,
+                image_paths=["current.jpg"],
+            ),
+        )
+        self.assertIsNone(draft)
 
     async def test_routes_and_aggregates_multiple_recipes(self) -> None:
         async def fake_execute(
@@ -156,6 +246,35 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execute_mock.await_count, 2)
         first_group_paths = execute_mock.await_args_list[0].kwargs["image_paths"]
         self.assertEqual(len(first_group_paths), 2)
+
+    async def test_routes_with_business_parameters_and_filename_camera(self) -> None:
+        payload = PublicDetectRequest(
+            sn="SN002",
+            image_paths=["ASSY-CAMERA1PICTURE1.png"],
+            line="LINE01",
+            materialcode="MAT001",
+            operation="OP20",
+        )
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(
+                return_value={
+                    "code": 0,
+                    "message": "success",
+                    "result": "OK",
+                    "image_paths": ["result.jpg"],
+                }
+            ),
+        ) as execute_mock:
+            response = await execute_filename_routed_inspection(
+                payload,
+                self.database,
+            )
+
+        self.assertEqual(response["code"], 0)
+        matched_recipe = execute_mock.await_args.args[1]
+        self.assertEqual(matched_recipe.camera_code, "CAMERA1")
+        self.assertEqual(matched_recipe.capture_index, 1)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,27 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, String
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
+if TYPE_CHECKING:
+    from app.models.world import SceneObject
+
 
 class Recipe(TimestampMixin, Base):
     __tablename__ = "recipes"
+    __table_args__ = (
+        Index(
+            "ix_recipe_business_key",
+            "line_code",
+            "material_code",
+            "process_code",
+            "camera_code",
+            "capture_index",
+            "status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(100), index=True)
@@ -16,6 +30,9 @@ class Recipe(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     station_id: Mapped[int] = mapped_column(ForeignKey("stations.id"))
+    line_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    material_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    process_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     camera_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     capture_index: Mapped[int] = mapped_column(Integer, default=1)
     base_image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -33,6 +50,11 @@ class RegionOfInterest(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     recipe_id: Mapped[int] = mapped_column(ForeignKey("recipes.id"), index=True)
+    scene_object_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scene_objects.id"),
+        nullable=True,
+        index=True,
+    )
     code: Mapped[str] = mapped_column(String(100), index=True)
     name: Mapped[str] = mapped_column(String(200))
     object_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -47,6 +69,9 @@ class RegionOfInterest(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     recipe: Mapped[Recipe] = relationship(back_populates="rois")
+    scene_object: Mapped["SceneObject | None"] = relationship(
+        back_populates="rois",
+    )
     inspection_items: Mapped[list["InspectionItem"]] = relationship(
         back_populates="roi",
         cascade="all, delete-orphan",
@@ -54,4 +79,3 @@ class RegionOfInterest(TimestampMixin, Base):
 
 
 from app.models.inspection import InspectionItem
-

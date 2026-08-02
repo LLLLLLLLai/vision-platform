@@ -6,12 +6,12 @@
 <div class="workspace-shell">
   <header class="workspace-hero">
     <div>
-      <div class="eyebrow">VISION CONFIGURATION</div>
-      <h1>视觉检测配置中心</h1>
-      <p>以检测物体为核心，在同一界面完成图片框选、多规则配置、保存和测试。</p>
+      <div class="eyebrow">PRODUCT WORLD MODEL</div>
+      <h1>产品世界模型与检测配方</h1>
+      <p>把产品对象、相机视图、ROI、检测能力和质量规则组织成可复用的数字产品地图。</p>
     </div>
     <div class="hero-actions">
-      <div class="service-chip">DINOv2 已连接</div>
+      <div class="service-chip" id="serviceSummaryChip">正在检查模型服务</div>
       <a class="btn btn-light" href="/docs">接口文档</a>
     </div>
   </header>
@@ -30,6 +30,10 @@
     <button class="workspace-switch" data-view="recordsView">
       <span class="switch-icon">≡</span>
       <span><strong>检测记录</strong><small>查看第三方接口调用和检测结果</small></span>
+    </button>
+    <button class="workspace-switch" data-view="servicesView">
+      <span class="switch-icon">◉</span>
+      <span><strong>模型服务</strong><small>运行状态、启停控制和故障日志</small></span>
     </button>
   </nav>
 
@@ -69,9 +73,10 @@
         <div class="workbench-heading">
           <div>
             <span class="step-number">02</span>
-            <div><strong>上传图片并框选检测物体</strong><small>拖动鼠标创建检测区域，点击已有框可继续配置</small></div>
+            <div><strong>上传图片并自动解析检测物体</strong><small>AI 先生成候选框，用户确认、移动、缩放或删除后再形成正式检测对象</small></div>
           </div>
           <div class="canvas-actions">
+            <button class="btn btn-outline-primary" type="button" id="autoDiscoverButton" disabled>✦ 重新自动解析</button>
             <label class="upload-button">
               <input type="file" id="baseImageInput" accept="image/*" hidden>
               上传 / 更换图片
@@ -83,7 +88,7 @@
           <div class="upload-empty" id="emptyStage">
             <div class="upload-illustration">↑</div>
             <h3>上传产品检测图片</h3>
-            <p>填写配方信息后上传图片，即可用鼠标框选保险丝、螺丝、连接器等物体。</p>
+            <p>填写配方信息后上传图片，系统会自动识别保险丝、螺丝、连接器、线束等候选物体。</p>
             <label class="btn btn-primary btn-lg">
               <input type="file" id="emptyImageInput" accept="image/*" hidden>
               选择图片
@@ -91,11 +96,37 @@
           </div>
           <img id="baseImage" alt="规则配置图片">
           <canvas id="roiCanvas"></canvas>
+          <div class="discovery-overlay" id="discoveryOverlay" hidden>
+            <span class="discovery-spinner"></span>
+            <strong>正在解析图片中的检测物体</strong>
+            <small>Qwen3-VL 正在生成物体清单，Grounding DINO 随后定位候选框</small>
+          </div>
         </div>
 
       </div>
 
       <aside class="rule-config-column">
+        <section class="candidate-object-section" id="candidateObjectSection" hidden>
+          <div class="workbench-heading candidate-heading">
+            <div>
+              <span class="step-number ai-step">AI</span>
+              <div><strong>AI 候选物体</strong><small>候选框尚未进入正式配方，可先调整再确认</small></div>
+            </div>
+            <div class="candidate-actions">
+              <span class="candidate-engine-badge" id="candidateEngineBadge">等待定位</span>
+              <button class="btn btn-sm btn-primary" type="button" id="confirmAllCandidates">确认推荐项</button>
+              <button class="btn btn-sm btn-outline-secondary" type="button" id="clearCandidates">清空</button>
+            </div>
+          </div>
+          <div class="harness-segment-summary" id="harnessSegmentSummary" hidden>
+            <span class="harness-segment-icon">线束</span>
+            <div>
+              <strong>像素级线束分割</strong>
+              <small id="harnessSegmentCount">未执行分割</small>
+            </div>
+          </div>
+          <div id="candidateObjectList" class="candidate-object-list"></div>
+        </section>
         <div class="workbench-heading">
           <div>
             <span class="step-number">03</span>
@@ -133,7 +164,18 @@
                 <small>保存当前 ROI 规则时自动更新参考图和特征向量</small>
               </div>
               <div class="roi-information-grid">
-                <label><span>区域编码</span><input class="form-control" id="roiCode" readonly></label>
+                <label><span>对象类型</span>
+                  <select class="form-select" id="roiObjectType">
+                    <option value="FUSE">保险丝</option>
+                    <option value="SCREW">螺丝</option>
+                    <option value="CONNECTOR">连接器</option>
+                    <option value="HARNESS">线束</option>
+                    <option value="PCBA">PCBA</option>
+                    <option value="BUSBAR">铜排</option>
+                    <option value="LABEL">标签</option>
+                    <option value="OBJECT">其他对象</option>
+                  </select>
+                </label>
                 <label><span>X 点位</span><input class="form-control" id="roiPointX" readonly></label>
                 <label><span>Y 点位</span><input class="form-control" id="roiPointY" readonly></label>
                 <label><span>区域宽度</span><input class="form-control" id="roiPointWidth" readonly></label>
@@ -150,7 +192,8 @@
             <div class="rule-table">
               <div class="rule-table-head">
                 <span>序号</span>
-                <span>校验类型</span>
+                <span>检测场景</span>
+                <span>执行能力</span>
                 <span>校验值</span>
                 <span>操作</span>
               </div>
@@ -158,16 +201,58 @@
             </div>
             <div class="rule-value-help">
               <span><b>存在校验：</b>系统默认规则，相似度低于阈值时判定 NG，默认阈值 0.9</span>
-              <span><b>颜色校验：</b>填写英文颜色，如 yellow、red、blue</span>
+              <span><b>颜色校验：</b>新增颜色规则时自动识别 ROI 主色并回填，也可手动修改</span>
               <span><b>文本校验：</b>填写需要识别并校验的文字</span>
             </div>
+            <section class="vlm-review-settings">
+              <div class="vlm-review-heading">
+                <div>
+                  <strong>VLM 结果复核</strong>
+                  <small>可与主检测模型同时输出，便于比较模型判断和大模型复核结论。</small>
+                </div>
+                <label class="review-switch"><input type="checkbox" id="vlmReviewEnabled"><span>启用复核</span></label>
+              </div>
+              <div class="vlm-review-grid">
+                <label><span>复核模式</span>
+                  <select class="form-select" id="vlmReviewMode">
+                    <option value="ALWAYS">每次检测都复核</option>
+                    <option value="LOW_CONFIDENCE">仅低置信度复核</option>
+                  </select>
+                </label>
+                <label id="vlmReviewLowerField"><span>复核下限</span><input class="form-control" id="vlmReviewLower" type="number" min="0" max="1" step="0.01" value="0.85"></label>
+                <label id="vlmReviewUpperField"><span>复核上限</span><input class="form-control" id="vlmReviewUpper" type="number" min="0" max="1" step="0.01" value="0.93"></label>
+                <label class="vlm-prompt-field"><span>自动生成的复核要求</span><textarea class="form-control" id="vlmReviewPrompt" rows="3"></textarea><button class="btn btn-sm btn-outline-primary" type="button" id="regenerateVlmPrompt">重新自动生成</button></label>
+              </div>
+              <small class="vlm-review-note" id="vlmReviewModeNote">每次检测都复核时不使用上下限；测试当前 ROI 时仍会强制执行复核，便于对比结果。</small>
+            </section>
             <div class="modal-save-bar">
               <div>
                 <span>保存时会同步更新当前 ROI 的标准参考图。</span>
                 <strong id="roiRuleStatus" class="roi-rule-status" aria-live="polite"></strong>
               </div>
-              <button class="btn btn-primary" type="button" id="saveRoiRules">保存当前 ROI 规则</button>
+              <div class="modal-save-actions">
+                <button class="btn btn-outline-primary" type="button" id="testRoiRules">测试当前 ROI</button>
+                <button class="btn btn-primary" type="button" id="saveRoiRules">保存当前 ROI 规则</button>
+              </div>
             </div>
+            <section class="roi-inline-test-panel" id="roiInlineTestPanel" hidden aria-live="polite">
+              <div class="roi-inline-test-heading">
+                <div>
+                  <small>当前 ROI 即时测试</small>
+                  <strong id="roiInlineTestTitle">等待测试</strong>
+                  <span id="roiInlineTestSummary">测试不会保存规则，也不会离开当前配置页面。</span>
+                </div>
+                <span class="result-badge waiting" id="roiInlineTestBadge">WAITING</span>
+              </div>
+              <div class="roi-inline-test-overview" id="roiInlineTestOverview"></div>
+              <div class="roi-inline-test-body">
+                <div class="roi-inline-test-preview">
+                  <span>当前 ROI 裁剪图</span>
+                  <img id="roiInlineTestImage" alt="当前 ROI 裁剪图">
+                </div>
+                <div class="roi-inline-rule-results" id="roiInlineRuleResults"></div>
+              </div>
+            </section>
           </section>
         </div>
       </div>
@@ -212,6 +297,30 @@
     </div>
   </section>
 
+  <section class="workspace-view" id="servicesView">
+    <div class="model-services-toolbar">
+      <div>
+        <span class="step-number">◉</span>
+        <div><strong>模型服务运行中心</strong><small>统一查看服务地址、健康状态、进程信息和启动失败日志</small></div>
+      </div>
+      <button class="btn btn-outline-primary" type="button" id="refreshModelServices">刷新状态</button>
+    </div>
+    <div class="model-services-summary" id="modelServicesSummary"></div>
+    <div class="model-services-grid" id="modelServicesList"></div>
+    <section class="model-service-log-panel" id="modelServiceLogPanel" hidden>
+      <div class="model-service-log-heading">
+        <div><small>模型调用与进程日志</small><strong id="modelServiceLogTitle">-</strong></div>
+        <button class="btn btn-sm btn-light" type="button" id="closeModelServiceLogs">关闭日志</button>
+      </div>
+      <div class="model-service-log-paths" id="modelServiceLogPaths"></div>
+      <div class="model-service-log-grid">
+        <div class="model-service-call-log"><strong>推理调用日志</strong><pre id="modelServiceCalls">暂无测试调用记录</pre></div>
+        <div><strong>标准输出</strong><pre id="modelServiceStdout">暂无日志</pre></div>
+        <div><strong>错误输出</strong><pre id="modelServiceStderr">暂无错误日志</pre></div>
+      </div>
+    </section>
+  </section>
+
   <section class="workspace-view" id="testView">
     <div class="test-page-header">
       <button class="btn btn-light" type="button" id="backToLibrary">← 返回视觉库</button>
@@ -250,5 +359,5 @@
   </section>
 </div>
 
-<script src="{{ url_for('static', path='/js/workspace.js') }}"></script>
+<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20260802-22"></script>
 {% endblock %}
