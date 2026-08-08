@@ -73,10 +73,10 @@
         <div class="workbench-heading">
           <div>
             <span class="step-number">02</span>
-            <div><strong>上传图片并自动解析检测物体</strong><small>AI 先生成候选框，用户确认、移动、缩放或删除后再形成正式检测对象</small></div>
+            <div><strong>上传图片并配置检测物体</strong><small>上传后不会自动解析；可手动画框，或点击“自动解析”生成 AI 候选框</small></div>
           </div>
           <div class="canvas-actions">
-            <button class="btn btn-outline-primary" type="button" id="autoDiscoverButton" disabled>✦ 重新自动解析</button>
+            <button class="btn btn-outline-primary" type="button" id="autoDiscoverButton" disabled>✦ 自动解析</button>
             <label class="upload-button">
               <input type="file" id="baseImageInput" accept="image/*" hidden>
               上传 / 更换图片
@@ -88,14 +88,17 @@
           <div class="upload-empty" id="emptyStage">
             <div class="upload-illustration">↑</div>
             <h3>上传产品检测图片</h3>
-            <p>填写配方信息后上传图片，系统会自动识别保险丝、螺丝、连接器、线束等候选物体。</p>
+            <p>填写配方信息后上传图片。上传完成后，可点击“自动解析”识别候选物体，也可直接手动画框。</p>
             <label class="btn btn-primary btn-lg">
               <input type="file" id="emptyImageInput" accept="image/*" hidden>
               选择图片
             </label>
           </div>
-          <img id="baseImage" alt="规则配置图片">
-          <canvas id="roiCanvas"></canvas>
+          <div class="image-transform-surface" id="imageTransformSurface" hidden>
+            <img id="baseImage" alt="规则配置图片" draggable="false">
+            <canvas id="roiCanvas"></canvas>
+          </div>
+          <div class="image-navigation-hint" id="imageNavigationHint" hidden>滚轮缩放 · 按住空格拖动 · 双击恢复</div>
           <div class="discovery-overlay" id="discoveryOverlay" hidden>
             <span class="discovery-spinner"></span>
             <strong>正在解析图片中的检测物体</strong>
@@ -265,16 +268,27 @@
         <span class="step-number">⌕</span>
         <div><strong>视觉配置库</strong><small>选择规则配方进行测试，或重新打开编辑修改</small></div>
       </div>
-      <div class="library-search"><input id="librarySearch" class="form-control" placeholder="搜索拉线、物料、工序、相机或规则名称"></div>
+      <div class="library-search"><input id="librarySearch" class="form-control" placeholder="搜索配方名称、编码或业务字段"></div>
     </div>
+    <div class="library-filter-bar">
+      <select class="form-select" id="libraryStatusFilter"><option value="">全部状态</option><option value="PUBLISHED">已发布</option><option value="DRAFT">草稿</option></select>
+      <select class="form-select" id="libraryLineFilter"><option value="">全部拉线</option></select>
+      <select class="form-select" id="libraryMaterialFilter"><option value="">全部物料</option></select>
+      <select class="form-select" id="libraryProcessFilter"><option value="">全部工序</option></select>
+      <select class="form-select" id="libraryCameraFilter"><option value="">全部相机</option></select>
+      <select class="form-select" id="librarySort"><option value="UPDATED_DESC">最近更新</option><option value="NAME_ASC">名称升序</option><option value="MATERIAL_ASC">物料升序</option></select>
+      <button class="btn btn-outline-secondary" type="button" id="clearLibraryFilters">清除筛选</button>
+    </div>
+    <div class="library-results-meta" id="libraryResultsMeta"></div>
     <div id="configurationLibrary" class="recipe-library-grid"></div>
+    <div class="library-pagination" id="libraryPagination"></div>
   </section>
 
   <section class="workspace-view" id="recordsView">
     <div class="detection-records-toolbar">
       <div>
         <span class="step-number">≡</span>
-        <div><strong>第三方检测调用记录</strong><small>记录调用 IP、时间、参数、返回结果和接口状态</small></div>
+        <div><strong>第三方检测调用记录</strong><small>记录接口参数、返回结果及每个 ROI 的主模型/VLM 处理明细</small></div>
       </div>
       <button class="btn btn-outline-primary" type="button" id="refreshDetectionRecords">刷新记录</button>
     </div>
@@ -288,6 +302,7 @@
             <th>产品条码</th>
             <th>接口状态</th>
             <th>检测结果</th>
+            <th>模型处理</th>
             <th>耗时</th>
             <th>调用详情</th>
           </tr>

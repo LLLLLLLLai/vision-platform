@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     app_name: str = "Vision Platform"
     app_env: str = "development"
-    app_debug: bool = True
+    app_debug: bool = False
     app_host: str = "0.0.0.0"
     app_port: int = 9010
     database_url: str = "sqlite:///./data/vision_platform.db"

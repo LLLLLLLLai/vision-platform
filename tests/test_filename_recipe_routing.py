@@ -218,6 +218,22 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                 "message": "success",
                 "result": result,
                 "image_paths": [f"result-{recipe.capture_index}.jpg"],
+                "request_id": f"request-{recipe.capture_index}",
+                "elapsed_ms": 12.5,
+                "image_results": [
+                    {
+                        "image_path": image_paths[0],
+                        "result": result,
+                        "inspection_items": [
+                            {
+                                "roi_code": "ROI_1",
+                                "item_name": "存在校验",
+                                "status": result,
+                                "primary_model": "DINOv2",
+                            }
+                        ],
+                    }
+                ],
             }
 
         payload = PublicDetectRequest(
@@ -244,6 +260,11 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
             ["result-1.jpg", "result-2.jpg"],
         )
         self.assertEqual(execute_mock.await_count, 2)
+        self.assertEqual(len(response["inspection_results"]), 2)
+        self.assertEqual(
+            response["inspection_results"][0]["image_results"][0]["inspection_items"][0]["primary_model"],
+            "DINOv2",
+        )
         first_group_paths = execute_mock.await_args_list[0].kwargs["image_paths"]
         self.assertEqual(len(first_group_paths), 2)
 

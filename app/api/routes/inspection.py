@@ -329,6 +329,7 @@ async def execute_filename_routed_inspection(
 
     aggregate_result = "OK"
     result_image_paths: list[str] = []
+    inspection_results: list[dict[str, Any]] = []
     for group in recipe_groups.values():
         recipe = load_recipe_for_execution(
             database,
@@ -365,6 +366,16 @@ async def execute_filename_routed_inspection(
             }
 
         result_image_paths.extend(result.get("image_paths") or [])
+        inspection_results.append(
+            {
+                "request_id": result.get("request_id"),
+                "recipe_code": recipe.code,
+                "recipe_version": recipe.version,
+                "result": result.get("result", "ERROR"),
+                "elapsed_ms": result.get("elapsed_ms"),
+                "image_results": result.get("image_results") or [],
+            }
+        )
         group_result = str(result.get("result", "ERROR")).upper()
         if group_result == "ERROR":
             aggregate_result = "ERROR"
@@ -376,6 +387,7 @@ async def execute_filename_routed_inspection(
         "message": "success",
         "result": aggregate_result,
         "image_paths": result_image_paths,
+        "inspection_results": inspection_results,
     }
 
 
@@ -521,6 +533,7 @@ async def public_detect(
         "message": str(internal_response.get("message", "Internal error.")),
         "result": str(internal_response.get("result", "ERROR")),
         "image_paths": list(internal_response.get("image_paths") or []),
+        "inspection_results": list(internal_response.get("inspection_results") or []),
     }
     database.add(
         DetectionApiCall(

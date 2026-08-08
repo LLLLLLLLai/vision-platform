@@ -25,18 +25,39 @@ const state = {
   draftRules: [],
   vlmPromptDirty: false,
   detectionRecords: [],
+  libraryPage: 1,
+  libraryPageSize: 12,
   modelServices: [],
   activeModelServiceLogCode: null,
   modelServiceLogTimer: null,
   testRecipe: null,
   testFile: null,
   testDraft: null,
+  imageView: {
+    scale: 1,
+    minScale: 0.2,
+    maxScale: 6,
+    translateX: 0,
+    translateY: 0,
+    displayWidth: 0,
+    displayHeight: 0,
+    panMode: false,
+    panning: false,
+    panStartX: 0,
+    panStartY: 0,
+    panOriginX: 0,
+    panOriginY: 0,
+    spacePressed: false,
+    resetOnLoad: true,
+  },
 };
 
 const byId = (id) => document.getElementById(id);
 const canvas = byId("roiCanvas");
 const context = canvas.getContext("2d");
 const baseImage = byId("baseImage");
+const imageStage = byId("imageStage");
+const imageSurface = byId("imageTransformSurface");
 
 async function request(url, options = {}) {
   const response = await fetch(url, options);
@@ -120,6 +141,7 @@ async function loadData(preferredRecipeId = null) {
   );
   state.details = new Map(entries);
   fillReferenceSelects();
+  populateLibraryFilters();
   renderLibrary();
   if (preferredRecipeId) await loadRecipe(preferredRecipeId);
 }
@@ -173,7 +195,10 @@ function resetEditor() {
   populateRecipeForm(null);
   setRecipeStatus("DRAFT");
   baseImage.removeAttribute("src");
+  baseImage.removeAttribute("data-source-url");
   baseImage.style.display = "none";
+  imageSurface.hidden = true;
+  byId("imageNavigationHint").hidden = true;
   byId("emptyStage").style.display = "grid";
   byId("autoDiscoverButton").disabled = true;
   renderDiscoveryCandidates();
@@ -199,13 +224,24 @@ async function loadRecipe(recipeId) {
   populateRecipeForm(state.recipe);
   setRecipeStatus(state.recipe.status, state.recipe);
   if (state.recipe.base_image_url) {
-    baseImage.src = `${state.recipe.base_image_url}?v=${Date.now()}`;
+    const imageChanged = baseImage.dataset.sourceUrl !== state.recipe.base_image_url;
+    if (imageChanged) {
+      state.imageView.resetOnLoad = true;
+      baseImage.dataset.sourceUrl = state.recipe.base_image_url;
+      baseImage.src = `${state.recipe.base_image_url}?v=${Date.now()}`;
+    }
     baseImage.style.display = "block";
+    imageSurface.hidden = false;
+    byId("imageNavigationHint").hidden = false;
     byId("emptyStage").style.display = "none";
     byId("autoDiscoverButton").disabled = false;
+    if (!imageChanged && baseImage.complete && baseImage.naturalWidth) syncCanvas(false);
   } else {
     baseImage.removeAttribute("src");
+    baseImage.removeAttribute("data-source-url");
     baseImage.style.display = "none";
+    imageSurface.hidden = true;
+    byId("imageNavigationHint").hidden = true;
     byId("emptyStage").style.display = "grid";
     byId("autoDiscoverButton").disabled = true;
     clearCanvas();
@@ -328,9 +364,10 @@ async function uploadBaseImage(file) {
     });
     byId("baseImageInput").value = "";
     byId("emptyImageInput").value = "";
+    baseImage.removeAttribute("data-source-url");
+    state.imageView.resetOnLoad = true;
     await loadRecipe(recipe.id);
-    notify("图片上传成功，正在自动解析可检测物体……", "info", false);
-    await discoverObjects();
+    notify("图片上传成功。可直接手动画框，或点击“自动解析”生成 AI 候选物体。", "success", false);
   } catch (error) {
     notify(error.message, "danger");
   }
@@ -552,12 +589,95 @@ async function confirmCandidates(candidates) {
   }
 }
 
-function syncCanvas() {
-  canvas.width = baseImage.clientWidth;
-  canvas.height = baseImage.clientHeight;
-  canvas.style.width = `${baseImage.clientWidth}px`;
-  canvas.style.height = `${baseImage.clientHeight}px`;
+function applyImageTransform() {
+  const view = state.imageView;
+  imageSurface.style.transform =
+    `translate(${view.translateX}px, ${view.translateY}px) scale(${view.scale})`;
+  const zoomIndicator = byId("resetZoomButton");
+  const panButton = byId("togglePanButton");
+  if (zoomIndicator) zoomIndicator.textContent = `${Math.round(view.scale * 100)}%`;
+  if (panButton) panButton.classList.toggle("active", view.panMode);
+  canvas.classList.toggle("pan-mode", view.panMode || view.spacePressed);
+  canvas.classList.toggle("panning", view.panning);
+}
+
+function resetImageView() {
+  const view = state.imageView;
+  view.scale = 1;
+  view.translateX = Math.max(0, (imageStage.clientWidth - view.displayWidth) / 2);
+  view.translateY = Math.max(0, (imageStage.clientHeight - view.displayHeight) / 2);
+  applyImageTransform();
+}
+
+function syncCanvas(resetView = true) {
+  if (!baseImage.naturalWidth || !baseImage.naturalHeight) return;
+  const availableWidth = Math.max(320, imageStage.clientWidth - 32);
+  const availableHeight = Math.max(320, imageStage.clientHeight - 32);
+  const fitScale = Math.min(
+    availableWidth / baseImage.naturalWidth,
+    availableHeight / baseImage.naturalHeight,
+    1,
+  );
+  const width = Math.max(1, Math.round(baseImage.naturalWidth * fitScale));
+  const height = Math.max(1, Math.round(baseImage.naturalHeight * fitScale));
+  state.imageView.displayWidth = width;
+  state.imageView.displayHeight = height;
+  imageSurface.style.width = `${width}px`;
+  imageSurface.style.height = `${height}px`;
+  baseImage.style.width = `${width}px`;
+  baseImage.style.height = `${height}px`;
+  canvas.width = width;
+  canvas.height = height;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  if (resetView) resetImageView();
+  else applyImageTransform();
   drawCanvas();
+}
+
+function setImageScale(nextScale, clientX = null, clientY = null) {
+  const view = state.imageView;
+  if (!view.displayWidth || !view.displayHeight) return;
+  const oldScale = view.scale;
+  const scale = Math.max(view.minScale, Math.min(view.maxScale, nextScale));
+  if (Math.abs(scale - oldScale) < 0.001) return;
+  const stageBounds = imageStage.getBoundingClientRect();
+  const surfaceBounds = imageSurface.getBoundingClientRect();
+  const pointerInsideImage = clientX != null
+    && clientY != null
+    && clientX >= surfaceBounds.left
+    && clientX <= surfaceBounds.right
+    && clientY >= surfaceBounds.top
+    && clientY <= surfaceBounds.bottom;
+  const anchorX = pointerInsideImage
+    ? clientX - stageBounds.left
+    : view.translateX + (view.displayWidth * oldScale) / 2;
+  const anchorY = pointerInsideImage
+    ? clientY - stageBounds.top
+    : view.translateY + (view.displayHeight * oldScale) / 2;
+  const contentX = (anchorX - view.translateX) / oldScale;
+  const contentY = (anchorY - view.translateY) / oldScale;
+  view.scale = scale;
+  view.translateX = anchorX - contentX * scale;
+  view.translateY = anchorY - contentY * scale;
+  applyImageTransform();
+}
+
+function beginImagePan(event) {
+  const view = state.imageView;
+  view.panning = true;
+  view.panStartX = event.clientX;
+  view.panStartY = event.clientY;
+  view.panOriginX = view.translateX;
+  view.panOriginY = view.translateY;
+  applyImageTransform();
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
+}
+
+function endImagePan() {
+  state.imageView.panning = false;
+  applyImageTransform();
 }
 
 function clearCanvas() {
@@ -670,8 +790,12 @@ function drawCanvas() {
 }
 
 function pointerPosition(event) {
-  const bounds = canvas.getBoundingClientRect();
-  return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+  const stageBounds = imageStage.getBoundingClientRect();
+  const view = state.imageView;
+  return {
+    x: (event.clientX - stageBounds.left - view.translateX) / view.scale,
+    y: (event.clientY - stageBounds.top - view.translateY) / view.scale,
+  };
 }
 
 function hitRoi(point) {
@@ -705,6 +829,10 @@ function hitResizeHandle(point) {
 
 canvas.addEventListener("pointerdown", (event) => {
   if (!state.recipe?.base_image_url || state.savingRoi) return;
+  if (state.imageView.panMode || state.imageView.spacePressed || event.button === 1) {
+    beginImagePan(event);
+    return;
+  }
   const point = pointerPosition(event);
   const handle = hitResizeHandle(point);
   const existing = hitRoi(point);
@@ -738,6 +866,12 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (state.imageView.panning) {
+    state.imageView.translateX = state.imageView.panOriginX + event.clientX - state.imageView.panStartX;
+    state.imageView.translateY = state.imageView.panOriginY + event.clientY - state.imageView.panStartY;
+    applyImageTransform();
+    return;
+  }
   if (!state.drawing) return;
   const point = pointerPosition(event);
   const dx = point.x - state.startPoint.x;
@@ -781,6 +915,10 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 canvas.addEventListener("pointerup", async () => {
+  if (state.imageView.panning) {
+    endImagePan();
+    return;
+  }
   if (!state.drawing) return;
   state.drawing = false;
   const mode = state.interactionMode;
@@ -810,9 +948,16 @@ canvas.addEventListener("pointerup", async () => {
   }
 });
 
-baseImage.addEventListener("load", syncCanvas);
+canvas.addEventListener("pointercancel", () => {
+  if (state.imageView.panning) endImagePan();
+});
+
+baseImage.addEventListener("load", () => {
+  syncCanvas(state.imageView.resetOnLoad);
+  state.imageView.resetOnLoad = false;
+});
 window.addEventListener("resize", () => {
-  if (baseImage.src) syncCanvas();
+  if (baseImage.src) syncCanvas(true);
 });
 
 function selectedRoi() {
@@ -996,25 +1141,30 @@ function renderConfiguredObjects() {
         <article class="configured-object-card ${roi.id === state.selectedRoiId ? "selected" : ""}" data-detail-roi="${roi.id}">
           <div class="configured-object-heading">
             <span>${String(index + 1).padStart(2, "0")}</span>
-            <div>
-              <small>${escapeHtml(roi.code)} · ${escapeHtml(roi.object_type || "OBJECT")} · WORLD#${escapeHtml(roi.scene_object_id || "AUTO")}</small>
-              <strong>${escapeHtml(roi.name)}</strong>
+            <div class="configured-object-identity">
+              <small>${escapeHtml(roi.object_type || "OBJECT")}</small>
+              <strong>${escapeHtml(roi.code)}</strong>
             </div>
-            <b>${roi.inspection_items.length} 条规则</b>
+            <div class="configured-object-quick-actions">
+              <button class="btn btn-sm btn-outline-primary edit-object" type="button">编辑</button>
+              <button class="btn btn-sm btn-outline-danger delete-object" type="button">删除</button>
+            </div>
           </div>
-          <div class="configured-object-rules">
-            ${roi.inspection_items.length
-              ? roi.inspection_items.map((item) => `
-                  <span>${escapeHtml(capabilityMeta[itemCapability(item)]?.[0] || item.capability)}-${escapeHtml(describeRule(item))}</span>`).join("")
-              : "<em>尚未配置校验规则</em>"}
+          <div class="configured-object-summary">
+            <span>${roi.inspection_items.length} 条校验规则</span>
             ${roi.inspection_items.some((item) => item.rule_json.vlm_review_enabled)
-              ? '<span>Qwen 边界复核</span>'
-              : ""}
+              ? '<span class="review-enabled">VLM 复核</span>'
+              : "<span>仅主模型</span>"}
           </div>
-          <div class="configured-object-actions">
-            <button class="btn btn-sm btn-outline-primary edit-object" type="button">编辑规则</button>
-            <button class="btn btn-sm btn-outline-danger delete-object" type="button">删除区域</button>
-          </div>
+          <details class="configured-object-rule-details">
+            <summary>查看规则明细</summary>
+            <div class="configured-object-rules">
+              ${roi.inspection_items.length
+                ? roi.inspection_items.map((item) => `
+                    <span>${escapeHtml(capabilityMeta[itemCapability(item)]?.[0] || item.capability)} · ${escapeHtml(describeRule(item))}</span>`).join("")
+                : "<em>尚未配置校验规则</em>"}
+            </div>
+          </details>
         </article>`).join("")
     : `
       <div class="no-object-selected compact">
@@ -1058,11 +1208,10 @@ function populateObjectEditor() {
   byId("roiRuleStatus").className = "roi-rule-status";
   byId("selectedObjectTitle").textContent = roi.code;
   byId("roiObjectType").value = roi.object_type || "OBJECT";
-  const rect = roiRect(roi);
-  byId("roiPointX").value = `${Math.round(rect.x)} px`;
-  byId("roiPointY").value = `${Math.round(rect.y)} px`;
-  byId("roiPointWidth").value = `${Math.round(rect.width)} px`;
-  byId("roiPointHeight").value = `${Math.round(rect.height)} px`;
+  byId("roiPointX").value = `${Math.round(roi.x_ratio * baseImage.naturalWidth)} px`;
+  byId("roiPointY").value = `${Math.round(roi.y_ratio * baseImage.naturalHeight)} px`;
+  byId("roiPointWidth").value = `${Math.round(roi.width_ratio * baseImage.naturalWidth)} px`;
+  byId("roiPointHeight").value = `${Math.round(roi.height_ratio * baseImage.naturalHeight)} px`;
   updateRoiReferencePreview(roi);
   const configuredRules = roi.inspection_items.map((item) => {
     const capability = itemCapability(item);
@@ -1714,14 +1863,75 @@ function renderInlineRoiTestError(error, roi) {
   byId("roiInlineTestImage").removeAttribute("src");
 }
 
+function populateLibraryFilters() {
+  const definitions = [
+    ["libraryLineFilter", "line_code", "全部拉线"],
+    ["libraryMaterialFilter", "material_code", "全部物料"],
+    ["libraryProcessFilter", "process_code", "全部工序"],
+    ["libraryCameraFilter", "camera_code", "全部相机"],
+  ];
+  definitions.forEach(([elementId, field, placeholder]) => {
+    const select = byId(elementId);
+    const current = select.value;
+    const values = [...new Set(state.recipes.map((recipe) => recipe[field]).filter(Boolean))]
+      .sort((left, right) => String(left).localeCompare(String(right), "zh-CN"));
+    select.innerHTML = `<option value="">${placeholder}</option>${values.map((value) =>
+      `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+    if (values.includes(current)) select.value = current;
+  });
+}
+
+function renderLibraryPagination(totalPages) {
+  const container = byId("libraryPagination");
+  if (totalPages <= 1) {
+    container.innerHTML = "";
+    return;
+  }
+  const pages = [];
+  for (let page = 1; page <= totalPages; page += 1) {
+    if (page === 1 || page === totalPages || Math.abs(page - state.libraryPage) <= 2) pages.push(page);
+  }
+  const uniquePages = [...new Set(pages)];
+  let previous = 0;
+  container.innerHTML = `
+    <button type="button" data-library-page="${state.libraryPage - 1}" ${state.libraryPage === 1 ? "disabled" : ""}>上一页</button>
+    ${uniquePages.map((page) => {
+      const gap = previous && page - previous > 1 ? "<span>…</span>" : "";
+      previous = page;
+      return `${gap}<button type="button" data-library-page="${page}" class="${page === state.libraryPage ? "active" : ""}">${page}</button>`;
+    }).join("")}
+    <button type="button" data-library-page="${state.libraryPage + 1}" ${state.libraryPage === totalPages ? "disabled" : ""}>下一页</button>`;
+}
+
 function renderLibrary() {
   const query = byId("librarySearch")?.value.trim().toLowerCase() || "";
+  const filters = {
+    status: byId("libraryStatusFilter")?.value || "",
+    line_code: byId("libraryLineFilter")?.value || "",
+    material_code: byId("libraryMaterialFilter")?.value || "",
+    process_code: byId("libraryProcessFilter")?.value || "",
+    camera_code: byId("libraryCameraFilter")?.value || "",
+  };
+  const sortMode = byId("librarySort")?.value || "UPDATED_DESC";
   const filtered = state.recipes.filter((recipe) => {
     const detail = state.details.get(recipe.id);
-    return !query || JSON.stringify({ ...recipe, ...detail }).toLowerCase().includes(query);
+    const matchesQuery = !query || JSON.stringify({ ...recipe, ...detail }).toLowerCase().includes(query);
+    return matchesQuery && Object.entries(filters).every(([field, value]) => !value || recipe[field] === value);
   });
+  filtered.sort((left, right) => {
+    if (sortMode === "NAME_ASC") return String(left.name).localeCompare(String(right.name), "zh-CN");
+    if (sortMode === "MATERIAL_ASC") return String(left.material_code).localeCompare(String(right.material_code), "zh-CN");
+    return String(right.updated_at || right.created_at || right.id).localeCompare(String(left.updated_at || left.created_at || left.id));
+  });
+  const totalPages = Math.max(1, Math.ceil(filtered.length / state.libraryPageSize));
+  state.libraryPage = Math.min(state.libraryPage, totalPages);
+  const start = (state.libraryPage - 1) * state.libraryPageSize;
+  const visibleRecipes = filtered.slice(start, start + state.libraryPageSize);
+  byId("libraryResultsMeta").textContent = filtered.length
+    ? `共 ${filtered.length} 个配方，当前显示第 ${start + 1}–${Math.min(start + state.libraryPageSize, filtered.length)} 个`
+    : "没有符合当前条件的配方";
   byId("configurationLibrary").innerHTML = filtered.length
-    ? filtered.map((recipe) => `
+    ? visibleRecipes.map((recipe) => `
         <article class="recipe-library-card" data-recipe-id="${recipe.id}">
           <div class="recipe-library-card-top">
             <span class="configuration-symbol">${escapeHtml(recipe.material_code.slice(0, 2) || "VP")}</span>
@@ -1744,13 +1954,59 @@ function renderLibrary() {
             <button class="btn btn-primary test-recipe" type="button">测试配方</button>
           </div>
         </article>`).join("")
-    : '<div class="library-no-results">没有找到匹配的规则配方</div>';
+    : '<div class="library-no-results">没有找到匹配的规则配方，请清除筛选或调整关键词。</div>';
+  renderLibraryPagination(totalPages);
 }
 
 function formatDetectionTime(value) {
   if (!value) return "-";
   const utcValue = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
   return new Date(utcValue).toLocaleString("zh-CN", { hour12: false });
+}
+
+function detectionModelItems(response) {
+  return (response.inspection_results || []).flatMap((inspection) =>
+    (inspection.image_results || []).flatMap((imageResult) =>
+      (imageResult.inspection_items || []).map((item) => ({
+        ...item,
+        recipeCode: inspection.recipe_code,
+        imagePath: imageResult.image_path,
+      }))),
+  );
+}
+
+function conciseModelValue(item) {
+  const primary = item.actual?.primary_result || {};
+  const details = primary.details || {};
+  if (details.text) return details.text;
+  if (details.color) return details.color;
+  if (details.matched_class) return details.matched_class;
+  if (details.top1_similarity != null) return `相似度 ${Number(details.top1_similarity).toFixed(3)}`;
+  if (item.score != null) return `分数 ${Number(item.score).toFixed(3)}`;
+  return item.message || "无结构化值";
+}
+
+function renderRecordModelResults(response) {
+  const items = detectionModelItems(response);
+  if (!items.length) return '<span class="record-model-empty">无模型明细</span>';
+  const problemCount = items.filter((item) => item.status !== "OK").length;
+  return `
+    <details class="record-model-details">
+      <summary><strong>${items.length} 项</strong><span>${problemCount ? `${problemCount} 项异常` : "全部通过"}</span></summary>
+      <div class="record-model-list">
+        ${items.map((item) => {
+          const primary = item.actual?.primary_result || {};
+          const review = item.actual?.vlm_review;
+          return `<article class="record-model-item ${String(item.status || "ERROR").toLowerCase()}">
+            <header><strong>${escapeHtml(item.roi_code || item.item_code || "ROI")}</strong><b>${escapeHtml(item.status || "ERROR")}</b></header>
+            <div><span>规则</span><strong>${escapeHtml(item.item_name || item.scene_type || item.capability || "-")}</strong></div>
+            <div><span>主模型</span><strong>${escapeHtml(primary.model || item.primary_model || "-")} · ${escapeHtml(primary.status || item.status || "-")}</strong></div>
+            <div><span>模型输出</span><strong>${escapeHtml(conciseModelValue(item))}</strong></div>
+            <div><span>VLM 复核</span><strong>${review ? `${escapeHtml(review.model || "VLM")} · ${escapeHtml(review.status || "-")}` : "未执行"}</strong></div>
+          </article>`;
+        }).join("")}
+      </div>
+    </details>`;
 }
 
 function renderDetectionRecords() {
@@ -1773,6 +2029,7 @@ function renderDetectionRecords() {
             <td><strong>${escapeHtml(record.sn)}</strong></td>
             <td><span class="call-status ${record.response_code === 0 ? "success" : "failed"}">${record.response_code} · ${escapeHtml(record.call_status)}</span></td>
             <td><span class="result-badge ${(response.result || "error").toLowerCase()}">${escapeHtml(response.result || "ERROR")}</span></td>
+            <td>${renderRecordModelResults(response)}</td>
             <td>${record.elapsed_ms == null ? "-" : `${record.elapsed_ms} ms`}</td>
             <td>
               <details class="call-payload-details">
@@ -1783,18 +2040,18 @@ function renderDetectionRecords() {
             </td>
           </tr>`;
       }).join("")
-    : '<tr><td colspan="7" class="records-empty">暂无第三方检测调用记录</td></tr>';
+    : '<tr><td colspan="8" class="records-empty">暂无第三方检测调用记录</td></tr>';
 }
 
 async function loadDetectionRecords() {
   byId("detectionRecordsBody").innerHTML =
-    '<tr><td colspan="7" class="records-empty">正在加载检测记录…</td></tr>';
+    '<tr><td colspan="8" class="records-empty">正在加载检测记录…</td></tr>';
   try {
     state.detectionRecords = await request(`${api}/inspection/call-records?limit=200`);
     renderDetectionRecords();
   } catch (error) {
     byId("detectionRecordsBody").innerHTML =
-      `<tr><td colspan="7" class="records-empty error">${escapeHtml(error.message)}</td></tr>`;
+      `<tr><td colspan="8" class="records-empty error">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -2085,10 +2342,44 @@ byId("imageStage").addEventListener("drop", (event) => {
   event.preventDefault();
   uploadBaseImage(event.dataTransfer.files[0]);
 });
+byId("zoomOutButton")?.addEventListener("click", () => setImageScale(state.imageView.scale / 1.2));
+byId("zoomInButton")?.addEventListener("click", () => setImageScale(state.imageView.scale * 1.2));
+byId("resetZoomButton")?.addEventListener("click", resetImageView);
+byId("togglePanButton")?.addEventListener("click", () => {
+  state.imageView.panMode = !state.imageView.panMode;
+  applyImageTransform();
+});
+imageStage.addEventListener("wheel", (event) => {
+  if (!state.recipe?.base_image_url) return;
+  event.preventDefault();
+  const factor = Math.exp(-event.deltaY * 0.0015);
+  setImageScale(state.imageView.scale * factor, event.clientX, event.clientY);
+}, { passive: false });
+imageStage.addEventListener("dblclick", (event) => {
+  const surfaceBounds = imageSurface.getBoundingClientRect();
+  if (
+    event.clientX >= surfaceBounds.left
+    && event.clientX <= surfaceBounds.right
+    && event.clientY >= surfaceBounds.top
+    && event.clientY <= surfaceBounds.bottom
+  ) resetImageView();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.code !== "Space" || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
+  event.preventDefault();
+  state.imageView.spacePressed = true;
+  applyImageTransform();
+});
+document.addEventListener("keyup", (event) => {
+  if (event.code !== "Space") return;
+  state.imageView.spacePressed = false;
+  applyImageTransform();
+});
 
 byId("configuredObjectList").addEventListener("click", async (event) => {
   const card = event.target.closest("[data-detail-roi]");
   if (!card) return;
+  if (event.target.closest(".configured-object-rule-details")) return;
   const roiId = Number(card.dataset.detailRoi);
   if (event.target.closest(".edit-object")) {
     openObjectModal(roiId);
@@ -2199,7 +2490,28 @@ byId("ruleRows").addEventListener("click", async (event) => {
   refreshVlmPrompt();
 });
 
-byId("librarySearch").addEventListener("input", renderLibrary);
+function resetLibraryPageAndRender() {
+  state.libraryPage = 1;
+  renderLibrary();
+}
+
+byId("librarySearch").addEventListener("input", resetLibraryPageAndRender);
+["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter", "librarySort"]
+  .forEach((elementId) => byId(elementId).addEventListener("change", resetLibraryPageAndRender));
+byId("clearLibraryFilters").addEventListener("click", () => {
+  byId("librarySearch").value = "";
+  ["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter"]
+    .forEach((elementId) => { byId(elementId).value = ""; });
+  byId("librarySort").value = "UPDATED_DESC";
+  resetLibraryPageAndRender();
+});
+byId("libraryPagination").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-library-page]");
+  if (!button || button.disabled) return;
+  state.libraryPage = Number(button.dataset.libraryPage);
+  renderLibrary();
+  byId("libraryView").scrollIntoView({ behavior: "smooth", block: "start" });
+});
 byId("refreshDetectionRecords").addEventListener("click", loadDetectionRecords);
 byId("refreshModelServices").addEventListener("click", () => loadModelServices());
 byId("closeModelServiceLogs").addEventListener("click", () => {
