@@ -4,6 +4,8 @@ const state = {
   stations: [],
   recipes: [],
   references: [],
+  referenceObjectTypes: [],
+  referenceCandidates: [],
   details: new Map(),
   recipe: null,
   worldScene: null,
@@ -127,11 +129,18 @@ function updateGeneratedName() {
 }
 
 async function loadData(preferredRecipeId = null) {
-  [state.products, state.stations, state.recipes, state.references] = await Promise.all([
+  [
+    state.products,
+    state.stations,
+    state.recipes,
+    state.references,
+    state.referenceObjectTypes,
+  ] = await Promise.all([
     request(`${api}/configuration/products`),
     request(`${api}/configuration/stations`),
     request(`${api}/configuration/recipes`),
     request(`${api}/configuration/reference-groups`),
+    request(`${api}/configuration/reference-object-types`),
   ]);
   const entries = await Promise.all(
     state.recipes.map(async (recipe) => [
@@ -141,9 +150,36 @@ async function loadData(preferredRecipeId = null) {
   );
   state.details = new Map(entries);
   fillReferenceSelects();
+  fillObjectTypeSelect();
   populateLibraryFilters();
   renderLibrary();
+  renderReferenceLibrary();
   if (preferredRecipeId) await loadRecipe(preferredRecipeId);
+}
+
+function fillObjectTypeSelect(selectedCode = null) {
+  const select = byId("roiObjectType");
+  const current = selectedCode || select.value || "OBJECT";
+  select.innerHTML = state.referenceObjectTypes.length
+    ? state.referenceObjectTypes.map((item) => `
+        <option value="${escapeHtml(item.code)}" ${item.code === current ? "selected" : ""}>
+          ${escapeHtml(item.name)} (${escapeHtml(item.code)})
+        </option>`).join("")
+    : '<option value="">请先在视觉标准库创建物体类型</option>';
+  select.disabled = !state.referenceObjectTypes.length;
+  if (state.referenceObjectTypes.length && !select.value) {
+    select.value = state.referenceObjectTypes[0].code;
+  }
+  const referenceSelect = byId("newReferenceObjectType");
+  if (!referenceSelect) return;
+  const referenceCurrent = referenceSelect.value || state.referenceObjectTypes[0]?.code || "";
+  referenceSelect.innerHTML = state.referenceObjectTypes.length
+    ? state.referenceObjectTypes.map((item) => `
+        <option value="${escapeHtml(item.code)}" ${item.code === referenceCurrent ? "selected" : ""}>
+          ${escapeHtml(item.name)} (${escapeHtml(item.code)})
+        </option>`).join("")
+    : '<option value="">请先新建物体类型</option>';
+  referenceSelect.disabled = !state.referenceObjectTypes.length;
 }
 
 function fillReferenceSelects(selectedId = null) {
@@ -156,6 +192,222 @@ function fillReferenceSelects(selectedId = null) {
           </option>`).join("")
       : '<option value="">请先创建参考类别</option>';
   });
+}
+
+async function reloadReferenceLibrary() {
+  state.referenceCandidates = await request(`${api}/reference-candidates?limit=200`);
+  renderReferenceCandidates();
+}
+
+function candidateStatusMeta(status) {
+  const values = {
+    ACCEPTED: ["VLM已通过", "accepted"],
+    UNCERTAIN: ["需要确认", "uncertain"],
+    REJECTED: ["已拒绝", "rejected"],
+    ERROR: ["复核失败", "error"],
+    PROMOTED: ["已加入正式基准", "promoted"],
+    PENDING_VLM: ["等待VLM复核", "pending"],
+  };
+  return values[status] || [status || "未知", "pending"];
+}
+
+function renderReferenceCandidates() {
+  const container = byId("referenceCandidateGrid");
+  if (!container) return;
+  const statusFilter = byId("referenceCandidateStatusFilter")?.value || "";
+  const candidates = state.referenceCandidates.filter(
+    (candidate) => !statusFilter || candidate.status === statusFilter,
+  );
+  container.innerHTML = candidates.length
+    ? candidates.map((candidate) => {
+        const [statusLabel, statusClass] = candidateStatusMeta(candidate.status);
+        const parsed = candidate.vlm_result?.parsed || {};
+        const differences = Array.isArray(parsed.differences) && parsed.differences.length
+          ? parsed.differences.join("；")
+          : "未发现关键差异";
+        const canPromote = ["ACCEPTED", "UNCERTAIN"].includes(candidate.status)
+          && !candidate.promoted_reference_image_id;
+        const canReject = !["PROMOTED", "REJECTED"].includes(candidate.status);
+        return `
+          <article class="reference-candidate-card" data-candidate-id="${candidate.id}">
+            <header>
+              <div>
+                <strong>${escapeHtml(candidate.roi_name || candidate.roi_code || "检测区域")}</strong>
+                <small>${escapeHtml(candidate.recipe_name || candidate.recipe_code || "未知配方")} · SN ${escapeHtml(candidate.sn)}</small>
+              </div>
+              <span class="candidate-status ${statusClass}">${escapeHtml(statusLabel)}</span>
+            </header>
+            <div class="candidate-image-comparison">
+              <figure>
+                <figcaption>合格基准</figcaption>
+                ${candidate.baseline_image_url
+                  ? `<img src="${escapeHtml(candidate.baseline_image_url)}?v=${encodeURIComponent(candidate.created_at)}" alt="合格基准">`
+                  : '<div class="candidate-image-empty">基准图不可预览</div>'}
+              </figure>
+              <figure>
+                <figcaption>本次检测ROI</figcaption>
+                ${candidate.candidate_image_url
+                  ? `<img src="${escapeHtml(candidate.candidate_image_url)}?v=${encodeURIComponent(candidate.created_at)}" alt="本次检测ROI">`
+                  : '<div class="candidate-image-empty">候选图不可预览</div>'}
+              </figure>
+            </div>
+            <div class="candidate-evidence">
+              <span><small>主模型相似度</small><strong>${candidate.similarity_score == null ? "—" : Number(candidate.similarity_score).toFixed(4)}</strong></span>
+              <span><small>VLM置信度</small><strong>${candidate.vlm_confidence == null ? "—" : Number(candidate.vlm_confidence).toFixed(2)}</strong></span>
+              <span><small>图片质量</small><strong>${candidate.quality?.passed ? "通过" : "未通过"}</strong></span>
+            </div>
+            <div class="candidate-review-reason">
+              <strong>VLM双图结论</strong>
+              <p>${escapeHtml(candidate.reason || "等待复核")}</p>
+              <small>${escapeHtml(differences)}</small>
+            </div>
+            <footer>
+              ${canReject ? `<button class="btn btn-sm btn-outline-danger" type="button" data-candidate-reject="${candidate.id}">拒绝</button>` : ""}
+              ${canPromote ? `<button class="btn btn-sm btn-primary" type="button" data-candidate-promote="${candidate.id}">加入正式基准</button>` : ""}
+            </footer>
+          </article>`;
+      }).join("")
+    : '<div class="reference-library-empty wide">当前筛选条件下没有候选图片。</div>';
+}
+
+async function updateReferenceCandidate(candidateId, action) {
+  await request(`${api}/reference-candidates/${candidateId}/${action}`, { method: "POST" });
+  await reloadReferenceLibrary();
+}
+
+function renderReferenceLibrary() {
+  const typeContainer = byId("referenceObjectTypeList");
+  const groupContainer = byId("referenceGroupGrid");
+  if (!typeContainer || !groupContainer) return;
+  const query = byId("referenceLibrarySearch")?.value.trim().toLowerCase() || "";
+  const matchesQuery = (...values) => !query || values.some(
+    (value) => String(value || "").toLowerCase().includes(query),
+  );
+  const visibleTypes = state.referenceObjectTypes.filter((item) =>
+    matchesQuery(item.code, item.name, item.description));
+  const visibleGroups = state.references.filter((item) =>
+    matchesQuery(item.code, item.name, item.object_type, item.class_code));
+  const totalImages = state.references.reduce((sum, group) => sum + Number(group.image_count || 0), 0);
+  byId("referenceLibrarySummary").innerHTML = `
+    <span><small>物体类型</small><strong>${state.referenceObjectTypes.length}</strong></span>
+    <span><small>标准类别</small><strong>${state.references.length}</strong></span>
+    <span><small>正式标准图</small><strong>${totalImages}</strong></span>
+    <span><small>当前筛选</small><strong>${visibleGroups.length} 类</strong></span>`;
+  typeContainer.innerHTML = visibleTypes.length
+    ? visibleTypes.map((item) => {
+        const groups = state.references.filter((group) => group.object_type === item.code);
+        const imageCount = groups.reduce((sum, group) => sum + Number(group.image_count || 0), 0);
+        return `
+          <article class="reference-object-type-card">
+            <span>${escapeHtml(item.code.slice(0, 2))}</span>
+            <div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)}</small></div>
+            <div class="reference-type-count"><b>${groups.length}</b><small>类别</small></div>
+            <div class="reference-type-count"><b>${imageCount}</b><small>图片</small></div>
+          </article>`;
+      }).join("")
+    : '<div class="reference-library-empty">没有匹配的物体类型</div>';
+  groupContainer.innerHTML = visibleGroups.length
+    ? visibleGroups.map((group) => {
+        const type = state.referenceObjectTypes.find((item) => item.code === group.object_type);
+        const images = group.images || [];
+        return `
+          <article class="reference-group-card" data-reference-group-id="${group.id}">
+            <header>
+              <div>
+                <small>${escapeHtml(type?.name || group.object_type)} · ${escapeHtml(group.class_code)}</small>
+                <strong>${escapeHtml(group.name)}</strong>
+                <code>${escapeHtml(group.code)}</code>
+              </div>
+              <span class="reference-image-count">${images.length} 张</span>
+            </header>
+            <div class="reference-image-grid">
+              ${images.map((image) => `
+                <figure class="reference-image-card" data-reference-image-id="${image.id}">
+                  <img src="${escapeHtml(image.image_url)}?v=${encodeURIComponent(image.created_at || image.id)}" alt="${escapeHtml(group.name)}标准图">
+                  <figcaption>
+                    <span class="embedding-status ${String(image.quality_status || "PENDING").toLowerCase()}">${escapeHtml(image.quality_status || "PENDING")}</span>
+                    <button type="button" class="remove-reference-image" title="移出当前图库">删除</button>
+                  </figcaption>
+                </figure>`).join("") || '<div class="reference-image-empty">暂时没有标准图，可从当前ROI添加或在这里上传。</div>'}
+            </div>
+            <footer>
+              <label class="btn btn-sm btn-outline-primary reference-upload-button">
+                <input type="file" accept="image/*" multiple hidden data-reference-upload="${group.id}">
+                ＋ 上传标准图片
+              </label>
+              <small>支持多选；上传后自动生成DINOv2特征向量</small>
+            </footer>
+          </article>`;
+      }).join("")
+    : '<div class="reference-library-empty wide">没有匹配的标准类别，请新建类别后上传标准图片。</div>';
+}
+
+async function createObjectTypeFromLibrary() {
+  const code = normalizeCode(byId("newObjectTypeCode").value);
+  const name = byId("newObjectTypeName").value.trim();
+  if (!code || !name) {
+    notify("请填写物体类型编码和名称", "warning", false);
+    return;
+  }
+  await request(`${api}/configuration/reference-object-types`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, name }),
+  });
+  byId("newObjectTypeCode").value = "";
+  byId("newObjectTypeName").value = "";
+  await reloadReferenceLibrary();
+  notify(`物体类型“${name}”已加入视觉标准库`, "success", false);
+}
+
+async function createReferenceGroupFromLibrary() {
+  const code = normalizeCode(byId("newReferenceCode").value);
+  const name = byId("newReferenceName").value.trim();
+  const objectType = byId("newReferenceObjectType").value;
+  const classCode = normalizeCode(byId("newReferenceClassCode").value);
+  if (!code || !name || !objectType || !classCode) {
+    notify("请完整填写标准类别编码、名称、物体类型和判定类别", "warning", false);
+    return;
+  }
+  await request(`${api}/configuration/reference-groups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code,
+      name,
+      object_type: objectType,
+      class_code: classCode,
+      description: "视觉标准库手动创建",
+    }),
+  });
+  byId("newReferenceCode").value = "";
+  byId("newReferenceName").value = "";
+  byId("newReferenceClassCode").value = "";
+  await reloadReferenceLibrary();
+  notify(`标准类别“${name}”已创建，可以继续上传标准图片`, "success", false);
+}
+
+async function uploadReferenceFiles(groupId, files) {
+  if (!files.length) return;
+  let failed = 0;
+  for (const file of files) {
+    const data = new FormData();
+    data.append("file", file);
+    try {
+      await request(`${api}/configuration/reference-groups/${groupId}/images`, {
+        method: "POST",
+        body: data,
+      });
+    } catch (_error) {
+      failed += 1;
+    }
+  }
+  await reloadReferenceLibrary();
+  notify(
+    failed ? `${files.length - failed}张图片上传成功，${failed}张处理失败` : `${files.length}张标准图片已上传并完成处理`,
+    failed ? "warning" : "success",
+    false,
+  );
 }
 
 function populateRecipeForm(recipe) {
@@ -1207,7 +1459,7 @@ function populateObjectEditor() {
   byId("roiRuleStatus").textContent = "";
   byId("roiRuleStatus").className = "roi-rule-status";
   byId("selectedObjectTitle").textContent = roi.code;
-  byId("roiObjectType").value = roi.object_type || "OBJECT";
+  fillObjectTypeSelect(roi.object_type || "OBJECT");
   byId("roiPointX").value = `${Math.round(roi.x_ratio * baseImage.naturalWidth)} px`;
   byId("roiPointY").value = `${Math.round(roi.y_ratio * baseImage.naturalHeight)} px`;
   byId("roiPointWidth").value = `${Math.round(roi.width_ratio * baseImage.naturalWidth)} px`;
@@ -1354,7 +1606,8 @@ function rulePromptDescription(rule) {
 
 function generatedVlmPrompt() {
   const objectType = byId("roiObjectType").value || "OBJECT";
-  const objectName = objectTypeLabels[objectType] || objectType;
+  const configuredType = state.referenceObjectTypes.find((item) => item.code === objectType);
+  const objectName = configuredType?.name || objectTypeLabels[objectType] || objectType;
   const requirements = state.draftRules.map((rule, index) => `${index + 1}. ${rulePromptDescription(rule)}`).join("\n");
   return `只检查图片中的${objectName}检测区域，不要分析区域外内容。\n请复核以下规则：\n${requirements || "1. 检查目标状态是否符合要求"}\n不得根据常识猜测；看不清时返回UNCERTAIN。只返回结构化JSON，包含result、confidence和reason。`;
 }
@@ -1731,6 +1984,9 @@ function resetInlineRoiTest() {
   byId("roiInlineTestBadge").textContent = "WAITING";
   byId("roiInlineTestOverview").innerHTML = "";
   byId("roiInlineRuleResults").innerHTML = "";
+  byId("roiInlineReferenceImage").removeAttribute("src");
+  byId("roiInlineReferenceImage").hidden = true;
+  byId("roiInlineReferenceEmpty").hidden = false;
   byId("roiInlineTestImage").removeAttribute("src");
 }
 
@@ -1746,6 +2002,20 @@ function showInlineRoiTestLoading(roi, rules, review) {
     <div><small>规则数量</small><strong>${rules.length}</strong></div>
     <div><small>VLM 复核</small><strong>${review.enabled ? "已启用" : "未启用"}</strong></div>`;
   byId("roiInlineRuleResults").innerHTML = '<div class="roi-inline-loading"><span></span>正在读取图片并执行检测…</div>';
+  const referenceUrl = roi.reference?.image_url
+    || byId("roiReferenceImage")?.getAttribute("src")
+    || "";
+  const referenceImage = byId("roiInlineReferenceImage");
+  const referenceEmpty = byId("roiInlineReferenceEmpty");
+  if (referenceUrl) {
+    referenceImage.src = referenceUrl;
+    referenceImage.hidden = false;
+    referenceEmpty.hidden = true;
+  } else {
+    referenceImage.removeAttribute("src");
+    referenceImage.hidden = true;
+    referenceEmpty.hidden = false;
+  }
   panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
@@ -2205,7 +2475,19 @@ function openTest(recipeId) {
   state.testDraft = null;
   byId("testRecipeName").textContent = state.testRecipe.name;
   byId("testFile").value = "";
-  byId("testPreviewImage").hidden = true;
+  byId("testImageComparison").hidden = true;
+  byId("testActualImageLabel").textContent = "实测图";
+  const referenceImage = byId("testReferenceImage");
+  const referenceEmpty = byId("testReferenceEmpty");
+  if (state.testRecipe.base_image_url) {
+    referenceImage.src = `${state.testRecipe.base_image_url}?v=${Date.now()}`;
+    referenceImage.hidden = false;
+    referenceEmpty.hidden = true;
+  } else {
+    referenceImage.removeAttribute("src");
+    referenceImage.hidden = true;
+    referenceEmpty.hidden = false;
+  }
   byId("testUploadStage").hidden = false;
   byId("runRecipeTest").disabled = true;
   byId("testOverview").innerHTML = `
@@ -2221,7 +2503,8 @@ function previewTestFile(file) {
   state.testFile = file;
   const preview = byId("testPreviewImage");
   preview.src = URL.createObjectURL(file);
-  preview.hidden = false;
+  byId("testActualImageLabel").textContent = "实测图（检测前）";
+  byId("testImageComparison").hidden = false;
   byId("testUploadStage").hidden = true;
   byId("runRecipeTest").disabled = false;
 }
@@ -2238,6 +2521,8 @@ function renderTestResult(result) {
     <div><small>总耗时</small><strong>${result.elapsed_ms} ms</strong></div>`;
   byId("testObjectResults").innerHTML = Object.entries(grouped).map(([roiCode, roiItems]) => {
     const roi = state.testRecipe.rois.find((item) => item.code === roiCode);
+    const standardRoiUrl = roi?.reference?.image_url || "";
+    const actualRoiUrl = roiItems.find((item) => item.roi_image_url)?.roi_image_url || "";
     const status = roiItems.some((item) => item.status === "ERROR")
       ? "ERROR"
       : roiItems.some((item) => item.status === "NG") ? "NG" : "OK";
@@ -2246,6 +2531,20 @@ function renderTestResult(result) {
         <div class="test-object-card-heading">
           <div><small>${escapeHtml(roiCode)}</small><strong>${escapeHtml(roi?.name || roiCode)}</strong></div>
           <span class="result-badge ${status.toLowerCase()}">${status}</span>
+        </div>
+        <div class="test-roi-image-comparison">
+          <figure>
+            <figcaption>标准 ROI 图</figcaption>
+            ${standardRoiUrl
+              ? `<img src="${escapeHtml(standardRoiUrl)}?v=${Date.now()}" alt="${escapeHtml(roiCode)} 标准 ROI 图">`
+              : '<div class="comparison-image-empty">当前区域还没有标准图</div>'}
+          </figure>
+          <figure>
+            <figcaption>实测 ROI 图</figcaption>
+            ${actualRoiUrl
+              ? `<img src="${escapeHtml(actualRoiUrl)}?v=${Date.now()}" alt="${escapeHtml(roiCode)} 实测 ROI 图">`
+              : '<div class="comparison-image-empty">未返回实测ROI图</div>'}
+          </figure>
         </div>
         <div class="test-rule-details">
           ${roiItems.map((item) => {
@@ -2291,6 +2590,8 @@ function renderTestResult(result) {
       </section>`;
   }).join("") || '<div class="library-no-results">该配方没有可执行规则</div>';
   byId("testPreviewImage").src = `/results/${result.request_id}/result_1.jpg?v=${Date.now()}`;
+  byId("testActualImageLabel").textContent = "实测结果图";
+  byId("testImageComparison").hidden = false;
 }
 
 async function runTest(roiId = null) {
@@ -2327,6 +2628,7 @@ document.querySelectorAll(".recipe-name-source").forEach((input) => {
 document.querySelectorAll(".workspace-switch").forEach((button) => {
   button.addEventListener("click", async () => {
     switchView(button.dataset.view);
+    if (button.dataset.view === "referenceLibraryView") await reloadReferenceLibrary();
     if (button.dataset.view === "recordsView") await loadDetectionRecords();
     if (button.dataset.view === "servicesView") await loadModelServices();
   });
@@ -2511,6 +2813,35 @@ byId("libraryPagination").addEventListener("click", (event) => {
   state.libraryPage = Number(button.dataset.libraryPage);
   renderLibrary();
   byId("libraryView").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+byId("referenceCandidateStatusFilter")?.addEventListener("change", renderReferenceCandidates);
+byId("referenceCandidateGrid")?.addEventListener("click", async (event) => {
+  const promoteButton = event.target.closest("[data-candidate-promote]");
+  const rejectButton = event.target.closest("[data-candidate-reject]");
+  const button = promoteButton || rejectButton;
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (promoteButton) {
+      await updateReferenceCandidate(Number(promoteButton.dataset.candidatePromote), "promote");
+      notify("候选图片已加入正式基准，旧基准仍然保留", "success", false);
+    } else {
+      await updateReferenceCandidate(Number(rejectButton.dataset.candidateReject), "reject");
+      notify("候选图片已拒绝，不会进入正式基准", "success", false);
+    }
+  } catch (error) {
+    notify(error.message, "danger", false);
+  } finally {
+    button.disabled = false;
+  }
+});
+byId("refreshReferenceLibrary").addEventListener("click", async () => {
+  try {
+    await reloadReferenceLibrary();
+    notify("候选基准图已刷新", "success", false);
+  } catch (error) {
+    notify(error.message, "danger", false);
+  }
 });
 byId("refreshDetectionRecords").addEventListener("click", loadDetectionRecords);
 byId("refreshModelServices").addEventListener("click", () => loadModelServices());

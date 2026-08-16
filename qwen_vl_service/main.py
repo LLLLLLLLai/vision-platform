@@ -63,6 +63,20 @@ class JudgeRequest(BaseModel):
     max_new_tokens: int = Field(default=160, ge=16, le=512)
 
 
+class CompareRequest(BaseModel):
+    baseline_image_path: str
+    candidate_image_path: str
+    prompt: str = Field(min_length=1, max_length=4000)
+    expected: dict[str, Any] = Field(default_factory=dict)
+    system_prompt: str = (
+        "You are an industrial visual inspection reviewer. Image 1 is the approved "
+        "baseline ROI and image 2 is a production candidate ROI. Compare only the "
+        "requested component. Never guess. Return UNCERTAIN when evidence is unclear. "
+        "Return one JSON object and no markdown."
+    )
+    max_new_tokens: int = Field(default=220, ge=32, le=512)
+
+
 class DiscoverRequest(BaseModel):
     image_path: str
     object_types: list[str] = Field(default_factory=list, max_length=30)
@@ -158,17 +172,21 @@ class QwenVlEngine:
 
     def _generate_json(
         self,
-        image: Image.Image,
+        image: Image.Image | list[Image.Image],
         system_prompt: str,
         user_prompt: str,
         max_new_tokens: int,
     ) -> dict[str, Any]:
+        images = image if isinstance(image, list) else [image]
         messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": image},
+                    *[
+                        {"type": "image", "image": current_image}
+                        for current_image in images
+                    ],
                     {"type": "text", "text": user_prompt},
                 ],
             },
@@ -199,8 +217,12 @@ class QwenVlEngine:
         return {
             "raw_text": raw_text,
             "parsed": parse_json_object(raw_text),
-            "input_width": image.width,
-            "input_height": image.height,
+            "input_width": images[0].width,
+            "input_height": images[0].height,
+            "input_images": [
+                {"width": current_image.width, "height": current_image.height}
+                for current_image in images
+            ],
         }
 
     def judge(self, request: JudgeRequest) -> dict[str, Any]:
@@ -219,6 +241,32 @@ class QwenVlEngine:
         )
         return self._generate_json(
             image,
+            request.system_prompt,
+            user_prompt,
+            request.max_new_tokens,
+        )
+
+    def compare(self, request: CompareRequest) -> dict[str, Any]:
+        self.load()
+        baseline = self._load_image(request.baseline_image_path)
+        candidate = self._load_image(request.candidate_image_path)
+        expected_text = json.dumps(request.expected, ensure_ascii=False)
+        user_prompt = (
+            "Image 1 is the approved baseline ROI. Image 2 is the production candidate ROI.\n"
+            f"Inspection requirements: {request.prompt}\n"
+            f"Expected state and hard-rule evidence: {expected_text}\n"
+            "Compare object identity, presence, visible model appearance, installation "
+            "state and image quality. Ignore harmless lighting or tiny crop differences. "
+            "If any critical difference is visible, return REJECT. If the two images "
+            "cannot be compared reliably, return UNCERTAIN.\n"
+            "Return exactly this JSON schema: "
+            '{"result":"PASS|REJECT|UNCERTAIN","same_object":true,'
+            '"object_present":true,"appearance_consistent":true,'
+            '"installation_consistent":true,"critical_difference":false,'
+            '"image_quality_ok":true,"confidence":0.0,"differences":[],"reason":""}'
+        )
+        return self._generate_json(
+            [baseline, candidate],
             request.system_prompt,
             user_prompt,
             request.max_new_tokens,
@@ -417,6 +465,25 @@ async def judge(request: JudgeRequest) -> dict[str, Any]:
     try:
         async with inference_lock:
             result = await asyncio.to_thread(engine.judge, request)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "code": 0,
+        "message": "success",
+        "model": settings.model_id,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        "result": result,
+    }
+
+
+@app.post("/v1/compare")
+async def compare(request: CompareRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        async with inference_lock:
+            result = await asyncio.to_thread(engine.compare, request)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

@@ -1,11 +1,25 @@
 from pathlib import Path
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 
 from app.core.config import PROJECT_ROOT, settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.world import ModelRegistry
+from app.models.recipe import RegionOfInterest
+from app.models.reference import ReferenceGroup, ReferenceObjectType
+
+
+DEFAULT_REFERENCE_OBJECT_TYPES = (
+    ("FUSE", "保险丝"),
+    ("SCREW", "螺丝"),
+    ("CONNECTOR", "连接器"),
+    ("HARNESS", "线束"),
+    ("PCBA", "PCBA"),
+    ("BUSBAR", "铜排"),
+    ("LABEL", "标签"),
+    ("OBJECT", "其他对象"),
+)
 
 
 def _upgrade_sqlite_schema() -> None:
@@ -97,7 +111,48 @@ def init_database() -> None:
 
     _upgrade_sqlite_schema()
     Base.metadata.create_all(bind=engine)
+    _seed_reference_object_types()
     _seed_model_registry()
+
+
+def _seed_reference_object_types() -> None:
+    with SessionLocal() as database:
+        defaults = dict(DEFAULT_REFERENCE_OBJECT_TYPES)
+        existing_codes = {
+            code
+            for (code,) in database.execute(
+                select(ReferenceObjectType.code)
+            ).all()
+        }
+        legacy_codes = {
+            str(code).strip().upper()
+            for (code,) in database.execute(
+                select(RegionOfInterest.object_type).where(
+                    RegionOfInterest.object_type.is_not(None)
+                )
+            ).all()
+            if str(code).strip()
+        }
+        legacy_codes.update(
+            str(code).strip().upper()
+            for (code,) in database.execute(
+                select(ReferenceGroup.object_type).where(
+                    ReferenceGroup.object_type.is_not(None)
+                )
+            ).all()
+            if str(code).strip()
+        )
+        for code in sorted(set(defaults) | legacy_codes):
+            if code in existing_codes:
+                continue
+            database.add(
+                ReferenceObjectType(
+                    code=code,
+                    name=defaults.get(code, code),
+                    description="视觉标准库统一物体类型",
+                )
+            )
+        database.commit()
 
 
 def _seed_model_registry() -> None:

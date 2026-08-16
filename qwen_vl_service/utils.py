@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 
@@ -12,10 +13,20 @@ def parse_json_object(value: str) -> dict[str, Any] | None:
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
         return None
+    candidate = cleaned[start : end + 1]
     try:
-        parsed = json.loads(cleaned[start : end + 1])
+        parsed = json.loads(candidate)
     except json.JSONDecodeError:
-        return None
+        repaired = candidate.replace('"reason ""', '"reason":""')
+        repaired = re.sub(
+            r'"([A-Za-z_][A-Za-z0-9_]*)\s*"\s*(?=")',
+            r'"\1":',
+            repaired,
+        )
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
     return parsed if isinstance(parsed, dict) else None
 
 

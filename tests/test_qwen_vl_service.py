@@ -17,6 +17,13 @@ class QwenVlJsonParsingTest(unittest.TestCase):
     def test_returns_none_for_invalid_output(self) -> None:
         self.assertIsNone(parse_json_object("not-json"))
 
+    def test_repairs_missing_colon_in_short_reason_field(self) -> None:
+        parsed = parse_json_object(
+            '{"result":"PASS","confidence":1.0,"reason ""}'
+        )
+        self.assertEqual(parsed["result"], "PASS")
+        self.assertEqual(parsed["reason"], "")
+
     def test_recovers_complete_candidates_from_truncated_json(self) -> None:
         raw = (
             '{"objects":['

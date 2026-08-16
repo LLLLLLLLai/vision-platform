@@ -15,7 +15,7 @@ from app.core.config import PROJECT_ROOT
 from app.db.session import get_db
 from app.models.inspection import InspectionItem
 from app.models.recipe import Recipe, RegionOfInterest
-from app.models.reference import ReferenceGroup, ReferenceImage
+from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObjectType
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import analyze_roi_color
@@ -72,7 +72,7 @@ class RecipeUpdate(BaseModel):
 class RoiCreate(BaseModel):
     code: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=200)
-    object_type: str | None = None
+    object_type: str = Field(min_length=1, max_length=100)
     x_ratio: float = Field(ge=0, le=1)
     y_ratio: float = Field(ge=0, le=1)
     width_ratio: float = Field(gt=0, le=1)
@@ -101,6 +101,12 @@ class ReferenceGroupCreate(BaseModel):
     description: str | None = None
 
 
+class ReferenceObjectTypeCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=500)
+
+
 def _commit(database: Session) -> None:
     try:
         database.commit()
@@ -111,6 +117,23 @@ def _commit(database: Session) -> None:
 
 def _normalize_code(value: str) -> str:
     return "_".join(value.strip().upper().replace("-", "_").split())
+
+
+def _validated_reference_object_type(database: Session, value: str) -> str:
+    code = _normalize_code(value)
+    object_type = database.scalar(
+        select(ReferenceObjectType).where(
+            ReferenceObjectType.code == code,
+            ReferenceObjectType.enabled.is_(True),
+            ReferenceObjectType.is_deleted.is_(False),
+        )
+    )
+    if object_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail="对象类型必须选择视觉标准库中已启用的类型。",
+        )
+    return code
 
 
 def _recipe_values(
@@ -502,6 +525,10 @@ def create_roi(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     values = payload.model_dump()
+    values["object_type"] = _validated_reference_object_type(
+        database,
+        payload.object_type,
+    )
     values["pixel_coordinates"] = {
         "reference_width": recipe.reference_width,
         "reference_height": recipe.reference_height,
@@ -524,7 +551,12 @@ def update_roi(
     roi = database.get(RegionOfInterest, roi_id)
     if roi is None:
         raise HTTPException(status_code=404, detail="ROI not found.")
-    for field, value in payload.model_dump().items():
+    values = payload.model_dump()
+    values["object_type"] = _validated_reference_object_type(
+        database,
+        payload.object_type,
+    )
+    for field, value in values.items():
         setattr(roi, field, value)
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None:
@@ -767,10 +799,73 @@ def list_reference_groups(
             "name": group.name,
             "object_type": group.object_type,
             "class_code": group.class_code,
-            "image_count": len([image for image in group.images if image.enabled]),
+            "description": group.description,
+            "enabled": group.enabled,
+            "images": [
+                {
+                    "id": image.id,
+                    "image_url": _file_url(image.image_path),
+                    "quality_status": image.quality_status,
+                    "model_code": image.model_code,
+                    "created_at": image.created_at.isoformat(),
+                }
+                for image in group.images
+                if image.enabled and not image.is_deleted
+            ],
+            "image_count": len(
+                [
+                    image
+                    for image in group.images
+                    if image.enabled and not image.is_deleted
+                ]
+            ),
         }
         for group in groups
     ]
+
+
+@router.get("/reference-object-types")
+def list_reference_object_types(
+    database: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    object_types = database.scalars(
+        select(ReferenceObjectType)
+        .where(
+            ReferenceObjectType.enabled.is_(True),
+            ReferenceObjectType.is_deleted.is_(False),
+        )
+        .order_by(ReferenceObjectType.name, ReferenceObjectType.code)
+    ).all()
+    return [
+        {
+            "id": object_type.id,
+            "code": object_type.code,
+            "name": object_type.name,
+            "description": object_type.description,
+        }
+        for object_type in object_types
+    ]
+
+
+@router.post("/reference-object-types")
+def create_reference_object_type(
+    payload: ReferenceObjectTypeCreate,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    object_type = ReferenceObjectType(
+        code=_normalize_code(payload.code),
+        name=payload.name.strip(),
+        description=payload.description,
+    )
+    database.add(object_type)
+    _commit(database)
+    database.refresh(object_type)
+    return {
+        "id": object_type.id,
+        "code": object_type.code,
+        "name": object_type.name,
+        "description": object_type.description,
+    }
 
 
 @router.post("/reference-groups")
@@ -778,7 +873,12 @@ def create_reference_group(
     payload: ReferenceGroupCreate,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    group = ReferenceGroup(**payload.model_dump())
+    values = payload.model_dump()
+    values["object_type"] = _validated_reference_object_type(
+        database,
+        payload.object_type,
+    )
+    group = ReferenceGroup(**values)
     database.add(group)
     _commit(database)
     database.refresh(group)
@@ -829,4 +929,22 @@ async def upload_reference_image(
         "image_path": reference.image_path,
         "image_url": _file_url(reference.image_path),
         "embedding_status": embedding_status,
+    }
+
+
+@router.delete("/reference-images/{image_id}")
+def delete_reference_image(
+    image_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    reference = database.get(ReferenceImage, image_id)
+    if reference is None or reference.is_deleted:
+        raise HTTPException(status_code=404, detail="Standard image not found.")
+    reference.enabled = False
+    reference.is_deleted = True
+    database.commit()
+    return {
+        "id": reference.id,
+        "deleted": True,
+        "message": "标准图片已移出当前图库，原始文件仍保留。",
     }

@@ -142,6 +142,10 @@ class InspectionEngine:
                         item_results.append(
                             {
                                 "roi_code": roi.code,
+                                "roi_image_url": (
+                                    f"/results/{request_id}/image_{image_index}/"
+                                    f"{roi.code}.jpg"
+                                ),
                                 "item_code": item.code,
                                 "item_name": item.name,
                                 "inspection_type": item.inspection_type,

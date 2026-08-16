@@ -1,6 +1,14 @@
 from fastapi import APIRouter
 
-from app.api.routes import algorithms, configuration, health, inspection, model_services, world
+from app.api.routes import (
+    algorithms,
+    configuration,
+    health,
+    inspection,
+    model_services,
+    reference_candidates,
+    world,
+)
 
 
 api_router = APIRouter()
@@ -9,6 +17,11 @@ api_router.include_router(
     algorithms.router,
     prefix="/algorithms",
     tags=["algorithms"],
+)
+api_router.include_router(
+    reference_candidates.router,
+    prefix="/reference-candidates",
+    tags=["reference-candidates"],
 )
 api_router.include_router(
     configuration.router,

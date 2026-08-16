@@ -27,6 +27,10 @@
       <span class="switch-icon">⌕</span>
       <span><strong>视觉库</strong><small>检索、测试和重新编辑规则配方</small></span>
     </button>
+    <button class="workspace-switch" data-view="referenceLibraryView">
+      <span class="switch-icon">▧</span>
+      <span><strong>候选基准</strong><small>自动收集、双图复核和基准更新</small></span>
+    </button>
     <button class="workspace-switch" data-view="recordsView">
       <span class="switch-icon">≡</span>
       <span><strong>检测记录</strong><small>查看第三方接口调用和检测结果</small></span>
@@ -169,14 +173,7 @@
               <div class="roi-information-grid">
                 <label><span>对象类型</span>
                   <select class="form-select" id="roiObjectType">
-                    <option value="FUSE">保险丝</option>
-                    <option value="SCREW">螺丝</option>
-                    <option value="CONNECTOR">连接器</option>
-                    <option value="HARNESS">线束</option>
-                    <option value="PCBA">PCBA</option>
-                    <option value="BUSBAR">铜排</option>
-                    <option value="LABEL">标签</option>
-                    <option value="OBJECT">其他对象</option>
+                    <option value="">正在加载视觉标准库类型…</option>
                   </select>
                 </label>
                 <label><span>X 点位</span><input class="form-control" id="roiPointX" readonly></label>
@@ -250,8 +247,17 @@
               <div class="roi-inline-test-overview" id="roiInlineTestOverview"></div>
               <div class="roi-inline-test-body">
                 <div class="roi-inline-test-preview">
-                  <span>当前 ROI 裁剪图</span>
-                  <img id="roiInlineTestImage" alt="当前 ROI 裁剪图">
+                  <div class="roi-test-image-comparison">
+                    <figure>
+                      <figcaption>标准 ROI 图</figcaption>
+                      <img id="roiInlineReferenceImage" alt="标准 ROI 图">
+                      <div class="comparison-image-empty" id="roiInlineReferenceEmpty">当前区域还没有标准图</div>
+                    </figure>
+                    <figure>
+                      <figcaption>实测 ROI 图</figcaption>
+                      <img id="roiInlineTestImage" alt="实测 ROI 图">
+                    </figure>
+                  </div>
                 </div>
                 <div class="roi-inline-rule-results" id="roiInlineRuleResults"></div>
               </div>
@@ -282,6 +288,38 @@
     <div class="library-results-meta" id="libraryResultsMeta"></div>
     <div id="configurationLibrary" class="recipe-library-grid"></div>
     <div class="library-pagination" id="libraryPagination"></div>
+  </section>
+
+  <section class="workspace-view" id="referenceLibraryView">
+    <div class="reference-library-toolbar">
+      <div>
+        <span class="step-number">▧</span>
+        <div><strong>候选基准管理</strong><small>查看生产检测自动收集的候选图，并根据双图复核结果决定是否加入合格基准</small></div>
+      </div>
+      <div class="reference-library-search">
+        <button class="btn btn-outline-primary" type="button" id="refreshReferenceLibrary">刷新候选图</button>
+      </div>
+    </div>
+
+    <section class="reference-candidate-panel">
+      <div class="reference-panel-heading candidate-panel-heading">
+        <div>
+          <strong>候选基准图</strong>
+          <small>生产检测高置信度通过后，系统使用“合格基准＋本次ROI”进行VLM双图复核；通过的图片先进入这里，不会直接改变正式基准</small>
+        </div>
+        <select class="form-select form-select-sm" id="referenceCandidateStatusFilter">
+          <option value="">全部状态</option>
+          <option value="ACCEPTED">VLM已通过</option>
+          <option value="UNCERTAIN">需要确认</option>
+          <option value="REJECTED">已拒绝</option>
+          <option value="ERROR">复核失败</option>
+          <option value="PROMOTED">已加入合格基准</option>
+        </select>
+      </div>
+      <div class="reference-candidate-grid" id="referenceCandidateGrid">
+        <div class="reference-library-empty wide">暂无候选图片。生产检测满足高置信度、硬规则和图片质量要求后会自动收集。</div>
+      </div>
+    </section>
   </section>
 
   <section class="workspace-view" id="recordsView">
@@ -357,7 +395,17 @@
           <strong>选择检测后的产品图片</strong>
           <small>支持 JPG、PNG、BMP、WEBP</small>
         </label>
-        <img id="testPreviewImage" class="test-preview-image" alt="测试图片" hidden>
+        <div class="test-image-comparison" id="testImageComparison" hidden>
+          <figure>
+            <figcaption>配方标准图</figcaption>
+            <img id="testReferenceImage" class="test-preview-image" alt="配方标准图">
+            <div class="comparison-image-empty" id="testReferenceEmpty">当前配方还没有标准图</div>
+          </figure>
+          <figure>
+            <figcaption id="testActualImageLabel">实测图</figcaption>
+            <img id="testPreviewImage" class="test-preview-image" alt="实测图片">
+          </figure>
+        </div>
         <button class="btn btn-primary btn-lg w-100 mt-3" type="button" id="runRecipeTest" disabled>开始执行全部规则</button>
       </section>
 
@@ -374,5 +422,5 @@
   </section>
 </div>
 
-<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20260802-22"></script>
+<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20260816-03"></script>
 {% endblock %}

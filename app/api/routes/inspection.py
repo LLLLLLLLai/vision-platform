@@ -7,7 +7,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +27,7 @@ from app.models.inspection import DetectionApiCall, DetectionTask
 from app.models.recipe import Recipe
 from app.models.system import Product, Station
 from app.services.inspection_engine import InspectionEngine, load_recipe_for_execution
+from app.services.reference_candidate_service import collect_reference_candidates
 
 
 router = APIRouter()
@@ -480,6 +490,7 @@ async def test_recipe(
 @router.post("/execute")
 async def execute_inspection(
     payload: ExecuteRequest,
+    background_tasks: BackgroundTasks,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     recipe = load_recipe_for_execution(
@@ -497,13 +508,19 @@ async def execute_inspection(
             "image_paths": [],
         }
     try:
-        return await engine.execute(
+        response = await engine.execute(
             database,
             recipe,
             sn=payload.sn,
             image_paths=payload.image_paths,
             request_id=payload.request_id,
         )
+        if response.get("request_id"):
+            background_tasks.add_task(
+                collect_reference_candidates,
+                [str(response["request_id"])],
+            )
+        return response
     except FileNotFoundError as exc:
         return {
             "code": 1002,
@@ -524,6 +541,7 @@ async def execute_inspection(
 async def public_detect(
     payload: PublicDetectRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     started = time.perf_counter()
@@ -548,4 +566,14 @@ async def public_detect(
         )
     )
     database.commit()
+    candidate_request_ids = [
+        str(result["request_id"])
+        for result in internal_response.get("inspection_results") or []
+        if result.get("request_id")
+    ]
+    if candidate_request_ids:
+        background_tasks.add_task(
+            collect_reference_candidates,
+            candidate_request_ids,
+        )
     return response

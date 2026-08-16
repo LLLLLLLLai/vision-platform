@@ -1,5 +1,9 @@
 # Vision Platform
 
+- 系统交接文档：`docs/Vision-Platform-System-Handover.md`
+- Word 交接文档：`docs/Vision-Platform-System-Handover.docx`
+- 启动与接口 SOP：`docs/Vision-Platform-Operation-SOP.docx`
+
 面向汽车电子装配错装、漏装、混装检测的工业视觉智能平台。第一阶段采用“工业配方 + 产品世界模型 + 可替换感知服务 + 规则决策”的结构。
 
 ## 架构

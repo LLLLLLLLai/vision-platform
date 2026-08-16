@@ -5,7 +5,12 @@ from app.models.inspection import (
     InspectionItem,
 )
 from app.models.recipe import Recipe, RegionOfInterest
-from app.models.reference import ReferenceGroup, ReferenceImage
+from app.models.reference import (
+    ReferenceCandidate,
+    ReferenceGroup,
+    ReferenceImage,
+    ReferenceObjectType,
+)
 from app.models.system import AlgorithmConfig, Product, Station
 from app.models.world import ModelRegistry, ObjectRelation, ProductScene, SceneObject
 
@@ -20,8 +25,10 @@ __all__ = [
     "Product",
     "ProductScene",
     "Recipe",
+    "ReferenceCandidate",
     "ReferenceGroup",
     "ReferenceImage",
+    "ReferenceObjectType",
     "RegionOfInterest",
     "SceneObject",
     "Station",

@@ -143,6 +143,28 @@ class AlgorithmServiceClient:
             timeout=max(self.timeout, 60.0),
         )
 
+    async def vlm_compare(
+        self,
+        baseline_image_path: str,
+        candidate_image_path: str,
+        prompt: str,
+        expected: dict[str, Any] | None = None,
+        max_new_tokens: int = 220,
+    ) -> dict[str, Any]:
+        payload = {
+            "baseline_image_path": baseline_image_path,
+            "candidate_image_path": candidate_image_path,
+            "prompt": prompt,
+            "expected": expected or {},
+            "max_new_tokens": max_new_tokens,
+        }
+        return await self._post(
+            settings.qwen_vl_service_url,
+            "/v1/compare",
+            payload,
+            timeout=max(self.timeout, 90.0),
+        )
+
     async def discover_objects(
         self,
         image_path: str,

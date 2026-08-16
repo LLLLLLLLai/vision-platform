@@ -208,6 +208,12 @@ async def service_status(service: ModelServiceDefinition) -> dict[str, Any]:
     listener_pid = _listener_pid(service.port)
     managed_pid = _read_pid(service)
     managed_pid_alive = bool(managed_pid and psutil.pid_exists(managed_pid))
+    if managed_pid and not managed_pid_alive and not listener_pid:
+        try:
+            _pid_file(service).unlink(missing_ok=True)
+        except OSError:
+            pass
+        managed_pid = None
     stdout_path, stderr_path = _log_paths(service)
     status = "READY" if healthy else "STOPPED"
 
@@ -226,8 +232,6 @@ async def service_status(service: ModelServiceDefinition) -> dict[str, Any]:
                     status = "ERROR"
             except (psutil.AccessDenied, psutil.NoSuchProcess):
                 status = "ERROR"
-        else:
-            status = "ERROR"
 
     return {
         "code": service.code,

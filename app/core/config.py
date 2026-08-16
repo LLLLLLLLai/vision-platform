@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     paddleocr_service_url: str = "http://127.0.0.1:9024"
     sam2_service_url: str = "http://127.0.0.1:9025"
     algorithm_timeout_seconds: float = 15.0
+    reference_candidate_collection_enabled: bool = True
+    reference_candidate_similarity_threshold: float = 0.93
+    reference_candidate_vlm_confidence_threshold: float = 0.90
+    reference_candidate_limit_per_roi: int = 20
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
