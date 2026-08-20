@@ -14,6 +14,10 @@ from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import annotate_image, color_ratio, crop_roi
+from app.services.reference_embedding_service import (
+    load_reference_vectors,
+    rank_reference_vectors,
+)
 
 
 def similarity_review_band(
@@ -433,18 +437,31 @@ class InspectionEngine:
         )
         if group is None:
             raise ValueError("Reference group does not exist.")
-        reference_paths = [
-            image.image_path
+        active_references = [
+            image
             for image in group.images
             if image.enabled and not image.is_deleted
         ]
+        reference_paths = [image.image_path for image in active_references]
         if not reference_paths:
             raise ValueError("Reference group has no enabled images.")
-        response = await self.algorithms.similarity(
-            roi_path,
-            reference_paths,
-            top_k=min(3, len(reference_paths)),
-        )
+        reference_vectors = load_reference_vectors(active_references)
+        if reference_vectors:
+            query_response = await self.algorithms.embedding(roi_path)
+            response = rank_reference_vectors(
+                query_response["embedding"],
+                reference_vectors,
+                top_k=min(3, len(reference_vectors)),
+            )
+            response["model"] = query_response.get("model", "dinov2-base")
+            response["embedding_cache_used"] = True
+        else:
+            response = await self.algorithms.similarity(
+                roi_path,
+                reference_paths,
+                top_k=min(3, len(reference_paths)),
+            )
+            response["embedding_cache_used"] = False
         score = float(response["top1_similarity"])
         minimum = float(item.rule_json.get("min_similarity", 0.85))
         primary_status = "OK" if score >= minimum else "NG"
@@ -452,6 +469,9 @@ class InspectionEngine:
             "matched_class": group.class_code,
             "matched_reference": response["candidates"][0]["reference_path"],
             "similarity": score,
+            "top_k_mean": response.get("top_k_mean"),
+            "reference_count": response.get("reference_count", len(reference_paths)),
+            "embedding_cache_used": response.get("embedding_cache_used", False),
             "primary_status": primary_status,
         }
         return await self._apply_vlm_review(

@@ -206,6 +206,7 @@ function candidateStatusMeta(status) {
     REJECTED: ["已拒绝", "rejected"],
     ERROR: ["复核失败", "error"],
     PROMOTED: ["已加入正式基准", "promoted"],
+    SKIPPED: ["无需加入", "skipped"],
     PENDING_VLM: ["等待VLM复核", "pending"],
   };
   return values[status] || [status || "未知", "pending"];
@@ -227,7 +228,7 @@ function renderReferenceCandidates() {
           : "未发现关键差异";
         const canPromote = ["ACCEPTED", "UNCERTAIN"].includes(candidate.status)
           && !candidate.promoted_reference_image_id;
-        const canReject = !["PROMOTED", "REJECTED"].includes(candidate.status);
+        const canReject = !["PROMOTED", "REJECTED", "SKIPPED"].includes(candidate.status);
         return `
           <article class="reference-candidate-card" data-candidate-id="${candidate.id}">
             <header>
@@ -255,6 +256,7 @@ function renderReferenceCandidates() {
               <span><small>主模型相似度</small><strong>${candidate.similarity_score == null ? "—" : Number(candidate.similarity_score).toFixed(4)}</strong></span>
               <span><small>VLM置信度</small><strong>${candidate.vlm_confidence == null ? "—" : Number(candidate.vlm_confidence).toFixed(2)}</strong></span>
               <span><small>图片质量</small><strong>${candidate.quality?.passed ? "通过" : "未通过"}</strong></span>
+              <span><small>正式基准</small><strong>${Number(candidate.active_reference_count || 0)} / ${Number(candidate.reference_limit || 10)}</strong></span>
             </div>
             <div class="candidate-review-reason">
               <strong>VLM双图结论</strong>
@@ -271,8 +273,9 @@ function renderReferenceCandidates() {
 }
 
 async function updateReferenceCandidate(candidateId, action) {
-  await request(`${api}/reference-candidates/${candidateId}/${action}`, { method: "POST" });
+  const result = await request(`${api}/reference-candidates/${candidateId}/${action}`, { method: "POST" });
   await reloadReferenceLibrary();
+  return result;
 }
 
 function renderReferenceLibrary() {
@@ -2823,8 +2826,12 @@ byId("referenceCandidateGrid")?.addEventListener("click", async (event) => {
   button.disabled = true;
   try {
     if (promoteButton) {
-      await updateReferenceCandidate(Number(promoteButton.dataset.candidatePromote), "promote");
-      notify("候选图片已加入正式基准，旧基准仍然保留", "success", false);
+      const result = await updateReferenceCandidate(Number(promoteButton.dataset.candidatePromote), "promote");
+      notify(
+        result.skipped ? result.reason : "候选图片已加入正式基准；达到上限时只会软停用重复旧基准",
+        result.skipped ? "info" : "success",
+        false,
+      );
     } else {
       await updateReferenceCandidate(Number(rejectButton.dataset.candidateReject), "reject");
       notify("候选图片已拒绝，不会进入正式基准", "success", false);

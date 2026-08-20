@@ -3,7 +3,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -19,6 +18,7 @@ from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObject
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import analyze_roi_color
+from app.services.reference_embedding_service import save_embedding
 from app.services.world_model_service import (
     sync_recipe_world_model,
     sync_roi_to_world_object,
@@ -639,10 +639,7 @@ async def capture_roi_reference(
             PROJECT_ROOT / "embeddings" / str(group.id) / f"{reference.id}.npy"
         )
         embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(
-            embedding_path,
-            np.asarray(response["embedding"], dtype=np.float32),
-        )
+        save_embedding(embedding_path, response["embedding"])
         reference.embedding_path = str(embedding_path)
         reference.embedding_dimension = int(response["dimension"])
         reference.quality_status = "READY"
@@ -913,7 +910,7 @@ async def upload_reference_image(
             PROJECT_ROOT / "embeddings" / str(group_id) / f"{reference.id}.npy"
         )
         embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(embedding_path, np.asarray(response["embedding"], dtype=np.float32))
+        save_embedding(embedding_path, response["embedding"])
         reference.embedding_path = str(embedding_path)
         reference.embedding_dimension = int(response["dimension"])
         reference.quality_status = "READY"

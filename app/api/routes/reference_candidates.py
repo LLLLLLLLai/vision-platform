@@ -1,16 +1,20 @@
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.db.session import get_db
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceCandidate, ReferenceGroup, ReferenceImage
 from app.services.algorithm_client import AlgorithmServiceClient
+from app.services.reference_embedding_service import (
+    decide_reference_addition,
+    load_reference_vectors,
+    save_embedding,
+)
 
 
 router = APIRouter()
@@ -32,6 +36,7 @@ def _candidate_payload(
     recipe: Recipe | None,
     roi: RegionOfInterest | None,
     group: ReferenceGroup | None,
+    reference_count: int,
 ) -> dict[str, Any]:
     return {
         "id": candidate.id,
@@ -54,6 +59,8 @@ def _candidate_payload(
         "vlm_confidence": candidate.vlm_confidence,
         "reason": candidate.reason,
         "promoted_reference_image_id": candidate.promoted_reference_image_id,
+        "active_reference_count": reference_count,
+        "reference_limit": settings.reference_approved_limit_per_group,
         "created_at": candidate.created_at.isoformat(),
     }
 
@@ -72,12 +79,23 @@ def list_candidates(
     candidates = database.scalars(
         statement.order_by(ReferenceCandidate.id.desc()).limit(min(max(limit, 1), 500))
     ).all()
+    reference_counts = dict(
+        database.execute(
+            select(ReferenceImage.group_id, func.count(ReferenceImage.id))
+            .where(
+                ReferenceImage.enabled.is_(True),
+                ReferenceImage.is_deleted.is_(False),
+            )
+            .group_by(ReferenceImage.group_id)
+        ).all()
+    )
     return [
         _candidate_payload(
             candidate,
             database.get(Recipe, candidate.recipe_id),
             database.get(RegionOfInterest, candidate.roi_id),
             database.get(ReferenceGroup, candidate.group_id),
+            int(reference_counts.get(candidate.group_id, 0)),
         )
         for candidate in candidates
     ]
@@ -119,38 +137,108 @@ async def promote_candidate(
             "reference_image_id": candidate.promoted_reference_image_id,
         }
 
+    active_references = database.scalars(
+        select(ReferenceImage).where(
+            ReferenceImage.group_id == candidate.group_id,
+            ReferenceImage.enabled.is_(True),
+            ReferenceImage.is_deleted.is_(False),
+        )
+    ).all()
+    response: dict[str, Any] | None = None
+    try:
+        response = await algorithm_client.embedding(candidate.candidate_image_path)
+    except Exception as exc:
+        if len(active_references) >= settings.reference_approved_limit_per_group:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "DINOv2 embedding is unavailable and the approved reference set "
+                    "is already at capacity. Retry after the model service recovers."
+                ),
+            ) from exc
+
+    replacement: ReferenceImage | None = None
+    if response is not None:
+        reference_vectors = load_reference_vectors(active_references)
+        if (
+            len(active_references) >= settings.reference_approved_limit_per_group
+            and len(reference_vectors) != len(active_references)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Some approved references have no usable embedding. Regenerate "
+                    "them before adding another reference."
+                ),
+            )
+        decision = decide_reference_addition(
+            response["embedding"],
+            reference_vectors,
+            limit=settings.reference_approved_limit_per_group,
+            duplicate_threshold=settings.reference_duplicate_similarity_threshold,
+            diversity_margin=settings.reference_diversity_improvement_margin,
+        )
+        if decision.action.startswith("SKIP_"):
+            candidate.status = "SKIPPED"
+            candidate.reason = (
+                "候选图与现有正式基准重复或未增加新的正常外观变化，"
+                f"未加入基准。最近相似度：{decision.nearest_similarity:.4f}"
+                if decision.nearest_similarity is not None
+                else "候选图未增加新的正常外观变化，未加入基准。"
+            )
+            database.commit()
+            return {
+                "id": candidate.id,
+                "status": candidate.status,
+                "skipped": True,
+                "reason": candidate.reason,
+                "active_reference_count": len(active_references),
+            }
+        if decision.replace_reference_id is not None:
+            replacement = database.get(ReferenceImage, decision.replace_reference_id)
+            if replacement is not None:
+                replacement.enabled = False
+
     reference = ReferenceImage(
         group_id=candidate.group_id,
         image_path=candidate.candidate_image_path,
         quality_status="PENDING",
     )
     database.add(reference)
-    database.commit()
-    database.refresh(reference)
-
-    try:
-        response = await algorithm_client.embedding(candidate.candidate_image_path)
+    database.flush()
+    if response is not None:
         embedding_path = Path(
             PROJECT_ROOT
             / "embeddings"
             / str(candidate.group_id)
             / f"{reference.id}.npy"
         )
-        embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(embedding_path, np.asarray(response["embedding"], dtype=np.float32))
+        reference.embedding_dimension = save_embedding(
+            embedding_path,
+            response["embedding"],
+        )
         reference.embedding_path = str(embedding_path)
-        reference.embedding_dimension = int(response["dimension"])
         reference.quality_status = "READY"
-    except Exception:
+    else:
         reference.quality_status = "PENDING_RETRY"
 
     candidate.status = "PROMOTED"
     candidate.promoted_reference_image_id = reference.id
-    candidate.reason = "Promoted to approved reference library by user."
+    candidate.reason = (
+        "已加入正式基准，并软停用一张高度重复的旧基准。"
+        if replacement is not None
+        else "已加入正式基准。"
+    )
     database.commit()
     return {
         "id": candidate.id,
         "status": candidate.status,
         "reference_image_id": reference.id,
         "embedding_status": reference.quality_status,
+        "replaced_reference_image_id": replacement.id if replacement else None,
+        "active_reference_count": min(
+            len(active_references) + 1,
+            settings.reference_approved_limit_per_group,
+        ),
+        "reference_limit": settings.reference_approved_limit_per_group,
     }

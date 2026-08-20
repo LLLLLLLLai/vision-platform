@@ -8,6 +8,7 @@ from app.services.reference_candidate_service import (
     image_quality_metrics,
     parse_candidate_decision,
     perceptual_hash,
+    perceptual_hash_distance,
     primary_rules_pass,
 )
 from app.models.inspection import DetectionItemResult
@@ -79,6 +80,13 @@ class ReferenceCandidatePolicyTest(unittest.TestCase):
             quality = image_quality_metrics(str(path))
             self.assertTrue(quality["passed"])
             self.assertEqual(perceptual_hash(str(path)), perceptual_hash(str(path)))
+            self.assertEqual(
+                perceptual_hash_distance(
+                    perceptual_hash(str(path)),
+                    perceptual_hash(str(path)),
+                ),
+                0,
+            )
 
     def test_vlm_override_cannot_hide_primary_rule_failure(self) -> None:
         row = DetectionItemResult(

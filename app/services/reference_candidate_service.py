@@ -74,6 +74,12 @@ def perceptual_hash(image_path: str) -> str:
     return packed.tobytes().hex()
 
 
+def perceptual_hash_distance(left: str, right: str) -> int:
+    if len(left) != len(right):
+        return max(len(left), len(right)) * 4
+    return sum((int(a, 16) ^ int(b, 16)).bit_count() for a, b in zip(left, right))
+
+
 def parse_candidate_decision(
     response: dict[str, Any],
     minimum_confidence: float,
@@ -228,14 +234,17 @@ class ReferenceCandidateCollector:
         if not quality["passed"]:
             return
         content_hash = perceptual_hash(source_path)
-        duplicate = database.scalar(
+        existing_hashes = database.scalars(
             select(ReferenceCandidate).where(
                 ReferenceCandidate.roi_id == roi.id,
-                ReferenceCandidate.content_hash == content_hash,
                 ReferenceCandidate.is_deleted.is_(False),
             )
-        )
-        if duplicate is not None:
+        ).all()
+        if any(
+            perceptual_hash_distance(item.content_hash, content_hash)
+            <= max(0, settings.reference_candidate_hash_distance)
+            for item in existing_hashes
+        ):
             return
 
         destination_root = Path(

@@ -305,7 +305,7 @@
       <div class="reference-panel-heading candidate-panel-heading">
         <div>
           <strong>候选基准图</strong>
-          <small>生产检测高置信度通过后，系统使用“合格基准＋本次ROI”进行VLM双图复核；通过的图片先进入这里，不会直接改变正式基准</small>
+          <small>生产检测高置信度通过后，系统使用“合格基准＋本次ROI”进行VLM双图复核；正式基准默认最多10张，重复图不追加，满额时只软停用高度重复旧图</small>
         </div>
         <select class="form-select form-select-sm" id="referenceCandidateStatusFilter">
           <option value="">全部状态</option>

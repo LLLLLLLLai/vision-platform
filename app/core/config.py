@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     reference_candidate_similarity_threshold: float = 0.93
     reference_candidate_vlm_confidence_threshold: float = 0.90
     reference_candidate_limit_per_roi: int = 20
+    reference_candidate_hash_distance: int = 4
+    reference_approved_limit_per_group: int = 10
+    reference_duplicate_similarity_threshold: float = 0.995
+    reference_diversity_improvement_margin: float = 0.005
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
