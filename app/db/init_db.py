@@ -63,6 +63,41 @@ def _upgrade_sqlite_schema() -> None:
         )
 
     inspector = inspect(engine)
+    if "reference_groups" in inspector.get_table_names():
+        group_columns = {
+            column["name"] for column in inspector.get_columns("reference_groups")
+        }
+        group_additions = {
+            "embedding_set_version": "INTEGER NOT NULL DEFAULT 0",
+            "embedding_matrix_path": "VARCHAR(500)",
+            "embedding_manifest_path": "VARCHAR(500)",
+            "embedding_count": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with engine.begin() as connection:
+            for column_name, column_type in group_additions.items():
+                if column_name not in group_columns:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE reference_groups "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
+                    )
+
+    inspector = inspect(engine)
+    if "reference_images" in inspector.get_table_names():
+        image_columns = {
+            column["name"] for column in inspector.get_columns("reference_images")
+        }
+        if "embedding_index" not in image_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE reference_images "
+                        "ADD COLUMN embedding_index INTEGER"
+                    )
+                )
+
+    inspector = inspect(engine)
     if "regions_of_interest" not in inspector.get_table_names():
         return
     roi_columns = {
@@ -108,6 +143,10 @@ def init_database() -> None:
         "logs",
     ):
         Path(PROJECT_ROOT / directory).mkdir(parents=True, exist_ok=True)
+    embedding_root = Path(settings.embedding_storage_root).expanduser()
+    if not embedding_root.is_absolute():
+        embedding_root = PROJECT_ROOT / embedding_root
+    embedding_root.mkdir(parents=True, exist_ok=True)
 
     _upgrade_sqlite_schema()
     Base.metadata.create_all(bind=engine)

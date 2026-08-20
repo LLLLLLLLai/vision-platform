@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -96,6 +97,7 @@ SERVICE_DEFINITIONS = {
 
 STATE_DIR = PROJECT_ROOT / "data" / "model_services"
 LOG_DIR = PROJECT_ROOT / "logs" / "model_services"
+TIMESTAMPED_LOG_RUNNER = PROJECT_ROOT / "scripts" / "run_with_timestamped_logs.py"
 
 
 def get_service_definition(code: str) -> ModelServiceDefinition:
@@ -288,7 +290,17 @@ def start_service(service: ModelServiceDefinition) -> dict[str, Any]:
         "a", encoding="utf-8"
     ) as stderr_file:
         process = subprocess.Popen(
-            [str(service.python_executable), str(service.script)],
+            [
+                str(service.python_executable),
+                str(TIMESTAMPED_LOG_RUNNER),
+                "--stdout-log",
+                str(stdout_path),
+                "--stderr-log",
+                str(stderr_path),
+                "--",
+                str(service.python_executable),
+                str(service.script),
+            ],
             cwd=PROJECT_ROOT,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -344,6 +356,7 @@ def service_logs(service: ModelServiceDefinition, lines: int = 200) -> dict[str,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
         "call_log_path": str(call_log_path),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "calls": _tail(call_log_path, lines),
         "stdout": _tail(stdout_path, lines),
         "stderr": _tail(stderr_path, lines),

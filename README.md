@@ -46,7 +46,9 @@ OK / NG / ERROR
 - Qwen3-VL 4B 本地 4-bit 测试服务。
 - DINOv2 低置信度区间自动触发 Qwen3-VL 复核，异常时按安全策略判定。
 - 生产相似度检测复用已保存的标准 Embedding，实测 ROI 每次只编码一次。
-- 标准 Embedding 使用 FP16 保存；正式基准默认最多 10 张，近重复候选不追加。
+- 标准 Embedding 使用 FP16 保存；同一 ROI 的活动基准合并为一个矩阵文件，按行号读取。
+- 向量目录按拉线、物料、工序、相机、拍照次数、配方和 ROI 分层，数据库只保存相对路径。
+- 相似度默认使用 `65% × Top1 + 35% × Top3均值` 的稳健分数，避免单张异常基准决定结果。
 - 正式基准满额后仅在候选图增加有效多样性时软停用一张重复旧图，历史文件不删除。
 
 ## 目录
@@ -69,6 +71,7 @@ qwen_vl_service/          Qwen3-VL 独立服务
 sam2_service/             SAM2.1 线束分割独立服务
 vision-models/            本地模型文件，不纳入 Git
 test_images/              测试图片
+embeddings/               分层的 ROI 向量矩阵和清单
 ```
 
 ## 平台启动
@@ -208,6 +211,28 @@ Grounding DINO 生成黑色、灰色、橙色和低压线束粗框
 ```
 
 Qwen3-VL 需要较新的 Transformers；官方模型说明要求 `transformers>=4.57.0`，服务依赖已单独放在 `qwen_vl_service/requirements.txt`。
+
+## 参考向量存储
+
+每个 ROI 活动基准集只读取一个 `embeddings.npy`，矩阵每一行对应一张参考图；`manifest.json` 保存行号与参考图 ID 的映射。示例：
+
+```text
+embeddings/LINE_LINE01/MATERIAL_MAT001/PROCESS_OP20/
+  CAMERA_CAMERA1/SHOT_01/RECIPE_00000001/ROI_00000012/SET_V0003/
+    embeddings.npy
+    manifest.json
+```
+
+旧版单图 `.npy` 仍可读取，不会自动删除。迁移前先预览，确认后再应用：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\migrate_reference_embeddings.py
+.\.venv\Scripts\python.exe scripts\migrate_reference_embeddings.py --apply
+```
+
+Linux 可把 `EMBEDDING_STORAGE_ROOT` 指向独立数据盘，例如 `/data/vision-platform/embeddings`。
+
+当参考图不足 3 张时会自动使用实际数量；只有 1 张时稳健分数等于 Top1，不改变现有单基准配方行为。规则测试结果会同时返回 Top1、Top-K 均值、离散度和最终稳健分数。
 
 ## 下一阶段
 

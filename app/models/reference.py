@@ -26,6 +26,16 @@ class ReferenceGroup(TimestampMixin, Base):
     class_code: Mapped[str] = mapped_column(String(100), index=True)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    embedding_set_version: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_matrix_path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    embedding_manifest_path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    embedding_count: Mapped[int] = mapped_column(Integer, default=0)
 
     images: Mapped[list["ReferenceImage"]] = relationship(
         back_populates="group",
@@ -44,6 +54,7 @@ class ReferenceImage(TimestampMixin, Base):
     image_path: Mapped[str] = mapped_column(String(500))
     embedding_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     embedding_dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_code: Mapped[str] = mapped_column(String(100), default="dinov2-base")
     model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     quality_status: Mapped[str] = mapped_column(String(30), default="PENDING")

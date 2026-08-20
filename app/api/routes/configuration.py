@@ -18,7 +18,7 @@ from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObject
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import analyze_roi_color
-from app.services.reference_embedding_service import save_embedding
+from app.services.reference_embedding_service import write_reference_matrix
 from app.services.world_model_service import (
     sync_recipe_world_model,
     sync_roi_to_world_object,
@@ -295,6 +295,23 @@ def _latest_auto_reference(
         "image_url": _file_url(reference.image_path),
         "embedding_status": reference.quality_status,
     }
+
+
+def _reference_group_context(
+    database: Session,
+    group_id: int,
+) -> tuple[Recipe | None, RegionOfInterest | None]:
+    item = database.scalar(
+        select(InspectionItem)
+        .where(InspectionItem.reference_group_id == group_id)
+        .order_by(InspectionItem.id)
+    )
+    if item is None:
+        return None, None
+    roi = database.get(RegionOfInterest, item.roi_id)
+    if roi is None:
+        return None, None
+    return database.get(Recipe, roi.recipe_id), roi
 
 
 @router.get("/products")
@@ -629,23 +646,23 @@ async def capture_roi_reference(
         quality_status="PENDING",
     )
     database.add(reference)
-    for existing_image in existing_images:
-        existing_image.enabled = False
     database.commit()
     database.refresh(reference)
     try:
         response = await algorithm_client.embedding(str(reference_path))
-        embedding_path = Path(
-            PROJECT_ROOT / "embeddings" / str(group.id) / f"{reference.id}.npy"
+        matrix = write_reference_matrix(
+            group,
+            [reference],
+            {reference.id: response["embedding"]},
+            recipe=recipe,
+            roi=roi,
         )
-        embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        save_embedding(embedding_path, response["embedding"])
-        reference.embedding_path = str(embedding_path)
-        reference.embedding_dimension = int(response["dimension"])
-        reference.quality_status = "READY"
+        for existing_image in existing_images:
+            existing_image.enabled = False
         database.commit()
     except Exception as exc:
         reference.quality_status = "PENDING_RETRY"
+        reference.enabled = False
         database.commit()
         return {
             "group_id": group.id,
@@ -661,6 +678,8 @@ async def capture_roi_reference(
         "class_code": group.class_code,
         "image_url": _file_url(str(reference_path)),
         "embedding_status": reference.quality_status,
+        "embedding_set_version": matrix["version"],
+        "embedding_matrix_path": matrix["matrix_path"],
     }
 
 
@@ -798,6 +817,10 @@ def list_reference_groups(
             "class_code": group.class_code,
             "description": group.description,
             "enabled": group.enabled,
+            "embedding_set_version": group.embedding_set_version,
+            "embedding_matrix_path": group.embedding_matrix_path,
+            "embedding_manifest_path": group.embedding_manifest_path,
+            "embedding_count": group.embedding_count,
             "images": [
                 {
                     "id": image.id,
@@ -906,18 +929,26 @@ async def upload_reference_image(
 
     try:
         response = await algorithm_client.embedding(str(path))
-        embedding_path = Path(
-            PROJECT_ROOT / "embeddings" / str(group_id) / f"{reference.id}.npy"
+        active_references = database.scalars(
+            select(ReferenceImage).where(
+                ReferenceImage.group_id == group_id,
+                ReferenceImage.enabled.is_(True),
+                ReferenceImage.is_deleted.is_(False),
+            )
+        ).all()
+        recipe, roi = _reference_group_context(database, group_id)
+        matrix = write_reference_matrix(
+            group,
+            active_references,
+            {reference.id: response["embedding"]},
+            recipe=recipe,
+            roi=roi,
         )
-        embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        save_embedding(embedding_path, response["embedding"])
-        reference.embedding_path = str(embedding_path)
-        reference.embedding_dimension = int(response["dimension"])
-        reference.quality_status = "READY"
         database.commit()
         embedding_status = "READY"
     except Exception as exc:
         reference.quality_status = "FAILED"
+        reference.enabled = False
         database.commit()
         embedding_status = f"FAILED: {exc}"
 
@@ -926,6 +957,8 @@ async def upload_reference_image(
         "image_path": reference.image_path,
         "image_url": _file_url(reference.image_path),
         "embedding_status": embedding_status,
+        "embedding_set_version": group.embedding_set_version,
+        "embedding_matrix_path": group.embedding_matrix_path,
     }
 
 
@@ -939,6 +972,22 @@ def delete_reference_image(
         raise HTTPException(status_code=404, detail="Standard image not found.")
     reference.enabled = False
     reference.is_deleted = True
+    group = database.get(ReferenceGroup, reference.group_id)
+    if group is not None:
+        recipe, roi = _reference_group_context(database, group.id)
+        active_references = database.scalars(
+            select(ReferenceImage).where(
+                ReferenceImage.group_id == group.id,
+                ReferenceImage.enabled.is_(True),
+                ReferenceImage.is_deleted.is_(False),
+            )
+        ).all()
+        write_reference_matrix(
+            group,
+            active_references,
+            recipe=recipe,
+            roi=roi,
+        )
     database.commit()
     return {
         "id": reference.id,

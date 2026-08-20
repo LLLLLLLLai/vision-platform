@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.models.inspection import DetectionItemResult, DetectionTask, InspectionItem
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup
@@ -446,12 +446,21 @@ class InspectionEngine:
         if not reference_paths:
             raise ValueError("Reference group has no enabled images.")
         reference_vectors = load_reference_vectors(active_references)
+        configured_top_k = max(
+            1,
+            int(
+                item.rule_json.get(
+                    "similarity_top_k",
+                    settings.reference_similarity_top_k,
+                )
+            ),
+        )
         if reference_vectors:
             query_response = await self.algorithms.embedding(roi_path)
             response = rank_reference_vectors(
                 query_response["embedding"],
                 reference_vectors,
-                top_k=min(3, len(reference_vectors)),
+                top_k=min(configured_top_k, len(reference_vectors)),
             )
             response["model"] = query_response.get("model", "dinov2-base")
             response["embedding_cache_used"] = True
@@ -459,17 +468,67 @@ class InspectionEngine:
             response = await self.algorithms.similarity(
                 roi_path,
                 reference_paths,
-                top_k=min(3, len(reference_paths)),
+                top_k=min(configured_top_k, len(reference_paths)),
             )
             response["embedding_cache_used"] = False
-        score = float(response["top1_similarity"])
+        top1_similarity = float(response["top1_similarity"])
+        top_k_mean = float(response.get("top_k_mean", top1_similarity))
+        top1_weight = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    item.rule_json.get(
+                        "similarity_top1_weight",
+                        settings.reference_similarity_top1_weight,
+                    )
+                ),
+            ),
+        )
+        scoring_mode = str(
+            item.rule_json.get(
+                "similarity_scoring_mode",
+                settings.reference_similarity_scoring_mode,
+            )
+        ).upper()
+        if scoring_mode == "TOP1":
+            score = top1_similarity
+        elif scoring_mode == "TOP_K_MEAN":
+            score = top_k_mean
+        else:
+            scoring_mode = "ROBUST_TOP_K"
+            score = float(
+                response.get(
+                    "robust_similarity",
+                    top1_similarity
+                    if int(response.get("selected_count", 1)) == 1
+                    else top1_weight * top1_similarity
+                    + (1.0 - top1_weight) * top_k_mean,
+                )
+            )
         minimum = float(item.rule_json.get("min_similarity", 0.85))
         primary_status = "OK" if score >= minimum else "NG"
+        selected_candidates = response.get("candidates", [])
+        passing_reference_count = sum(
+            1
+            for candidate in selected_candidates
+            if float(candidate.get("similarity", 0.0)) >= minimum
+        )
         actual = {
             "matched_class": group.class_code,
             "matched_reference": response["candidates"][0]["reference_path"],
             "similarity": score,
-            "top_k_mean": response.get("top_k_mean"),
+            "top1_similarity": top1_similarity,
+            "top_k_mean": top_k_mean,
+            "top_k_median": response.get("top_k_median"),
+            "top_k_std": response.get("top_k_std"),
+            "scoring_mode": scoring_mode,
+            "top1_weight": top1_weight,
+            "selected_count": response.get(
+                "selected_count",
+                len(selected_candidates),
+            ),
+            "passing_reference_count": passing_reference_count,
             "reference_count": response.get("reference_count", len(reference_paths)),
             "embedding_cache_used": response.get("embedding_cache_used", False),
             "primary_status": primary_status,
@@ -481,7 +540,11 @@ class InspectionEngine:
                 "status": primary_status,
                 "actual": actual,
                 "score": score,
-                "message": f"Similarity {score:.4f}, required >= {minimum:.4f}",
+                "message": (
+                    f"Robust similarity {score:.4f} "
+                    f"(Top1 {top1_similarity:.4f}, Top-K mean {top_k_mean:.4f}), "
+                    f"required >= {minimum:.4f}"
+                ),
             },
             primary_model="DINOv2",
             minimum=minimum,

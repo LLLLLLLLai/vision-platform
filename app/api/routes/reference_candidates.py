@@ -13,7 +13,7 @@ from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.reference_embedding_service import (
     decide_reference_addition,
     load_reference_vectors,
-    save_embedding,
+    write_reference_matrix,
 )
 
 
@@ -206,21 +206,23 @@ async def promote_candidate(
     )
     database.add(reference)
     database.flush()
+    matrix: dict[str, object] | None = None
     if response is not None:
-        embedding_path = Path(
-            PROJECT_ROOT
-            / "embeddings"
-            / str(candidate.group_id)
-            / f"{reference.id}.npy"
+        recipe = database.get(Recipe, candidate.recipe_id)
+        roi = database.get(RegionOfInterest, candidate.roi_id)
+        group = database.get(ReferenceGroup, candidate.group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Reference group not found.")
+        matrix = write_reference_matrix(
+            group,
+            [*active_references, reference],
+            {reference.id: response["embedding"]},
+            recipe=recipe,
+            roi=roi,
         )
-        reference.embedding_dimension = save_embedding(
-            embedding_path,
-            response["embedding"],
-        )
-        reference.embedding_path = str(embedding_path)
-        reference.quality_status = "READY"
     else:
         reference.quality_status = "PENDING_RETRY"
+        reference.enabled = False
 
     candidate.status = "PROMOTED"
     candidate.promoted_reference_image_id = reference.id
@@ -235,6 +237,8 @@ async def promote_candidate(
         "status": candidate.status,
         "reference_image_id": reference.id,
         "embedding_status": reference.quality_status,
+        "embedding_set_version": matrix["version"] if matrix else None,
+        "embedding_matrix_path": matrix["matrix_path"] if matrix else None,
         "replaced_reference_image_id": replacement.id if replacement else None,
         "active_reference_count": min(
             len(active_references) + 1,

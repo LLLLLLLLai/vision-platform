@@ -2039,7 +2039,15 @@ function resultValueRows(values) {
 function primaryResultValues(primary) {
   const details = primary.details || {};
   const values = {};
-  if (details.similarity != null) values["相似度"] = Number(details.similarity).toFixed(4);
+  if (details.scoring_mode === "ROBUST_TOP_K") {
+    if (details.similarity != null) values["最终稳健分"] = Number(details.similarity).toFixed(4);
+    if (details.top1_similarity != null) values["最高相似度"] = Number(details.top1_similarity).toFixed(4);
+    if (details.top_k_mean != null) values[`Top-${Number(details.selected_count || 1)} 平均`] = Number(details.top_k_mean).toFixed(4);
+    if (details.top_k_std != null) values["参考分数离散度"] = Number(details.top_k_std).toFixed(4);
+    if (details.passing_reference_count != null) values["达到阈值参考图"] = `${Number(details.passing_reference_count)} / ${Number(details.selected_count || 1)}`;
+  } else if (details.similarity != null) {
+    values["相似度"] = Number(details.similarity).toFixed(4);
+  }
   if (details.matched_class) values["匹配类别"] = details.matched_class;
   if (details.matched_reference) values["命中参考图"] = String(details.matched_reference).split(/[\\/]/).pop();
   if (details.color) values["识别颜色"] = details.color;
@@ -2253,6 +2261,9 @@ function conciseModelValue(item) {
   const details = primary.details || {};
   if (details.text) return details.text;
   if (details.color) return details.color;
+  if (details.scoring_mode === "ROBUST_TOP_K" && details.similarity != null) {
+    return `稳健分 ${Number(details.similarity).toFixed(3)} / Top1 ${Number(details.top1_similarity).toFixed(3)}`;
+  }
   if (details.matched_class) return details.matched_class;
   if (details.top1_similarity != null) return `相似度 ${Number(details.top1_similarity).toFixed(3)}`;
   if (item.score != null) return `分数 ${Number(item.score).toFixed(3)}`;
@@ -2447,10 +2458,10 @@ async function showModelServiceLogs(code, silent = false) {
   try {
     const logs = await request(`${api}/model-services/${encodeURIComponent(code)}/logs?lines=300`);
     byId("modelServiceLogTitle").textContent = logs.name;
-    byId("modelServiceLogPaths").textContent = `调用日志：${logs.call_log_path}　标准输出：${logs.stdout_path}　错误输出：${logs.stderr_path}`;
+    byId("modelServiceLogPaths").textContent = `刷新时间：${logs.generated_at || "-"}　调用记录：${logs.call_log_path}　运行日志：${logs.stdout_path}　诊断日志：${logs.stderr_path}`;
     byId("modelServiceCalls").textContent = logs.calls || "暂无测试调用记录";
-    byId("modelServiceStdout").textContent = logs.stdout || "暂无标准输出日志";
-    byId("modelServiceStderr").textContent = logs.stderr || "暂无错误日志";
+    byId("modelServiceStdout").textContent = logs.stdout || "暂无运行日志";
+    byId("modelServiceStderr").textContent = logs.stderr || "暂无诊断日志";
     byId("modelServiceLogPanel").hidden = false;
     scrollModelLogsToLatest();
     if (!silent) {

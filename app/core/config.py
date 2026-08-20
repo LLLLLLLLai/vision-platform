@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 9010
     database_url: str = "sqlite:///./data/vision_platform.db"
+    embedding_storage_root: str = str(PROJECT_ROOT / "embeddings")
     grounding_service_url: str = "http://127.0.0.1:9021"
     dinov2_service_url: str = "http://127.0.0.1:9022"
     qwen_vl_service_url: str = "http://127.0.0.1:9023"
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     reference_approved_limit_per_group: int = 10
     reference_duplicate_similarity_threshold: float = 0.995
     reference_diversity_improvement_margin: float = 0.005
+    reference_embedding_memory_cache_size: int = 512
+    reference_similarity_scoring_mode: str = "ROBUST_TOP_K"
+    reference_similarity_top_k: int = 3
+    reference_similarity_top1_weight: float = 0.65
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

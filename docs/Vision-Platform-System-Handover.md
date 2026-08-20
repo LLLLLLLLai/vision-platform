@@ -1,8 +1,8 @@
 # Vision Platform 工业视觉智能平台系统交接手册
 
-> 文档版本：V1.0  
-> 对应代码分支：`develop`  
-> 编制日期：2026-08-16  
+> 文档版本：V1.1
+> 对应代码分支：`develop`
+> 编制日期：2026-08-16；最近更新：2026-08-21
 > 适用对象：后端开发、算法工程师、前端开发、实施运维人员、项目负责人
 
 ## 1. 文档目的
@@ -117,8 +117,13 @@ flowchart TD
 
 - 统一显示五个模型服务的 IP、端口、运行状态、进程号和设备信息。
 - 支持一键启动、一键停止和刷新状态。
-- 支持查看启动日志、错误日志和调用日志。
+- 支持查看推理调用记录、运行日志和诊断日志。
 - 日志区域可滚动并自动定位到最新内容。
+- 新启动的模型服务通过 `scripts/run_with_timestamped_logs.py` 包装运行，运行日志和诊断日志的每一行都增加带时区的 ISO 时间，例如 `[2026-08-21T00:58:11.256+08:00]`。升级前已经存在的历史行不会被改写。
+- **推理调用记录**：结构化记录模型接口请求时间、请求能力、耗时、状态和处理结果，适合追踪一次检测是否真正调用了模型。
+- **运行日志（正常信息）**：服务启动、HTTP 访问、健康检查和正常运行状态，文件后缀为 `.out.log`。
+- **诊断日志（警告与错误）**：模型警告、启动异常和错误堆栈，文件后缀为 `.error.log`。Uvicorn 和部分模型库会把正常启动信息写入标准错误流，因此“诊断日志有内容”不等于服务故障，最终应结合健康状态和错误堆栈判断。
+- 日志接口响应包含 `generated_at`，前端每 3 秒刷新一次并显示最近刷新时间。
 - 已修复残留 PID 导致“已停止服务误显示为启动失败”的问题。
 
 ## 6. 配方系统
@@ -211,6 +216,36 @@ ProductScene
 当前存在检测依赖至少一张可用参考 ROI。DINOv2 本身不是检测器，它输出视觉特征；真正的判定由相似度和规则阈值完成。
 
 标准图 Embedding 在基准创建时预先生成并以 FP16 保存。生产检测只对本次实测 ROI 提取一次 Embedding，然后在平台内与当前 ROI 的已保存向量计算相似度；只有旧基准缺少可用 Embedding 时才回退到重新编码标准图片。
+
+同一 ROI 当前启用的基准向量合并为一个二维矩阵 `embeddings.npy`，每一行对应一张 `ReferenceImage`，数据库通过 `embedding_index` 记录行号。服务按文件修改时间和大小缓存矩阵，因此一次检测不会为 10 张基准图打开 10 个向量文件。
+
+配方关联基准采用以下分层目录：
+
+```text
+EMBEDDING_STORAGE_ROOT/
+  LINE_{line}/MATERIAL_{material}/PROCESS_{process}/
+  CAMERA_{camera}/SHOT_{nn}/RECIPE_{id}/ROI_{id}/SET_V{version}/
+    embeddings.npy
+    manifest.json
+```
+
+没有配方上下文的通用参考组按 `SHARD_xx/GROUP_xxxxxxxx/SET_Vxxxx` 分片。数据库保存相对于 `EMBEDDING_STORAGE_ROOT` 的路径，便于从 Windows 迁移到 Linux。旧版绝对路径、单图一文件向量继续兼容读取。
+
+每次活动基准集变化都会创建新的 `SET_V`，先原子写入新矩阵和清单，再更新数据库；旧向量文件不自动删除。安全迁移脚本默认为只预览，只有增加 `--apply` 才更新数据库：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\migrate_reference_embeddings.py
+.\.venv\Scripts\python.exe scripts\migrate_reference_embeddings.py --apply
+```
+
+生产判定不再仅取最高相似度。默认计算：
+
+```text
+最终稳健分数 = 0.65 × Top1 + 0.35 × Top-K 均值
+Top-K 默认取最相似的 3 张；参考图不足 3 张时使用实际数量。
+```
+
+只有一张参考图时最终分数等于 Top1，兼容现有配方。多图情况下，单张错误或偶然高度相似的参考图不能独自把结果拉到 OK。检测明细保存 `top1_similarity`、`top_k_mean`、`top_k_median`、`top_k_std`、最终 `similarity` 和参与聚合的参考图数量。阈值仍使用检测规则的 `min_similarity`，因此参考图增加后应通过配方测试页面复核边界样本。
 
 ### 8.3 OCR 文字
 
@@ -442,6 +477,7 @@ scripts/                   初始化、启动、下载、测试、模型恢复
 tests/                     单元测试
 vision-models/             本地模型权重
 uploads/                   配方图、参考图、测试图、候选图
+embeddings/                按业务层级保存的 ROI 向量矩阵和清单
 detection_results/         ROI 裁剪图和标注结果
 data/                      SQLite 与模型服务 PID
 logs/                      平台及模型服务日志
@@ -465,6 +501,11 @@ docs/                      SOP 与本文档
 | REFERENCE_CANDIDATE_SIMILARITY_THRESHOLD | 0.93 | 候选相似度门槛 |
 | REFERENCE_CANDIDATE_VLM_CONFIDENCE_THRESHOLD | 0.90 | 双图复核置信度门槛 |
 | REFERENCE_CANDIDATE_LIMIT_PER_ROI | 20 | 每个 ROI 活动候选上限 |
+| EMBEDDING_STORAGE_ROOT | ./embeddings | 向量矩阵根目录；Linux 建议放独立数据盘 |
+| REFERENCE_EMBEDDING_MEMORY_CACHE_SIZE | 512 | 进程内最多缓存的向量矩阵文件数 |
+| REFERENCE_SIMILARITY_SCORING_MODE | ROBUST_TOP_K | 相似度判定模式；兼容 TOP1、TOP_K_MEAN |
+| REFERENCE_SIMILARITY_TOP_K | 3 | 稳健评分参与聚合的最相似参考图数量 |
+| REFERENCE_SIMILARITY_TOP1_WEIGHT | 0.65 | 最相似参考图在稳健评分中的权重 |
 
 ## 17. Windows 本地启动
 
@@ -515,7 +556,7 @@ http://127.0.0.1:9025/health
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 ```
 
-当前测试共 47 项，覆盖：
+当前桌面项目测试共 55 项，覆盖：
 
 - 文件名与配方路由。
 - 公开接口参数兼容。
@@ -607,6 +648,10 @@ VLM 双图通过不等于绝对合格。候选图只有用户确认后才能加�
 
 当前服务通过路径读取图片。必须限制允许访问的共享目录，防止调用方传入任意本机文件路径。跨服务器部署建议使用受控对象存储 URL、签名 URL 或统一挂载路径映射。
 
+### 21.9 日志增长与敏感信息
+
+当前模型日志持续追加写入，尚未实现按大小或日期自动轮转。Linux 生产部署应使用 `logrotate` 或 systemd journal 控制保留周期，并限制日志目录权限。调用日志可能包含图片路径、产品信息和错误上下文，不应直接上传公共仓库，也不应向普通用户展示未经脱敏的完整请求。
+
 ## 22. 建议的后续开发顺序
 
 1. **生产安全加固**：路径白名单、认证、权限、审计、请求幂等和错误码规范。
@@ -615,7 +660,7 @@ VLM 双图通过不等于绝对合格。候选图只有用户确认后才能加�
 4. **配方版本流程**：复制、测试、发布、停用和历史回放，而不是直接覆盖。
 5. **数据库迁移**：引入 Alembic，Linux 正式环境迁移 PostgreSQL。
 6. **模型服务调度**：在线复核高优先级，候选双图复核低优先级。
-7. **可观测性**：Prometheus 指标、GPU 利用率、模型延迟、错误率和候选积压。
+7. **可观测性**：Prometheus 指标、GPU 利用率、模型延迟、错误率、候选积压和日志轮转。
 8. **验证矩阵**：按物体类型建立 OK、空位、错件、遮挡、方向错误等验证集。
 
 ## 23. 接手检查清单
@@ -630,7 +675,8 @@ VLM 双图通过不等于绝对合格。候选图只有用户确认后才能加�
 - [ ] `/api/detect` 可从 `CAMERA1PICTURE1` 解析相机和拍照次数。
 - [ ] 检测记录能看到请求、响应和模型明细。
 - [ ] 候选基准能显示双图并执行拒绝或加入基准。
-- [ ] 47 项单元测试全部通过。
+- [ ] 模型服务重启后，运行日志和诊断日志的新行均带 `+08:00` 时间戳。
+- [ ] 56 项单元测试全部通过。
 - [ ] Linux 部署前已重新建立虚拟环境并完成 GPU 兼容验证。
 - [ ] 生产前已备份数据库并确认图片目录权限。
 
@@ -648,6 +694,8 @@ VLM 双图通过不等于绝对合格。候选图只有用户确认后才能加�
 | 线束分割融合 | `app/services/harness_segmentation.py` |
 | 候选基准收集 | `app/services/reference_candidate_service.py` |
 | 模型服务管理 | `app/services/model_service_manager.py` |
+| 模型日志时间戳包装器 | `scripts/run_with_timestamped_logs.py` |
+| 向量存储迁移脚本 | `scripts/migrate_reference_embeddings.py` |
 | 数据库初始化 | `app/db/init_db.py` |
 | 工作台页面 | `app/templates/workspace.html` |
 | 工作台逻辑 | `app/static/js/workspace.js` |
