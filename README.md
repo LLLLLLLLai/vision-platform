@@ -1,6 +1,7 @@
 # Vision Platform
 
 - 系统交接文档：`docs/Vision-Platform-System-Handover.md`
+- OCR 服务迁移交接：`docs/OCR-Service-Handover.md`
 - Word 交接文档：`docs/Vision-Platform-System-Handover.docx`
 - 启动与接口 SOP：`docs/Vision-Platform-Operation-SOP.docx`
 
@@ -233,6 +234,16 @@ embeddings/LINE_LINE01/MATERIAL_MAT001/PROCESS_OP20/
 Linux 可把 `EMBEDDING_STORAGE_ROOT` 指向独立数据盘，例如 `/data/vision-platform/embeddings`。
 
 当参考图不足 3 张时会自动使用实际数量；只有 1 张时稳健分数等于 Top1，不改变现有单基准配方行为。规则测试结果会同时返回 Top1、Top-K 均值、离散度和最终稳健分数。
+
+## 离线静态资源
+
+前端不依赖公网 CDN。Bootstrap 5.3.7 的 CSS、Bundle JS 和许可证已固定保存在：
+
+```text
+app/static/vendor/bootstrap/5.3.7/
+```
+
+部署到无网服务器时必须保留整个 `app/static` 目录。页面通过 FastAPI 的 `/static` 路由加载 Bootstrap、平台 CSS 和 JavaScript，无需访问互联网。
 
 ## 下一阶段
 

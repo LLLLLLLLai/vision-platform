@@ -51,7 +51,11 @@ async def recognize(request: OcrRequest) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         async with inference_lock:
-            result = await asyncio.to_thread(engine.recognize, request.image_path)
+            result = await asyncio.to_thread(
+                engine.recognize,
+                request.image_path,
+                request.expected_text,
+            )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

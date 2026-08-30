@@ -694,9 +694,9 @@ class InspectionEngine:
         }
 
     async def _ocr(self, item: InspectionItem, roi_path: str) -> dict[str, Any]:
-        payload = await self.algorithms.ocr(roi_path)
-        actual_text = self._extract_ocr_text(payload)
         expected_text = str(item.expected_json.get("text", ""))
+        payload = await self.algorithms.ocr(roi_path, expected_text=expected_text)
+        actual_text = self._extract_ocr_text(payload)
         operator = str(item.rule_json.get("operator", "CONTAINS")).upper()
         case_sensitive = bool(item.rule_json.get("case_sensitive", False))
         actual = actual_text if case_sensitive else actual_text.upper()
@@ -715,6 +715,7 @@ class InspectionEngine:
                 "text": actual_text,
                 "lines": payload.get("lines", []),
                 "confidence": payload.get("confidence"),
+                "preprocessing": payload.get("preprocessing", {}),
             },
             "score": payload.get("confidence"),
             "message": f'OCR text "{actual_text}", operator {operator}',

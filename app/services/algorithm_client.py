@@ -215,11 +215,15 @@ class AlgorithmServiceClient:
             timeout=max(self.timeout, 180.0),
         )
 
-    async def ocr(self, image_path: str) -> dict[str, Any]:
+    async def ocr(
+        self,
+        image_path: str,
+        expected_text: str | None = None,
+    ) -> dict[str, Any]:
         return await self._post(
             settings.paddleocr_service_url,
             "/ocr",
-            {"image_path": image_path},
+            {"image_path": image_path, "expected_text": expected_text},
         )
 
     async def _post(
