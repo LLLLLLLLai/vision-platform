@@ -35,6 +35,10 @@
       <span class="switch-icon">≡</span>
       <span><strong>检测记录</strong><small>查看第三方接口调用和检测结果</small></span>
     </button>
+    <button class="workspace-switch" data-view="reportsView">
+      <span class="switch-icon">▥</span>
+      <span><strong>统计报表</strong><small>按拉线、物料和工序查看检测趋势</small></span>
+    </button>
     <button class="workspace-switch" data-view="servicesView">
       <span class="switch-icon">◉</span>
       <span><strong>模型服务</strong><small>运行状态、启停控制和故障日志</small></span>
@@ -176,6 +180,14 @@
                     <option value="">正在加载视觉标准库类型…</option>
                   </select>
                 </label>
+                <label class="alignment-anchor-option">
+                  <span>图像对齐</span>
+                  <span class="alignment-anchor-control">
+                    <input type="checkbox" id="roiAlignmentAnchor">
+                    <b>作为对齐基准</b>
+                  </span>
+                  <small>选择清晰、固定且不易遮挡的螺钉孔、PCB 特征或铭牌边缘；每个配方仅保留一个。</small>
+                </label>
                 <label><span>X 点位</span><input class="form-control" id="roiPointX" readonly></label>
                 <label><span>Y 点位</span><input class="form-control" id="roiPointY" readonly></label>
                 <label><span>区域宽度</span><input class="form-control" id="roiPointWidth" readonly></label>
@@ -305,7 +317,7 @@
       <div class="reference-panel-heading candidate-panel-heading">
         <div>
           <strong>候选基准图</strong>
-          <small>生产检测高置信度通过后，系统使用“合格基准＋本次ROI”进行VLM双图复核；正式基准默认最多10张，重复图不追加，满额时只软停用高度重复旧图</small>
+          <small>生产检测的 ROI 全部规则通过后即自动收集；系统仍执行图片质量、重复图和 VLM 双图复核保护。正式基准默认最多10张。</small>
         </div>
         <select class="form-select form-select-sm" id="referenceCandidateStatusFilter">
           <option value="">全部状态</option>
@@ -317,7 +329,7 @@
         </select>
       </div>
       <div class="reference-candidate-grid" id="referenceCandidateGrid">
-        <div class="reference-library-empty wide">暂无候选图片。生产检测满足高置信度、硬规则和图片质量要求后会自动收集。</div>
+        <div class="reference-library-empty wide">暂无候选图片。生产检测中 ROI 的规则全部通过且图片质量合格后会自动收集。</div>
       </div>
     </section>
   </section>
@@ -328,7 +340,10 @@
         <span class="step-number">≡</span>
         <div><strong>第三方检测调用记录</strong><small>记录接口参数、返回结果及每个 ROI 的主模型/VLM 处理明细</small></div>
       </div>
-      <button class="btn btn-outline-primary" type="button" id="refreshDetectionRecords">刷新记录</button>
+      <div class="record-filter-actions">
+        <input class="form-control" id="detectionRecordSnFilter" placeholder="按产品条码筛选">
+        <button class="btn btn-outline-primary" type="button" id="refreshDetectionRecords">查询 / 刷新</button>
+      </div>
     </div>
     <div class="detection-records-summary" id="detectionRecordsSummary"></div>
     <div class="detection-records-table-wrap">
@@ -348,6 +363,25 @@
         <tbody id="detectionRecordsBody"></tbody>
       </table>
     </div>
+  </section>
+
+  <section class="workspace-view" id="reportsView">
+    <div class="detection-records-toolbar">
+      <div>
+        <span class="step-number">▥</span>
+        <div><strong>生产检测统计报表</strong><small>展示检测过程指标；真实准确率需人工复判或下游质量结果确认。</small></div>
+      </div>
+      <div class="record-filter-actions">
+        <input class="form-control" id="reportStartDate" type="date" aria-label="报表开始日期">
+        <span class="report-date-separator">至</span>
+        <input class="form-control" id="reportEndDate" type="date" aria-label="报表结束日期">
+        <button class="btn btn-outline-primary" type="button" id="refreshInspectionReports">刷新报表</button>
+      </div>
+    </div>
+    <div class="report-notice" id="inspectionReportNote"></div>
+    <div class="detection-records-summary" id="inspectionReportSummary"></div>
+    <div class="report-chart-grid" id="inspectionReportCharts"></div>
+    <div class="report-dimension-grid" id="inspectionReportDimensions"></div>
   </section>
 
   <section class="workspace-view" id="servicesView">

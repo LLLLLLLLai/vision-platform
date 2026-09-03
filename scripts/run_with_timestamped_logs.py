@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -51,6 +52,15 @@ def main() -> int:
 
     append_log(args.stdout_log, f"START command={' '.join(command)}")
     append_log(args.stderr_log, "START diagnostic stream")
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_BREAKAWAY_FROM_JOB
+        )
+
     child = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -59,6 +69,7 @@ def main() -> int:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        creationflags=creation_flags,
     )
 
     def forward_signal(signum, _frame) -> None:

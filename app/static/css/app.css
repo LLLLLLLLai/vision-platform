@@ -2543,6 +2543,139 @@ button, input, select { font: inherit; }
   }
 }
 
+.record-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.record-filter-actions .form-control,
+.record-filter-actions .form-select {
+  min-width: 180px;
+}
+
+.report-notice {
+  margin: 14px 0;
+  padding: 11px 14px;
+  border: 1px solid #d9e5f5;
+  border-radius: 12px;
+  color: #40536b;
+  background: #f6f9fe;
+  font-size: 12px;
+}
+
+.report-dimension-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.report-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.report-chart-card {
+  padding: 16px;
+  border: 1px solid var(--vp-line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: var(--vp-shadow-soft);
+}
+
+.report-chart-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-chart-card header strong,
+.report-chart-card header small { display: block; }
+.report-chart-card header small { margin-top: 3px; color: var(--vp-muted); font-size: 10px; }
+.report-chart-card header b { color: var(--vp-text); font-size: 18px; }
+.report-chart-card svg { display: block; width: 100%; margin-top: 10px; overflow: visible; }
+.report-axis { stroke: #cbd5e1; stroke-width: 1; }
+.report-grid-line { stroke: #edf1f6; stroke-width: 1; stroke-dasharray: 4 4; }
+.report-axis-label { fill: #7a8798; font-size: 10px; }
+
+.report-dimension-card {
+  overflow: hidden;
+  border: 1px solid var(--vp-line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: var(--vp-shadow-soft);
+}
+
+.report-dimension-card h3 {
+  margin: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--vp-line);
+  font-size: 14px;
+}
+
+.report-table-wrap { overflow: auto; }
+
+.report-dimension-card table {
+  width: 100%;
+  min-width: 460px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.report-dimension-card th,
+.report-dimension-card td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #edf1f6;
+  text-align: left;
+}
+
+.report-dimension-card th {
+  color: var(--vp-muted);
+  background: #fafbfd;
+  font-size: 10px;
+}
+
+.alignment-anchor-option {
+  grid-column: span 2;
+  padding: 10px 12px;
+  border: 1px solid #d9e5f5;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.alignment-anchor-option > span:first-child,
+.alignment-anchor-option small {
+  display: block;
+}
+
+.alignment-anchor-option small {
+  margin-top: 5px;
+  color: var(--vp-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.alignment-anchor-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.alignment-anchor-control input { width: 16px; height: 16px; }
+
+@media (max-width: 760px) {
+  .record-filter-actions { width: 100%; }
+  .record-filter-actions .form-control,
+  .record-filter-actions .form-select { min-width: 0; flex: 1; }
+  .report-dimension-grid { grid-template-columns: 1fr; }
+  .report-chart-grid { grid-template-columns: 1fr; }
+  .alignment-anchor-option { grid-column: span 1; }
+}
+
 .rule-result-icon {
   display: grid;
   width: 28px;

@@ -79,6 +79,7 @@ class RoiCreate(BaseModel):
     height_ratio: float = Field(gt=0, le=1)
     padding: int = Field(default=0, ge=0, le=500)
     sort_order: int = 0
+    alignment_anchor: bool = False
 
 
 class InspectionItemCreate(BaseModel):
@@ -248,6 +249,7 @@ def _roi_payload(roi: RegionOfInterest) -> dict[str, Any]:
         "height_ratio": roi.height_ratio,
         "padding": roi.padding,
         "sort_order": roi.sort_order,
+        "alignment_anchor": roi.alignment_anchor,
         "enabled": roi.enabled,
         "scene_object_id": roi.scene_object_id,
         "world_object": (
@@ -282,7 +284,7 @@ def _latest_auto_reference(
         select(ReferenceImage)
         .where(
             ReferenceImage.group_id == group.id,
-            ReferenceImage.enabled.is_(True),
+            ReferenceImage.is_deleted.is_(False),
             ReferenceImage.quality_status.in_(["READY", "PENDING", "PENDING_RETRY"]),
         )
         .order_by(ReferenceImage.id.desc())
@@ -294,6 +296,9 @@ def _latest_auto_reference(
         "class_code": group.class_code,
         "image_url": _file_url(reference.image_path),
         "embedding_status": reference.quality_status,
+        "detection_ready": bool(
+            reference.enabled and reference.quality_status == "READY"
+        ),
     }
 
 
@@ -550,6 +555,11 @@ def create_roi(
         "reference_width": recipe.reference_width,
         "reference_height": recipe.reference_height,
     }
+    if values.get("alignment_anchor"):
+        database.query(RegionOfInterest).filter(
+            RegionOfInterest.recipe_id == recipe_id,
+            RegionOfInterest.alignment_anchor.is_(True),
+        ).update({RegionOfInterest.alignment_anchor: False})
     roi = RegionOfInterest(recipe_id=recipe_id, **values)
     database.add(roi)
     database.flush()
@@ -573,6 +583,12 @@ def update_roi(
         database,
         payload.object_type,
     )
+    if values.get("alignment_anchor"):
+        database.query(RegionOfInterest).filter(
+            RegionOfInterest.recipe_id == roi.recipe_id,
+            RegionOfInterest.id != roi.id,
+            RegionOfInterest.alignment_anchor.is_(True),
+        ).update({RegionOfInterest.alignment_anchor: False})
     for field, value in values.items():
         setattr(roi, field, value)
     recipe = database.get(Recipe, roi.recipe_id)
@@ -659,6 +675,22 @@ async def capture_roi_reference(
         )
         for existing_image in existing_images:
             existing_image.enabled = False
+        for item in database.scalars(
+            select(InspectionItem).where(
+                InspectionItem.roi_id == roi.id,
+                InspectionItem.inspection_type == "EXISTENCE",
+            )
+        ).all():
+            item.reference_group_id = group.id
+            expected = dict(item.expected_json or {})
+            expected.update(
+                {
+                    "exists": True,
+                    "class_code": group.class_code,
+                    "reference_image_url": _file_url(str(reference_path)),
+                }
+            )
+            item.expected_json = expected
         database.commit()
     except Exception as exc:
         reference.quality_status = "PENDING_RETRY"

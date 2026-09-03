@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', path='/vendor/bootstrap/5.3.7/css/bootstrap.min.css') }}" rel="stylesheet">
   <link href="{{ url_for('static', path='/css/app.css') }}?v=20260816-01" rel="stylesheet">
 </head>
 <body>
@@ -24,7 +24,7 @@
   <main class="app-main">
     {% block content %}{% endblock %}
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="{{ url_for('static', path='/vendor/bootstrap/5.3.7/js/bootstrap.bundle.min.js') }}"></script>
   <script src="{{ url_for('static', path='/js/app.js') }}"></script>
 </body>
 </html>

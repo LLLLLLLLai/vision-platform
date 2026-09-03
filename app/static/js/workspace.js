@@ -27,6 +27,7 @@ const state = {
   draftRules: [],
   vlmPromptDirty: false,
   detectionRecords: [],
+  inspectionReports: null,
   libraryPage: 1,
   libraryPageSize: 12,
   modelServices: [],
@@ -898,20 +899,26 @@ function setImageScale(nextScale, clientX = null, clientY = null) {
   if (Math.abs(scale - oldScale) < 0.001) return;
   const stageBounds = imageStage.getBoundingClientRect();
   const surfaceBounds = imageSurface.getBoundingClientRect();
+  const stageOriginX = stageBounds.left + imageStage.clientLeft;
+  const stageOriginY = stageBounds.top + imageStage.clientTop;
   const pointerInsideImage = clientX != null
     && clientY != null
     && clientX >= surfaceBounds.left
     && clientX <= surfaceBounds.right
     && clientY >= surfaceBounds.top
     && clientY <= surfaceBounds.bottom;
+  const contentX = pointerInsideImage
+    ? (clientX - surfaceBounds.left) / oldScale
+    : view.displayWidth / 2;
+  const contentY = pointerInsideImage
+    ? (clientY - surfaceBounds.top) / oldScale
+    : view.displayHeight / 2;
   const anchorX = pointerInsideImage
-    ? clientX - stageBounds.left
+    ? clientX - stageOriginX
     : view.translateX + (view.displayWidth * oldScale) / 2;
   const anchorY = pointerInsideImage
-    ? clientY - stageBounds.top
+    ? clientY - stageOriginY
     : view.translateY + (view.displayHeight * oldScale) / 2;
-  const contentX = (anchorX - view.translateX) / oldScale;
-  const contentY = (anchorY - view.translateY) / oldScale;
   view.scale = scale;
   view.translateX = anchorX - contentX * scale;
   view.translateY = anchorY - contentY * scale;
@@ -1045,11 +1052,11 @@ function drawCanvas() {
 }
 
 function pointerPosition(event) {
-  const stageBounds = imageStage.getBoundingClientRect();
-  const view = state.imageView;
+  const canvasBounds = canvas.getBoundingClientRect();
+  if (!canvasBounds.width || !canvasBounds.height) return { x: 0, y: 0 };
   return {
-    x: (event.clientX - stageBounds.left - view.translateX) / view.scale,
-    y: (event.clientY - stageBounds.top - view.translateY) / view.scale,
+    x: (event.clientX - canvasBounds.left) * (canvas.width / canvasBounds.width),
+    y: (event.clientY - canvasBounds.top) * (canvas.height / canvasBounds.height),
   };
 }
 
@@ -1463,6 +1470,7 @@ function populateObjectEditor() {
   byId("roiRuleStatus").className = "roi-rule-status";
   byId("selectedObjectTitle").textContent = roi.code;
   fillObjectTypeSelect(roi.object_type || "OBJECT");
+  byId("roiAlignmentAnchor").checked = Boolean(roi.alignment_anchor);
   byId("roiPointX").value = `${Math.round(roi.x_ratio * baseImage.naturalWidth)} px`;
   byId("roiPointY").value = `${Math.round(roi.y_ratio * baseImage.naturalHeight)} px`;
   byId("roiPointWidth").value = `${Math.round(roi.width_ratio * baseImage.naturalWidth)} px`;
@@ -1478,7 +1486,13 @@ function populateObjectEditor() {
       };
     }
     if (capability === "COLOR_RATIO") {
-      return { type: "COLOR", scene: inferItemScene(item, roi), value: String(item.expected_json.color || "").toLowerCase() };
+      const profile = item.rule_json?.color_profile;
+      return {
+        type: "COLOR",
+        scene: inferItemScene(item, roi),
+        value: String(item.expected_json.color || "").toLowerCase(),
+        colorAnalysis: profile ? { profile } : null,
+      };
     }
     if (capability === "VLM_JUDGEMENT") return null;
     return { type: "TEXT", scene: inferItemScene(item, roi), value: String(item.expected_json.text || "") };
@@ -1757,6 +1771,7 @@ async function saveRoiRules() {
         y_ratio: rect.y / canvas.height,
         width_ratio: rect.width / canvas.width,
         height_ratio: rect.height / canvas.height,
+        alignment_anchor: byId("roiAlignmentAnchor").checked,
       }),
     });
     let reference = roi.reference || null;
@@ -1798,14 +1813,20 @@ async function saveRoiRules() {
           },
         };
       } else if (rule.type === "COLOR") {
+        const colorProfile = rule.colorAnalysis?.profile;
+        const usesCurrentColorProfile = String(colorProfile?.color || "").toUpperCase() === value.toUpperCase();
+        const baselineRatio = usesCurrentColorProfile
+          ? Number(colorProfile?.baseline_ratio)
+          : Number.NaN;
         payload = {
           inspection_type: "COLOR",
           capability: "COLOR_RATIO",
           reference_group_id: null,
           expected_json: { color: value.toUpperCase() },
           rule_json: {
-            min_ratio: 0.15,
+            min_ratio: Number.isFinite(baselineRatio) ? Math.max(0.05, baselineRatio * 0.55) : 0.15,
             max_ratio: 1,
+            color_profile: usesCurrentColorProfile ? colorProfile : null,
             scene_type: sceneType,
             primary_model: "OpenCV",
             vlm_review_enabled: reviewEnabled,
@@ -2331,11 +2352,131 @@ async function loadDetectionRecords() {
   byId("detectionRecordsBody").innerHTML =
     '<tr><td colspan="8" class="records-empty">正在加载检测记录…</td></tr>';
   try {
-    state.detectionRecords = await request(`${api}/inspection/call-records?limit=200`);
+    const sn = byId("detectionRecordSnFilter").value.trim();
+    const query = new URLSearchParams({ limit: "200" });
+    if (sn) query.set("sn", sn);
+    state.detectionRecords = await request(`${api}/inspection/call-records?${query.toString()}`);
     renderDetectionRecords();
   } catch (error) {
     byId("detectionRecordsBody").innerHTML =
       `<tr><td colspan="8" class="records-empty error">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+function formatRate(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function localDateInputValue(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function initializeReportDateRange() {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 29);
+  byId("reportStartDate").value = localDateInputValue(start);
+  byId("reportEndDate").value = localDateInputValue(end);
+}
+
+function reportTrendChart(title, daily, key, color, formatter) {
+  const values = daily.map((row) => Number(row[key] || 0));
+  const maximum = Math.max(1, ...values);
+  const width = 640;
+  const height = 230;
+  const left = 42;
+  const right = 14;
+  const top = 18;
+  const bottom = 36;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const denominator = Math.max(1, values.length - 1);
+  const points = values.map((value, index) => {
+    const x = left + (plotWidth * index) / denominator;
+    const y = top + plotHeight - (value / maximum) * plotHeight;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const last = values.at(-1) || 0;
+  const firstDate = daily[0]?.date || "-";
+  const lastDate = daily.at(-1)?.date || "-";
+  return `
+    <section class="report-chart-card">
+      <header><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(firstDate)} 至 ${escapeHtml(lastDate)}</small></div><b>${escapeHtml(formatter(last))}</b></header>
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)}趋势图">
+        <line x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}" class="report-axis"></line>
+        <line x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" class="report-axis"></line>
+        <line x1="${left}" y1="${top + plotHeight / 2}" x2="${width - right}" y2="${top + plotHeight / 2}" class="report-grid-line"></line>
+        <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+        <text x="${left}" y="${height - 12}" class="report-axis-label">${escapeHtml(firstDate.slice(5))}</text>
+        <text x="${width - right}" y="${height - 12}" text-anchor="end" class="report-axis-label">${escapeHtml(lastDate.slice(5))}</text>
+        <text x="${left - 7}" y="${top + 5}" text-anchor="end" class="report-axis-label">${escapeHtml(formatter(maximum))}</text>
+        <text x="${left - 7}" y="${height - bottom + 4}" text-anchor="end" class="report-axis-label">0</text>
+      </svg>
+    </section>`;
+}
+
+function reportDimensionCard(title, rows) {
+  const body = rows.length
+    ? rows.slice(0, 12).map((row) => `
+      <tr>
+        <td>${escapeHtml(row.key)}</td>
+        <td>${row.total}</td>
+        <td>${formatRate(row.ok_rate)}</td>
+        <td>${formatRate(row.ng_rate)}</td>
+        <td>${formatRate(row.error_rate)}</td>
+      </tr>`).join("")
+    : '<tr><td colspan="5" class="records-empty">暂无检测记录</td></tr>';
+  return `
+    <section class="report-dimension-card">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="report-table-wrap"><table>
+        <thead><tr><th>维度</th><th>数量</th><th>OK率</th><th>NG率</th><th>异常率</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>
+    </section>`;
+}
+
+function renderInspectionReports() {
+  const report = state.inspectionReports;
+  if (!report) return;
+  const overall = report.overall || {};
+  byId("inspectionReportNote").textContent = report.accuracy_note || "";
+  byId("inspectionReportSummary").innerHTML = `
+    <span><small>检测任务</small><strong>${overall.total || 0}</strong></span>
+    <span><small>OK率</small><strong>${formatRate(overall.ok_rate)}</strong></span>
+    <span><small>NG率</small><strong>${formatRate(overall.ng_rate)}</strong></span>
+    <span><small>已确认准确率</small><strong>${overall.confirmed_count ? formatRate(overall.confirmed_accuracy) : "待复判"}</strong></span>`;
+  const dimensions = report.dimensions || {};
+  byId("inspectionReportCharts").innerHTML = [
+    reportTrendChart("每日检测量", report.daily || [], "total", "#2a76d2", (value) => `${value} 次`),
+    reportTrendChart("每日 NG 率", report.daily || [], "ng_rate", "#d9485f", formatRate),
+  ].join("");
+  byId("inspectionReportDimensions").innerHTML = [
+    reportDimensionCard("拉线", dimensions.line || []),
+    reportDimensionCard("物料", dimensions.material || []),
+    reportDimensionCard("工序", dimensions.operation || []),
+  ].join("");
+}
+
+async function loadInspectionReports() {
+  const button = byId("refreshInspectionReports");
+  button.disabled = true;
+  button.textContent = "正在统计…";
+  try {
+    const startDate = byId("reportStartDate").value;
+    const endDate = byId("reportEndDate").value;
+    if (!startDate || !endDate) throw new Error("请选择统计开始日期和结束日期");
+    const query = new URLSearchParams({ start_date: startDate, end_date: endDate });
+    state.inspectionReports = await request(`${api}/inspection/reports?${query.toString()}`);
+    renderInspectionReports();
+  } catch (error) {
+    byId("inspectionReportNote").textContent = `统计报表加载失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "刷新报表";
   }
 }
 
@@ -2644,6 +2785,7 @@ document.querySelectorAll(".workspace-switch").forEach((button) => {
     switchView(button.dataset.view);
     if (button.dataset.view === "referenceLibraryView") await reloadReferenceLibrary();
     if (button.dataset.view === "recordsView") await loadDetectionRecords();
+    if (button.dataset.view === "reportsView") await loadInspectionReports();
     if (button.dataset.view === "servicesView") await loadModelServices();
   });
 });
@@ -2862,6 +3004,10 @@ byId("refreshReferenceLibrary").addEventListener("click", async () => {
   }
 });
 byId("refreshDetectionRecords").addEventListener("click", loadDetectionRecords);
+byId("detectionRecordSnFilter").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadDetectionRecords();
+});
+byId("refreshInspectionReports").addEventListener("click", loadInspectionReports);
 byId("refreshModelServices").addEventListener("click", () => loadModelServices());
 byId("closeModelServiceLogs").addEventListener("click", () => {
   byId("modelServiceLogPanel").hidden = true;
@@ -2904,4 +3050,5 @@ loadData()
   .catch((error) => notify(error.message, "danger"));
 
 syncVlmReviewMode();
+initializeReportDateRange();
 loadModelServices(true);

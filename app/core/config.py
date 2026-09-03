@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     sam2_service_url: str = "http://127.0.0.1:9025"
     algorithm_timeout_seconds: float = 15.0
     reference_candidate_collection_enabled: bool = True
-    reference_candidate_similarity_threshold: float = 0.93
     reference_candidate_vlm_confidence_threshold: float = 0.90
     reference_candidate_limit_per_roi: int = 20
     reference_candidate_hash_distance: int = 4
@@ -33,6 +32,14 @@ class Settings(BaseSettings):
     reference_similarity_scoring_mode: str = "ROBUST_TOP_K"
     reference_similarity_top_k: int = 3
     reference_similarity_top1_weight: float = 0.65
+    image_alignment_enabled: bool = True
+    image_alignment_max_shift_ratio: float = 0.05
+    image_alignment_min_response: float = 0.08
+    image_alignment_max_dimension: int = 1280
+    image_alignment_anchor_search_margin_ratio: float = 0.35
+    image_alignment_anchor_min_inliers: int = 8
+    image_alignment_anchor_min_inlier_ratio: float = 0.35
+    image_alignment_anchor_max_rotation_degrees: float = 8.0
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

@@ -66,6 +66,7 @@ class RegionOfInterest(TimestampMixin, Base):
     pixel_coordinates: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     padding: Mapped[int] = mapped_column(Integer, default=0)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    alignment_anchor: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     recipe: Mapped[Recipe] = relationship(back_populates="rois")

@@ -122,6 +122,10 @@ def _call_log_path(service: ModelServiceDefinition) -> Path:
     return LOG_DIR / f"{service.code}.calls.log"
 
 
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _read_pid(service: ModelServiceDefinition) -> int | None:
     path = _pid_file(service)
     if not path.exists():
@@ -282,38 +286,87 @@ def start_service(service: ModelServiceDefinition) -> dict[str, Any]:
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.CREATE_NO_WINDOW
             | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_BREAKAWAY_FROM_JOB
         )
 
-    environment = os.environ.copy()
-    environment["PYTHONUNBUFFERED"] = "1"
-    with stdout_path.open("a", encoding="utf-8") as stdout_file, stderr_path.open(
-        "a", encoding="utf-8"
-    ) as stderr_file:
-        process = subprocess.Popen(
-            [
-                str(service.python_executable),
-                str(TIMESTAMPED_LOG_RUNNER),
-                "--stdout-log",
-                str(stdout_path),
-                "--stderr-log",
-                str(stderr_path),
-                "--",
-                str(service.python_executable),
-                str(service.script),
-            ],
-            cwd=PROJECT_ROOT,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            creationflags=creation_flags,
+    if os.name == "nt":
+        startup_script = (
+            "$env:PYTHONUNBUFFERED='1'; "
+            "$process = Start-Process "
+            f"-FilePath {_powershell_literal(str(service.python_executable))} "
+            f"-ArgumentList @({_powershell_literal(str(service.script))}) "
+            f"-WorkingDirectory {_powershell_literal(str(PROJECT_ROOT))} "
+            "-WindowStyle Hidden "
+            f"-RedirectStandardOutput {_powershell_literal(str(stdout_path))} "
+            f"-RedirectStandardError {_powershell_literal(str(stderr_path))} "
+            "-PassThru; $process.Id"
         )
+        try:
+            launcher = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    startup_script,
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            process_id = None
+        else:
+            if launcher.returncode != 0:
+                raise RuntimeError(
+                    f"{service.name} 启动失败：{launcher.stderr.strip() or launcher.stdout.strip()}"
+                )
+            try:
+                process_id = int(launcher.stdout.strip().splitlines()[-1])
+            except (IndexError, ValueError):
+                process_id = None
+    else:
+        environment = os.environ.copy()
+        environment["PYTHONUNBUFFERED"] = "1"
+        command = [
+            str(service.python_executable),
+            str(TIMESTAMPED_LOG_RUNNER),
+            "--stdout-log",
+            str(stdout_path),
+            "--stderr-log",
+            str(stderr_path),
+            "--",
+            str(service.python_executable),
+            str(service.script),
+        ]
+        with stdout_path.open("a", encoding="utf-8") as stdout_file, stderr_path.open(
+            "a", encoding="utf-8"
+        ) as stderr_file:
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                creationflags=creation_flags,
+            )
+        process_id = process.pid
 
-    _pid_file(service).write_text(str(process.pid), encoding="utf-8")
+    if process_id is not None:
+        _pid_file(service).write_text(str(process_id), encoding="utf-8")
+    else:
+        _pid_file(service).unlink(missing_ok=True)
     return {
         "status": "STARTING",
         "message": f"{service.name} 已提交启动，请等待模型加载完成",
-        "pid": process.pid,
+        "pid": process_id,
     }
 
 

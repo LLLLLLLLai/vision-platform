@@ -3,7 +3,8 @@ import shutil
 import re
 import time
 import uuid
-from datetime import datetime
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import PROJECT_ROOT
 from app.db.session import get_db
-from app.models.inspection import DetectionApiCall, DetectionTask
+from app.models.inspection import (
+    DetectionApiCall,
+    DetectionTask,
+)
 from app.models.recipe import Recipe
 from app.models.system import Product, Station
 from app.services.inspection_engine import InspectionEngine, load_recipe_for_execution
@@ -38,12 +42,14 @@ engine = InspectionEngine()
 @router.get("/history")
 def inspection_history(
     limit: int = 50,
+    sn: str | None = None,
     database: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    statement = select(DetectionTask)
+    if sn and sn.strip():
+        statement = statement.where(DetectionTask.sn.contains(sn.strip()))
     tasks = database.scalars(
-        select(DetectionTask)
-        .order_by(DetectionTask.id.desc())
-        .limit(min(max(limit, 1), 200))
+        statement.order_by(DetectionTask.id.desc()).limit(min(max(limit, 1), 200))
     ).all()
     return [
         {
@@ -59,6 +65,122 @@ def inspection_history(
         }
         for task in tasks
     ]
+
+
+def _metrics(statuses: list[str]) -> dict[str, Any]:
+    total = len(statuses)
+    ok = sum(status == "OK" for status in statuses)
+    ng = sum(status == "NG" for status in statuses)
+    error = total - ok - ng
+    return {
+        "total": total,
+        "ok": ok,
+        "ng": ng,
+        "error": error,
+        "ok_rate": round(ok / total, 4) if total else 0.0,
+        "ng_rate": round(ng / total, 4) if total else 0.0,
+        "error_rate": round(error / total, 4) if total else 0.0,
+        "confirmed_accuracy": None,
+        "confirmed_count": 0,
+    }
+
+
+def _dimension_metrics(rows: list[tuple[str | None, str]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for key, status in rows:
+        grouped[str(key or "未配置")].append(str(status or "ERROR").upper())
+    return [
+        {"key": key, **_metrics(statuses)}
+        for key, statuses in sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0]))
+    ]
+
+
+@router.get("/reports")
+def inspection_reports(
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    line: str | None = None,
+    materialcode: str | None = None,
+    operation: str | None = None,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    today = datetime.utcnow().date()
+    try:
+        selected_start = date.fromisoformat(start_date) if start_date else None
+        selected_end = date.fromisoformat(end_date) if end_date else None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="日期格式必须为 YYYY-MM-DD。",
+        ) from exc
+    if selected_start is None and selected_end is None:
+        selected_days = min(max(days, 1), 365)
+        selected_end = today
+        selected_start = selected_end - timedelta(days=selected_days - 1)
+    elif selected_start is None:
+        selected_end = selected_end or today
+        selected_start = selected_end - timedelta(days=min(max(days, 1), 365) - 1)
+    elif selected_end is None:
+        selected_end = today
+    if selected_end < selected_start:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期。")
+    if (selected_end - selected_start).days > 365:
+        raise HTTPException(status_code=400, detail="统计时间范围不能超过 366 天。")
+    started_at = datetime.combine(selected_start, datetime.min.time())
+    ended_at = datetime.combine(selected_end + timedelta(days=1), datetime.min.time())
+    task_statement = (
+        select(
+            DetectionTask.status,
+            DetectionTask.created_at,
+            Recipe.line_code,
+            Recipe.material_code,
+            Recipe.process_code,
+        )
+        .join(Recipe, DetectionTask.recipe_id == Recipe.id)
+        .where(
+            DetectionTask.created_at >= started_at,
+            DetectionTask.created_at < ended_at,
+        )
+    )
+    if line and line.strip():
+        task_statement = task_statement.where(Recipe.line_code == line.strip())
+    if materialcode and materialcode.strip():
+        task_statement = task_statement.where(Recipe.material_code == materialcode.strip())
+    if operation and operation.strip():
+        task_statement = task_statement.where(Recipe.process_code == operation.strip())
+
+    tasks = database.execute(task_statement).all()
+    daily_statuses: dict[str, list[str]] = defaultdict(list)
+    for task in tasks:
+        task_date = task.created_at.date().isoformat() if task.created_at else selected_start.isoformat()
+        daily_statuses[task_date].append(str(task.status or "ERROR").upper())
+    daily = []
+    current_day = selected_start
+    while current_day <= selected_end:
+        date_key = current_day.isoformat()
+        daily.append({"date": date_key, **_metrics(daily_statuses[date_key])})
+        current_day += timedelta(days=1)
+    return {
+        "start_date": selected_start.isoformat(),
+        "end_date": selected_end.isoformat(),
+        "generated_at": datetime.utcnow().isoformat(),
+        "overall": _metrics([str(row.status or "ERROR").upper() for row in tasks]),
+        "daily": daily,
+        "dimensions": {
+            "line": _dimension_metrics([(row.line_code, row.status) for row in tasks]),
+            "material": _dimension_metrics(
+                [(row.material_code, row.status) for row in tasks]
+            ),
+            "operation": _dimension_metrics(
+                [(row.process_code, row.status) for row in tasks]
+            ),
+        },
+        "accuracy_note": (
+            "OK率和NG率来自平台检测记录；真实准确率需要人工复判或下游质量结果作为真值。"
+            "VLM异步复核可作为风险提示，不能单独作为漏判/误判的最终结论。"
+        ),
+    }
 
 
 class ExecuteRequest(BaseModel):
@@ -404,12 +526,14 @@ async def execute_filename_routed_inspection(
 @router.get("/call-records")
 def detection_call_records(
     limit: int = 100,
+    sn: str | None = None,
     database: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    statement = select(DetectionApiCall)
+    if sn and sn.strip():
+        statement = statement.where(DetectionApiCall.sn.contains(sn.strip()))
     records = database.scalars(
-        select(DetectionApiCall)
-        .order_by(DetectionApiCall.id.desc())
-        .limit(min(max(limit, 1), 500))
+        statement.order_by(DetectionApiCall.id.desc()).limit(min(max(limit, 1), 500))
     ).all()
     return [
         {

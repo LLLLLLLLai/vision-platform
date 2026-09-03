@@ -13,7 +13,13 @@ from app.models.inspection import DetectionItemResult, DetectionTask, Inspection
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.reference import ReferenceGroup
 from app.services.algorithm_client import AlgorithmServiceClient
-from app.services.image_processing import annotate_image, color_ratio, crop_roi
+from app.services.image_processing import (
+    align_image_with_anchor,
+    align_image_to_reference,
+    annotate_image,
+    color_ratio,
+    crop_roi,
+)
 from app.services.reference_embedding_service import (
     load_reference_vectors,
     rank_reference_vectors,
@@ -97,6 +103,60 @@ class InspectionEngine:
                 image_file = Path(image_path).expanduser().resolve()
                 if not image_file.is_file():
                     raise FileNotFoundError(f"Image does not exist: {image_file}")
+                inspection_image = image_file
+                alignment: dict[str, Any] = {
+                    "status": "DISABLED" if not settings.image_alignment_enabled else "NOT_CONFIGURED"
+                }
+                if settings.image_alignment_enabled and recipe.base_image_path:
+                    base_image = Path(recipe.base_image_path).expanduser()
+                    if base_image.is_file():
+                        anchor_roi = next(
+                            (
+                                roi
+                                for roi in recipe.rois
+                                if roi.enabled and roi.alignment_anchor
+                            ),
+                            None,
+                        )
+                        if anchor_roi is not None:
+                            aligned_path, alignment = align_image_with_anchor(
+                                str(image_file),
+                                str(base_image),
+                                anchor_roi,
+                                task_root / f"image_{image_index}" / "aligned_source.jpg",
+                                max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                                search_margin_ratio=settings.image_alignment_anchor_search_margin_ratio,
+                                minimum_inliers=settings.image_alignment_anchor_min_inliers,
+                                minimum_inlier_ratio=settings.image_alignment_anchor_min_inlier_ratio,
+                                maximum_rotation_degrees=settings.image_alignment_anchor_max_rotation_degrees,
+                            )
+                            if aligned_path is None:
+                                fallback_path, fallback_alignment = align_image_to_reference(
+                                    str(image_file),
+                                    str(base_image),
+                                    task_root / f"image_{image_index}" / "aligned_source.jpg",
+                                    max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                                    minimum_response=settings.image_alignment_min_response,
+                                    max_dimension=settings.image_alignment_max_dimension,
+                                )
+                                alignment["fallback"] = fallback_alignment
+                                aligned_path = fallback_path
+                        else:
+                            aligned_path, alignment = align_image_to_reference(
+                                str(image_file),
+                                str(base_image),
+                                task_root / f"image_{image_index}" / "aligned_source.jpg",
+                                max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                                minimum_response=settings.image_alignment_min_response,
+                                max_dimension=settings.image_alignment_max_dimension,
+                            )
+                        if aligned_path is not None:
+                            inspection_image = aligned_path
+                    else:
+                        alignment = {
+                            "status": "SKIPPED",
+                            "reason": "配方基准图不存在，保留原图检测",
+                        }
                 item_results: list[dict[str, Any]] = []
                 annotations: list[dict[str, Any]] = []
                 image_status = "OK"
@@ -107,7 +167,7 @@ class InspectionEngine:
                     if roi_ids is not None and roi.id not in roi_ids:
                         continue
                     roi_file = task_root / f"image_{image_index}" / f"{roi.code}.jpg"
-                    _, box = crop_roi(str(image_file), roi, roi_file)
+                    _, box = crop_roi(str(inspection_image), roi, roi_file)
                     roi_status = "OK"
 
                     for item in sorted(
@@ -172,11 +232,13 @@ class InspectionEngine:
                     )
 
                 result_path = task_root / f"result_{image_index}.jpg"
-                annotate_image(str(image_file), annotations, result_path)
+                annotate_image(str(inspection_image), annotations, result_path)
                 result_image_paths.append(str(result_path))
                 image_results.append(
                     {
                         "image_path": str(image_file),
+                        "inspection_image_path": str(inspection_image),
+                        "alignment": alignment,
                         "result_image_path": str(result_path),
                         "result": image_status,
                         "inspection_items": item_results,
@@ -682,10 +744,19 @@ class InspectionEngine:
         expected_color = str(item.expected_json.get("color", "")).upper()
         minimum = float(item.rule_json.get("min_ratio", 0.15))
         maximum = float(item.rule_json.get("max_ratio", 1.0))
-        ratio = color_ratio(roi_path, expected_color)
+        ratio, color_details = color_ratio(
+            roi_path,
+            expected_color,
+            item.rule_json.get("color_profile"),
+        )
         return {
             "status": "OK" if minimum <= ratio <= maximum else "NG",
-            "actual": {"color": expected_color, "ratio": ratio},
+            "actual": {
+                "color": expected_color,
+                "ratio": ratio,
+                "color_profile": item.rule_json.get("color_profile"),
+                **color_details,
+            },
             "score": ratio,
             "message": (
                 f"{expected_color} ratio {ratio:.4f}, "

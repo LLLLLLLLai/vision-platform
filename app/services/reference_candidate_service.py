@@ -201,8 +201,6 @@ class ReferenceCandidateCollector:
 
         similarity_result, similarity_item = similarity_row
         score = similarity_result.score
-        if score is None or score < settings.reference_candidate_similarity_threshold:
-            return
         if similarity_item.reference_group_id is None:
             return
         group = database.get(ReferenceGroup, similarity_item.reference_group_id)
@@ -264,7 +262,7 @@ class ReferenceCandidateCollector:
             baseline_image_path=baseline_path,
             candidate_image_path=str(destination),
             content_hash=content_hash,
-            similarity_score=float(score),
+            similarity_score=float(score) if score is not None else None,
             quality_json=quality,
             rule_snapshot=rule_snapshot,
             status="PENDING_VLM",

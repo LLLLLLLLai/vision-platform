@@ -111,6 +111,13 @@ def _upgrade_sqlite_schema() -> None:
                     "ADD COLUMN scene_object_id INTEGER"
                 )
             )
+        if "alignment_anchor" not in roi_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE regions_of_interest "
+                    "ADD COLUMN alignment_anchor BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
         connection.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_regions_of_interest_scene_object_id "

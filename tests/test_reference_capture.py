@@ -53,12 +53,16 @@ class ReferenceCaptureTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(configuration, "algorithm_client", FailingAlgorithms()),
             ):
                 result = await configuration.capture_roi_reference(roi.id, database)
+                preview = configuration._latest_auto_reference(database, recipe, roi)
 
             reference = database.scalar(select(ReferenceImage))
             self.assertEqual(result["embedding_status"], "PENDING_RETRY")
             self.assertIn("DINOv2 unavailable", result["embedding_warning"])
             self.assertEqual(reference.quality_status, "PENDING_RETRY")
             self.assertTrue(Path(reference.image_path).is_file())
+            self.assertIsNotNone(preview)
+            self.assertEqual(preview["image_url"], result["image_url"])
+            self.assertFalse(preview["detection_ready"])
             database.close()
             database_engine.dispose()
 
