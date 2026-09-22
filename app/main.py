@@ -7,13 +7,20 @@ from app.api.router import api_router
 from app.api.routes.inspection import public_router as public_detection_router
 from app.core.config import PROJECT_ROOT, settings
 from app.db.init_db import init_database
+from app.harness.runtime import get_harness
+from app.services.automation_worker import automation_worker
 from app.web.router import router as web_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_database()
-    yield
+    get_harness()
+    await automation_worker.start()
+    try:
+        yield
+    finally:
+        await automation_worker.stop()
 
 
 app = FastAPI(

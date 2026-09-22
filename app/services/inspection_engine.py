@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 import uuid
@@ -10,7 +11,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import PROJECT_ROOT, settings
 from app.models.inspection import DetectionItemResult, DetectionTask, InspectionItem
-from app.models.recipe import Recipe, RegionOfInterest
+from app.models.intelligence import (
+    AutomationJob,
+    InspectionScenarioVersion,
+    RoiScenarioBinding,
+)
+from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import (
@@ -24,6 +30,7 @@ from app.services.reference_embedding_service import (
     load_reference_vectors,
     rank_reference_vectors,
 )
+from app.services.scenario_runtime import scenario_runtime
 
 
 def similarity_review_band(
@@ -80,6 +87,8 @@ class InspectionEngine:
         request_id: str | None = None,
         force_vlm_review: bool = False,
         roi_ids: set[int] | None = None,
+        artifact_root: str | Path | None = None,
+        roi_parallelism: int | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         request_id = request_id or uuid.uuid4().hex
@@ -93,7 +102,17 @@ class InspectionEngine:
         database.add(task)
         database.commit()
         database.refresh(task)
-        task_root = Path(PROJECT_ROOT / "detection_results" / request_id)
+        scenario_bindings = self._load_roi_scenario_bindings(database, recipe)
+        task_root = (
+            Path(artifact_root)
+            if artifact_root is not None
+            else Path(PROJECT_ROOT / "detection_results" / request_id)
+        )
+        result_url_prefix = self._result_url_prefix(task_root)
+        configured_roi_parallelism = max(
+            1,
+            int(roi_parallelism or settings.production_roi_parallelism),
+        )
         result_image_paths: list[str] = []
         image_results: list[dict[str, Any]] = []
         overall_status = "OK"
@@ -110,7 +129,8 @@ class InspectionEngine:
                 if settings.image_alignment_enabled and recipe.base_image_path:
                     base_image = Path(recipe.base_image_path).expanduser()
                     if base_image.is_file():
-                        anchor_roi = next(
+                        feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
+                        legacy_anchor = next(
                             (
                                 roi
                                 for roi in recipe.rois
@@ -118,6 +138,7 @@ class InspectionEngine:
                             ),
                             None,
                         )
+                        anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
                         if anchor_roi is not None:
                             aligned_path, alignment = align_image_with_anchor(
                                 str(image_file),
@@ -161,6 +182,7 @@ class InspectionEngine:
                 annotations: list[dict[str, Any]] = []
                 image_status = "OK"
 
+                roi_jobs: list[tuple[RegionOfInterest, Path, tuple[int, int, int, int]]] = []
                 for roi in sorted(recipe.rois, key=lambda value: value.sort_order):
                     if not roi.enabled:
                         continue
@@ -168,68 +190,44 @@ class InspectionEngine:
                         continue
                     roi_file = task_root / f"image_{image_index}" / f"{roi.code}.jpg"
                     _, box = crop_roi(str(inspection_image), roi, roi_file)
-                    roi_status = "OK"
+                    roi_jobs.append((roi, roi_file, box))
 
-                    for item in sorted(
-                        roi.inspection_items,
-                        key=lambda value: value.execution_order,
-                    ):
-                        if not item.enabled:
-                            continue
-                        result = await self._execute_item(
+                roi_semaphore = asyncio.Semaphore(configured_roi_parallelism)
+
+                async def execute_roi_job(
+                    roi: RegionOfInterest,
+                    roi_file: Path,
+                    box: tuple[int, int, int, int],
+                ) -> dict[str, Any]:
+                    async with roi_semaphore:
+                        return await self._execute_roi(
                             database,
-                            item,
-                            str(roi_file),
+                            recipe,
+                            task,
+                            roi,
+                            roi_file,
+                            image_file,
+                            scenario_bindings,
+                            image_index=image_index,
+                            result_url_prefix=result_url_prefix,
+                            sn=sn,
                             force_vlm_review=force_vlm_review,
+                            box=box,
                         )
-                        if result["status"] == "ERROR":
-                            overall_status = image_status = roi_status = "ERROR"
-                        elif result["status"] == "NG" and image_status != "ERROR":
-                            if overall_status != "ERROR":
-                                overall_status = "NG"
-                            image_status = roi_status = "NG"
-                        database.add(
-                            DetectionItemResult(
-                                task_id=task.id,
-                                image_path=str(image_file),
-                                roi_id=roi.id,
-                                inspection_item_id=item.id,
-                                status=result["status"],
-                                expected_json=item.expected_json,
-                                actual_json=result.get("actual", {}),
-                                score=result.get("score"),
-                                message=result.get("message"),
-                                roi_image_path=str(roi_file),
-                                elapsed_ms=result.get("elapsed_ms"),
-                            )
-                        )
-                        item_results.append(
-                            {
-                                "roi_code": roi.code,
-                                "roi_image_url": (
-                                    f"/results/{request_id}/image_{image_index}/"
-                                    f"{roi.code}.jpg"
-                                ),
-                                "item_code": item.code,
-                                "item_name": item.name,
-                                "inspection_type": item.inspection_type,
-                                "capability": item.capability,
-                                "scene_type": item.rule_json.get("scene_type"),
-                                "primary_model": (
-                                    result.get("actual", {})
-                                    .get("primary_result", {})
-                                    .get("model")
-                                    or item.rule_json.get("primary_model")
-                                ),
-                                "vlm_review_enabled": bool(
-                                    item.rule_json.get("vlm_review_enabled", False)
-                                ),
-                                **result,
-                            }
-                        )
-                    annotations.append(
-                        {"box": box, "code": roi.code, "status": roi_status}
-                    )
+
+                roi_runs = await asyncio.gather(
+                    *(execute_roi_job(roi, roi_file, box) for roi, roi_file, box in roi_jobs)
+                )
+                for roi_run in roi_runs:
+                    roi_status = roi_run["status"]
+                    item_results.extend(roi_run["items"])
+                    annotations.append(roi_run["annotation"])
+                    if roi_status == "ERROR":
+                        overall_status = image_status = "ERROR"
+                    elif roi_status == "NG" and image_status != "ERROR":
+                        if overall_status != "ERROR":
+                            overall_status = "NG"
+                        image_status = "NG"
 
                 result_path = task_root / f"result_{image_index}.jpg"
                 annotate_image(str(inspection_image), annotations, result_path)
@@ -269,6 +267,199 @@ class InspectionEngine:
             "image_paths": result_image_paths,
             "image_results": image_results,
             "elapsed_ms": task.elapsed_ms,
+        }
+
+    @staticmethod
+    def _load_roi_scenario_bindings(
+        database: Session,
+        recipe: Recipe,
+    ) -> dict[int, RoiScenarioBinding]:
+        roi_ids = [roi.id for roi in recipe.rois if roi.enabled]
+        if not roi_ids:
+            return {}
+        bindings = database.scalars(
+            select(RoiScenarioBinding)
+            .options(
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.scenario
+                ),
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.nodes
+                ),
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.edges
+                ),
+            )
+            .where(
+                RoiScenarioBinding.roi_id.in_(roi_ids),
+                RoiScenarioBinding.enabled.is_(True),
+                InspectionScenarioVersion.status == "PUBLISHED",
+            )
+            .join(
+                InspectionScenarioVersion,
+                RoiScenarioBinding.scenario_version_id
+                == InspectionScenarioVersion.id,
+            )
+        ).all()
+        return {binding.roi_id: binding for binding in bindings}
+
+    @staticmethod
+    def _result_url_prefix(task_root: Path) -> str:
+        results_root = (PROJECT_ROOT / "detection_results").resolve()
+        try:
+            relative_path = task_root.resolve().relative_to(results_root)
+        except ValueError:
+            return "/results"
+        return f"/results/{relative_path.as_posix()}"
+
+    async def _execute_roi(
+        self,
+        database: Session,
+        recipe: Recipe,
+        task: DetectionTask,
+        roi: RegionOfInterest,
+        roi_file: Path,
+        image_file: Path,
+        scenario_bindings: dict[int, RoiScenarioBinding],
+        *,
+        image_index: int,
+        result_url_prefix: str,
+        sn: str,
+        force_vlm_review: bool,
+        box: tuple[int, int, int, int],
+    ) -> dict[str, Any]:
+        roi_status = "OK"
+        item_results: list[dict[str, Any]] = []
+        roi_image_url = f"{result_url_prefix}/image_{image_index}/{roi.code}.jpg"
+        scenario_binding = scenario_bindings.get(roi.id)
+        if scenario_binding is not None:
+            scenario_version = scenario_binding.scenario_version
+            execution = await scenario_runtime.execute(
+                database,
+                scenario_version,
+                image_path=str(roi_file),
+                source="PRODUCTION",
+                detection_task_id=task.id,
+                roi_id=roi.id,
+                context={
+                    "sn": sn,
+                    "recipe_code": recipe.code,
+                    "recipe_version": recipe.version,
+                    "roi_code": roi.code,
+                    "roi_name": roi.name,
+                    "object_type": roi.object_type,
+                    # The binding stores static validation values selected by
+                    # the operator.  Exposing them at the top level makes
+                    # {{ input.<field> }} work in both direct VLM prompts and
+                    # workflow start-node expressions.
+                    **dict(scenario_binding.input_mapping_json or {}),
+                    # Preserve the former nested mapping for existing
+                    # workflow definitions while new scenes use direct fields.
+                    "input_mapping": dict(scenario_binding.input_mapping_json or {}),
+                    "roi_binding": dict(scenario_binding.input_mapping_json or {}),
+                },
+            )
+            result_status = str(execution.result or "ERROR").upper()
+            if result_status == "ERROR":
+                roi_status = "ERROR"
+            elif result_status in {"NG", "UNCERTAIN"}:
+                roi_status = "NG"
+            if scenario_version.review_vlm_model_id:
+                database.add(
+                    AutomationJob(
+                        job_type="VLM_REVIEW",
+                        scenario_version_id=scenario_version.id,
+                        config_json={"execution_id": execution.id},
+                        input_snapshot_json={
+                            "execution_id": execution.id,
+                            "detection_task_id": task.id,
+                            "roi_id": roi.id,
+                        },
+                    )
+                )
+            item_results.append(
+                {
+                    "roi_code": roi.code,
+                    "roi_name": roi.name,
+                    "roi_image_url": roi_image_url,
+                    "item_code": scenario_version.scenario.code,
+                    "item_name": scenario_version.scenario.name,
+                    "inspection_type": "SCENARIO",
+                    "capability": scenario_version.scenario.mode,
+                    "scene_type": scenario_version.scenario.category,
+                    "scenario_version_id": scenario_version.id,
+                    "scenario_version": scenario_version.version,
+                    "scenario_execution_id": execution.id,
+                    "primary_model": "场景运行时",
+                    "vlm_review_enabled": bool(scenario_version.review_vlm_model_id),
+                    "status": "NG" if result_status == "UNCERTAIN" else result_status,
+                    "raw_status": result_status,
+                    "actual": execution.output_json,
+                    "score": execution.score,
+                    "message": execution.error_message,
+                    "elapsed_ms": execution.elapsed_ms,
+                }
+            )
+            return {
+                "status": roi_status,
+                "items": item_results,
+                "annotation": {"box": box, "code": roi.code, "status": roi_status},
+            }
+
+        for item in sorted(roi.inspection_items, key=lambda value: value.execution_order):
+            if not item.enabled:
+                continue
+            result = await self._execute_item(
+                database,
+                item,
+                str(roi_file),
+                force_vlm_review=force_vlm_review,
+            )
+            if result["status"] == "ERROR":
+                roi_status = "ERROR"
+            elif result["status"] == "NG" and roi_status != "ERROR":
+                roi_status = "NG"
+            database.add(
+                DetectionItemResult(
+                    task_id=task.id,
+                    image_path=str(image_file),
+                    roi_id=roi.id,
+                    inspection_item_id=item.id,
+                    status=result["status"],
+                    expected_json=item.expected_json,
+                    actual_json=result.get("actual", {}),
+                    score=result.get("score"),
+                    message=result.get("message"),
+                    roi_image_path=str(roi_file),
+                    elapsed_ms=result.get("elapsed_ms"),
+                )
+            )
+            item_results.append(
+                {
+                    "roi_code": roi.code,
+                    "roi_name": roi.name,
+                    "roi_image_url": roi_image_url,
+                    "item_code": item.code,
+                    "item_name": item.name,
+                    "inspection_type": item.inspection_type,
+                    "capability": item.capability,
+                    "scene_type": item.rule_json.get("scene_type"),
+                    "primary_model": (
+                        result.get("actual", {})
+                        .get("primary_result", {})
+                        .get("model")
+                        or item.rule_json.get("primary_model")
+                    ),
+                    "vlm_review_enabled": bool(
+                        item.rule_json.get("vlm_review_enabled", False)
+                    ),
+                    **result,
+                }
+            )
+        return {
+            "status": roi_status,
+            "items": item_results,
+            "annotation": {"box": box, "code": roi.code, "status": roi_status},
         }
 
     async def _execute_item(
@@ -822,6 +1013,7 @@ def load_recipe_for_execution(
     from app.models.system import Product, Station
 
     statement = select(Recipe).options(
+        selectinload(Recipe.feature_anchor),
         selectinload(Recipe.rois).selectinload(
             RegionOfInterest.inspection_items
         )

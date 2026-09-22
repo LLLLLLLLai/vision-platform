@@ -4,6 +4,10 @@
 - OCR 服务迁移交接：`docs/OCR-Service-Handover.md`
 - Word 交接文档：`docs/Vision-Platform-System-Handover.docx`
 - 启动与接口 SOP：`docs/Vision-Platform-Operation-SOP.docx`
+- 场景、数据集与模型模块：`docs/Scene-Dataset-Model-Architecture.md`
+- 当前版本交接文档：`docs/Vision-Platform-Handover-V2.0.md`
+- MySQL 8 字段说明：`docs/MySQL-Table-Structure.md`
+- MySQL 8 建表基线：`docs/mysql/vision_platform_mysql8.sql`
 
 面向汽车电子装配错装、漏装、混装检测的工业视觉智能平台。第一阶段采用“工业配方 + 产品世界模型 + 可替换感知服务 + 规则决策”的结构。
 
@@ -25,24 +29,47 @@
 算法能力（DINOv2 / Grounding DINO / SAM2 / OCR / OpenCV / Qwen3-VL）
         |
         v
-状态理解与规则引擎
+场景运行时与规则引擎
         |
         v
-OK / NG / ERROR
+原始结果 / VLM 复核 / 人工复判
 ```
 
 模型通过独立 HTTP 服务接入，平台只依赖能力接口，不绑定具体模型。
 
+## Harness 风格插件技术栈
+
+平台参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的“能力皆插件 + 运行档案组合”思想，但**不直接引入其开发者预览运行时**，以保证产线 FastAPI 主流程稳定。
+
+```text
+FastAPI 平台内核
+    -> Harness 运行档案（production / minimal / configuration）
+        -> 插件清单（模型、OpenCV 规则、服务配置）
+            -> 能力路由（OCR / 相似度 / 颜色 / 分割 / VLM）
+                -> InspectionEngine 与既有 POST /api/detect
+```
+
+- 插件运行时：`app/harness/`，负责模型能力注册、替换和路由。
+- 运行档案：`config/harness.json`，通过 `.env` 中的 `HARNESS_PROFILE` 选择。
+- 诊断接口：`GET /api/v1/harness` 返回当前启用插件与能力路由。
+- 详细说明：`docs/DeepSeek-Harness-Inspired-Architecture.md`。
+
+模型替换只需要新增插件、选择能力路由和实现对应适配器；既有配方、ROI、规则和 `/api/detect` 接口不变。
+
 ## 已实现
 
 - FastAPI 后端、SQLite 和 SQLAlchemy 2.0。
-- 产品、工位、配方、ROI、检测项、视觉标准库和检测记录。
+- 产品、工位、配方、ROI、检测项、参考向量和检测记录。
 - 显式配方业务键：`line_code + material_code + process_code + camera_code + capture_index`。
 - 配方按结构化参数优先匹配，缺省时兼容从图片文件名解析。
 - 产品世界模型：ROI 自动映射为场景对象，并按相机和拍照次数保存多视角位置。
 - 产品世界模型与 ROI 对象可视化编辑页面。
 - 上传配方图片后由 Qwen3-VL 自动生成候选物体框，用户确认、移动、缩放或删除后再写入正式 ROI。
 - DINOv2、Grounding DINO、SAM2、PaddleOCR、Qwen3-VL 服务接口预留。
+- 场景管理：Dify 风格的专属场景设计器；直接 VLM 场景提供“参数配置 + 图片对话测试”双栏，流程场景提供可拖拽节点画布、端点连线、变量引用、版本发布和 ROI 已发布版本绑定。
+- 数据集管理：TEST / TRAIN、图片或视频素材、OK/NG 真值与标注状态。
+- 模型中心：OpenAI 兼容 VLM 配置、YOLO 检测/分割/分类模型定义、真实本地训练、版本发布和任务队列。
+- 场景评测、提示词优化与异步独立 VLM 复核任务；评测、优化和模型训练任务分别在对应功能页面以表格查看，避免混在同一个队列中。
 - 线束采用 Grounding DINO 粗定位、SAM2 像素级分割和橙色 HSV 快速分割融合。
 - Qwen3-VL 4B 本地 4-bit 测试服务。
 - DINOv2 低置信度区间自动触发 Qwen3-VL 复核，异常时按安全策略判定。
@@ -50,7 +77,8 @@ OK / NG / ERROR
 - 标准 Embedding 使用 FP16 保存；同一 ROI 的活动基准合并为一个矩阵文件，按行号读取。
 - 向量目录按拉线、物料、工序、相机、拍照次数、配方和 ROI 分层，数据库只保存相对路径。
 - 相似度默认使用 `65% × Top1 + 35% × Top3均值` 的稳健分数，避免单张异常基准决定结果。
-- 正式基准满额后仅在候选图增加有效多样性时软停用一张重复旧图，历史文件不删除。
+- 候选基准后台采集已停用；历史候选与参考文件保留但不会再自动新增。
+- 已发布 YOLO 模型可由工作流“模型检测”节点直接执行；节点支持数量期望、类别期望、置信度和 IoU 参数。
 
 ## 目录
 
@@ -59,8 +87,9 @@ app/
   api/                    API 路由
   core/                   配置
   db/                     数据库会话、初始化和轻量升级
-  models/                 配方、检测、标准库和世界模型 ORM
-  services/               检测执行与算法客户端
+  models/                 配方、检测、场景、数据集和世界模型 ORM
+  services/               检测执行、场景运行时、自动化 worker 与算法客户端
+  harness/                插件运行时、插件清单和能力路由
   static/                 管理页面静态资源
   templates/              管理页面模板
 config/                   配置说明
@@ -101,6 +130,20 @@ cp .env.example .env
 - 管理页面：`http://127.0.0.1:9010`
 - API 文档：`http://127.0.0.1:9010/docs`
 - 算法状态：`http://127.0.0.1:9010/api/v1/algorithms/status`
+
+## YOLO 训练与流程调用
+
+1. 在“模型中心 → 训练模型维护”创建 YOLO 目标检测、分割或分类模型，并维护识别类别。
+2. 在“数据集管理”创建匹配的 `TRAIN` 图片数据集。训练素材可选择以下任一方式维护：
+   - 在平台上传原图并进行在线标注：目标检测使用 `{"boxes":[{"label":"harness","x":0.1,"y":0.2,"width":0.3,"height":0.2}]}`；目标分割使用 `{"segments":[{"label":"harness","points":[[0.1,0.2],[0.4,0.2],[0.4,0.5]]}]}`；分类使用 `{"label":"harness"}`。
+   - 导入离线已标注的 YOLO ZIP 包：压缩包可使用标准 `images/...` 与 `labels/...` 目录，也可使用图片与同名 `.txt` 标签；类别优先读取 `classes.txt` 或 `data.yaml`。平台会校验类别编号顺序并将数据转换为内部标注格式。检测/分割图片缺少同名标签时按“空目标样本”导入；训练时仍由平台自动按 70% / 20% / 10% 切分，不沿用压缩包中的目录切分。
+3. 每个训练样本完成标注后，在“模型训练”提交任务。平台先校验类别、标注、图片路径，再固定为 70% / 20% / 10% 切分。
+4. Worker 在可用显存满足条件时导出 YOLO 数据集、运行本地 Ultralytics 训练，并把 `best.pt`、曲线和指标登记为草稿模型版本。训练产物保存在 `data/training_runs/`。
+5. 检查指标后在模型卡片上发布该草稿版本；“场景维护 → 模型检测节点”只允许选择权重文件存在的已发布版本。
+
+训练过程不会自动发布模型，也不会让草稿权重进入生产配方。
+
+离线服务器请提前将选择的基础权重（例如 `yolo11n.pt`、`yolo11n-seg.pt` 或 `yolo11n-cls.pt`）放入 `vision-models/`；训练器会优先读取该目录，避免运行时下载。
 
 ## 配方规则
 

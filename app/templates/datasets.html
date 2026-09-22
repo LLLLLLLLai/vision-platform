@@ -1,0 +1,179 @@
+{% extends "management_base.html" %}
+
+{% block title %}数据集管理 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="management-page" data-page="datasets">
+  <header class="management-hero">
+    <div>
+      <span class="eyebrow">DATASET MANAGEMENT</span>
+      <h1>数据集维护</h1>
+      <p>评测数据集只需为每张图片标记 OK 或 NG；YOLO 训练数据集既可在线框选，也可导入已离线标注的图片与标签包。</p>
+    </div>
+    <div class="management-hero-actions">
+      <button class="btn btn-outline-primary" id="reloadDatasets" type="button">刷新</button>
+      <button class="btn btn-primary" id="openDatasetCreate" type="button">新建数据集</button>
+    </div>
+  </header>
+
+  <div id="datasetAlert"></div>
+
+  <div class="management-grid">
+    <aside class="entity-list-card">
+      <div class="card-heading"><div><small>数据集</small><h2>素材集合</h2></div><span id="datasetCount" class="count-chip">0</span></div>
+      <input id="datasetSearch" class="form-control mb-3" placeholder="按名称或编码搜索">
+      <div id="datasetList" class="entity-list"></div>
+    </aside>
+
+    <section class="entity-detail-card" id="datasetDetailEmpty">
+      <div class="empty-state"><span>▤</span><strong>选择一个数据集</strong><p>评测集标记 OK / NG；YOLO 训练集可在图片上直接绘制检测框。</p></div>
+    </section>
+
+    <section class="entity-detail-card" id="datasetDetail" hidden>
+      <div class="card-heading"><div><small id="datasetDetailCode">DATASET</small><h2 id="datasetDetailName">数据集</h2></div><span id="datasetDetailMeta" class="status-pill draft"></span></div>
+      <div class="dataset-summary-grid" id="datasetSummary"></div>
+
+      <section class="dataset-upload-card">
+        <div class="section-heading"><div><strong>上传素材</strong><small id="datasetUploadHint">评测集上传后直接标记 OK 或 NG；YOLO 训练集上传后点击“框选标注”。</small></div></div>
+        <form id="datasetUploadForm" class="dataset-upload-form">
+          <input id="datasetFile" class="form-control" type="file" multiple required>
+          <input id="datasetFolder" class="visually-hidden" type="file" webkitdirectory directory multiple>
+          <button class="btn btn-outline-secondary" id="selectDatasetFolder" type="button">选择文件夹</button>
+          <div id="datasetUploadTruthWrap"><select id="datasetUploadTruth" class="form-select"><option value="">未标注</option><option value="OK">OK</option><option value="NG">NG</option></select></div>
+          <button class="btn btn-primary" type="submit">上传</button>
+        </form>
+        <div class="dataset-offline-import" id="offlineYoloImportActions" hidden>
+          <div><strong>导入离线 YOLO 标注</strong><small>上传一个 ZIP：支持 <code>images/</code>、<code>labels/</code> 目录和同名 <code>.txt</code> 标签；类别可来自 <code>classes.txt</code> 或 <code>data.yaml</code>。</small></div>
+          <input id="offlineYoloArchive" class="visually-hidden" type="file" accept=".zip,application/zip">
+          <button class="btn btn-outline-primary" id="selectOfflineYoloArchive" type="button">导入标注包</button>
+        </div>
+      </section>
+
+      <section class="dataset-label-card">
+        <div class="section-heading"><div><strong>数据集类别</strong><small>类别由当前数据集维护；标注图片时可直接选择或新增，不依赖已创建模型。</small></div></div>
+        <div class="dataset-label-editor"><div id="datasetLabelList" class="dataset-label-list"></div><div class="dataset-label-add"><input id="datasetLabelInput" class="form-control" placeholder="例如：harness、connector"><button class="btn btn-outline-primary" id="addDatasetLabel" type="button">＋ 添加类别</button></div></div>
+      </section>
+
+      <section class="dataset-collection-card">
+        <div class="section-heading"><div><strong>自动采集 ROI</strong><small>关联已发布场景后，生产检测执行该场景时会复制 ROI 到本数据集；样本默认待标注，不会自动当成真值。</small></div></div>
+        <div class="dataset-collection-summary" id="datasetCollectionSummary"></div>
+      </section>
+
+      <section>
+        <div class="section-heading"><div><strong id="datasetItemsTitle">素材与真值</strong><small id="datasetItemsHint">人工 OK / NG 是场景评测准确率的真值来源。</small></div></div>
+        <div id="datasetItems" class="dataset-item-grid"></div>
+      </section>
+    </section>
+  </div>
+
+  <div class="modal fade" id="datasetCreateModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog"><div class="modal-content">
+      <div class="modal-header"><h2 class="modal-title fs-5">新建数据集</h2><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <form id="datasetCreateForm" class="stack-form">
+          <div class="dataset-create-code"><span>数据集编码</span><strong>保存后自动生成</strong><small>无需填写，系统会生成唯一编码。</small></div>
+          <label><span>数据集名称</span><input class="form-control" name="name" placeholder="线束训练集" required></label>
+          <label><span>数据集用途</span><select class="form-select" id="datasetPurpose" name="purpose"><option value="TEST">场景评测（VLM）</option><option value="TRAIN">YOLO 模型训练</option></select></label>
+          <label><span>数据类型</span><select class="form-select" name="media_type"><option value="IMAGE">图片</option><option value="VIDEO">视频</option></select></label>
+          <div class="dataset-create-hint" id="datasetCreateHint"></div>
+          <label id="annotationTypeField"><span>训练标注方式</span><select class="form-select" id="datasetAnnotationType" name="annotation_type"><option value="DETECTION">目标检测（画检测框）</option><option value="SEGMENTATION">目标分割（轮廓标注）</option><option value="CLASSIFICATION">图片分类</option><option value="NONE">无需标注</option></select></label>
+          <label><span>初始类别（可选）</span><input class="form-control" id="datasetInitialLabels" placeholder="用英文逗号分隔，例如 harness, connector"></label>
+          <label class="dataset-collection-create"><span>自动采集关联场景（可选）</span><select class="form-select" id="datasetCollectionScenario"><option value="">不自动采集</option></select><small>仅可选择已发布场景；生产 ROI 会进入本数据集，后续仍需标注。</small></label>
+          <label class="dataset-collection-toggle"><input id="datasetAutoCollectEnabled" type="checkbox"><span>启用自动采集 ROI</span></label>
+          <label class="dataset-collection-limit"><span>最多采集数量</span><input class="form-control" id="datasetAutoCollectLimit" type="number" min="1" max="100000" value="1000"></label>
+          <label><span>用途说明</span><textarea class="form-control" name="description" rows="3"></textarea></label>
+        </form>
+      </div>
+      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="createDataset" type="button">创建</button></div>
+    </div></div>
+  </div>
+
+  <div class="modal fade" id="datasetAnnotationModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+      <div class="modal-header"><div><small class="text-primary">TRAINING ANNOTATION</small><h2 class="modal-title fs-5">训练图片标注</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body stack-form">
+        <input id="annotationItemId" type="hidden">
+        <p id="annotationItemName" class="muted-copy mb-0"></p>
+        <p id="annotationHint" class="muted-copy"></p>
+
+        <section id="annotationDetectionEditor" class="annotation-editor" hidden>
+          <div class="annotation-workspace">
+            <aside class="annotation-tool-rail" aria-label="标注工具">
+              <button class="annotation-tool active" id="annotationToolSelect" type="button" title="选择 / 移动（V）"><span>↖</span><small>选择</small></button>
+              <button class="annotation-tool" id="annotationToolRectangle" type="button" title="绘制矩形框（R）"><span>□</span><small>框选</small></button>
+              <div class="annotation-tool-divider"></div>
+              <button class="annotation-tool annotation-tool-compact" id="annotationZoomIn" type="button" title="放大">＋</button>
+              <button class="annotation-tool annotation-tool-compact" id="annotationZoomOut" type="button" title="缩小">－</button>
+              <button class="annotation-tool annotation-tool-compact" id="annotationZoomFit" type="button" title="适应画布">⌗</button>
+            </aside>
+
+            <section class="annotation-canvas-panel">
+              <header class="annotation-canvas-header">
+                <div>
+                  <strong id="annotationCanvasTitle">检测框标注</strong>
+                  <small id="annotationItemPosition">第 0 / 0 张</small>
+                </div>
+                <div class="annotation-canvas-actions">
+                  <button class="btn btn-sm btn-outline-secondary" id="annotationPreviousItem" type="button">← 上一张</button>
+                  <button class="btn btn-sm btn-outline-secondary" id="annotationNextItem" type="button">下一张 →</button>
+                  <span class="annotation-zoom-value" id="annotationZoomValue">100%</span>
+                </div>
+              </header>
+              <div class="annotation-canvas-wrap" id="annotationCanvasWrap">
+                <div id="detectionAnnotationStage" class="annotation-canvas-stage" data-tool="SELECT">
+                  <img id="detectionAnnotationImage" alt="训练图片">
+                  <svg id="detectionAnnotationSvg" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="检测框标注区域"></svg>
+                </div>
+              </div>
+              <footer class="annotation-canvas-footer">
+                <span>当前工具：<strong id="annotationToolName">选择 / 移动</strong></span>
+                <span>快捷键：<kbd>V</kbd> 选择 · <kbd>R</kbd> 画框 · <kbd>Delete</kbd> 删除 · <kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销 · <kbd>Space</kbd>+拖动移动图片</span>
+              </footer>
+            </section>
+
+            <aside class="annotation-inspector">
+              <section class="annotation-inspector-section">
+                <div class="annotation-inspector-heading"><strong>当前类别</strong><button class="btn btn-sm btn-outline-primary" id="addAnnotationLabel" type="button">＋</button></div>
+                <input id="annotationCurrentLabel" class="form-control form-control-sm" list="annotationLabelOptions" placeholder="输入或选择类别，例如 harness">
+                <div class="annotation-label-palette" id="annotationLabelPalette"></div>
+              </section>
+              <section class="annotation-inspector-section">
+                <div class="annotation-inspector-heading"><strong>已标注对象</strong><span id="annotationObjectCount">0</span></div>
+                <div id="detectionAnnotationList" class="annotation-box-list"></div>
+              </section>
+              <section class="annotation-inspector-section annotation-selected-panel">
+                <div class="annotation-inspector-heading"><strong>选中对象</strong><button class="btn btn-sm btn-outline-danger" id="annotationRemoveSelected" type="button" disabled>删除</button></div>
+                <div id="annotationSelectedEmpty" class="annotation-selected-empty">选择图片中的一个检测框后，可修改类别或移动、缩放该框。</div>
+                <div id="annotationSelectedProperties" hidden>
+                  <label><span>类别</span><input id="annotationSelectedLabel" class="form-control form-control-sm" list="annotationLabelOptions" placeholder="类别名称"></label>
+                  <div class="annotation-selected-metrics" id="annotationSelectedMetrics"></div>
+                </div>
+              </section>
+              <div class="annotation-inspector-actions">
+                <button class="btn btn-sm btn-outline-secondary" id="undoDetectionBox" type="button">撤销</button>
+                <button class="btn btn-sm btn-outline-secondary" id="cancelDetectionDraw" type="button">取消绘制</button>
+                <button class="btn btn-sm btn-outline-danger" id="clearDetectionBoxes" type="button">清空</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="annotationClassificationEditor" class="annotation-editor" hidden>
+          <label><span>图片类别</span><input id="classificationAnnotationLabel" class="form-control" list="annotationLabelOptions" placeholder="例如 harness"></label>
+          <p class="muted-copy mb-0">填写此图片所属的唯一类别；类别名称必须与后续训练模型的识别类别一致。</p>
+        </section>
+
+        <section id="annotationJsonEditor" class="annotation-editor" hidden>
+          <label><span>分割标注 JSON</span><textarea id="annotationJson" class="form-control font-monospace" rows="12"></textarea></label>
+          <p class="muted-copy mb-0">当前分割数据支持粘贴轮廓点 JSON；目标检测请使用图片框选。</p>
+        </section>
+        <datalist id="annotationLabelOptions"></datalist>
+      </div>
+      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="saveDatasetAnnotation" type="button">保存标注</button></div>
+    </div></div>
+  </div>
+</div>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260920-07" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260922-04" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260922-04"></script>
+{% endblock %}

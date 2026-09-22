@@ -1,0 +1,73 @@
+{
+  "profiles": {
+    "production": {
+      "description": "产线默认档案：固定 ROI、确定性规则与按需 VLM 复核。",
+      "enabled_plugins": [
+        "grounding_dino",
+        "dinov2",
+        "paddleocr",
+        "opencv_rules",
+        "qwen3_vl",
+        "sam2"
+      ],
+      "capability_routes": {
+        "object.localization": "grounding_dino",
+        "image.embedding": "dinov2",
+        "reference.similarity": "dinov2",
+        "object.presence": "dinov2",
+        "text.ocr": "paddleocr",
+        "image.color": "opencv_rules",
+        "image.alignment": "opencv_rules",
+        "image.quality": "opencv_rules",
+        "vlm.judgement": "qwen3_vl",
+        "vlm.compare": "qwen3_vl",
+        "object.inventory": "qwen3_vl",
+        "object.segmentation": "sam2",
+        "harness.segmentation": "sam2"
+      }
+    },
+    "minimal": {
+      "description": "故障排查档案：仅保留本地规则、相似度与 OCR。",
+      "enabled_plugins": [
+        "dinov2",
+        "paddleocr",
+        "opencv_rules"
+      ],
+      "capability_routes": {
+        "image.embedding": "dinov2",
+        "reference.similarity": "dinov2",
+        "object.presence": "dinov2",
+        "text.ocr": "paddleocr",
+        "image.color": "opencv_rules",
+        "image.alignment": "opencv_rules",
+        "image.quality": "opencv_rules"
+      }
+    },
+    "configuration": {
+      "description": "场景配置档案：启用开放定位和区域分割能力。",
+      "enabled_plugins": [
+        "grounding_dino",
+        "dinov2",
+        "paddleocr",
+        "opencv_rules",
+        "qwen3_vl",
+        "sam2"
+      ],
+      "capability_routes": {
+        "object.localization": "grounding_dino",
+        "image.embedding": "dinov2",
+        "reference.similarity": "dinov2",
+        "object.presence": "dinov2",
+        "text.ocr": "paddleocr",
+        "image.color": "opencv_rules",
+        "image.alignment": "opencv_rules",
+        "image.quality": "opencv_rules",
+        "vlm.judgement": "qwen3_vl",
+        "vlm.compare": "qwen3_vl",
+        "object.inventory": "qwen3_vl",
+        "object.segmentation": "sam2",
+        "harness.segmentation": "sam2"
+      }
+    }
+  }
+}

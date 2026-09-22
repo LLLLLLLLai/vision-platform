@@ -1,0 +1,290 @@
+/* Detail drawers stay inside the viewport even when prompts or diagnostics are long. */
+#taskDetailModal .modal-dialog,
+#trainingJobDetailModal .modal-dialog {
+  width: calc(100% - 2rem);
+  max-width: min(1140px, calc(100vw - 2rem));
+  margin: 1rem auto;
+}
+
+#taskDetailModal .modal-content,
+#trainingJobDetailModal .modal-content,
+#taskDetailModal .modal-body,
+#trainingJobDetailModal .modal-body,
+#taskDetailModal .task-detail-content,
+#trainingJobDetailModal .task-detail-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#taskDetailModal .modal-body,
+#trainingJobDetailModal .modal-body {
+  overflow-x: hidden;
+}
+
+#taskDetailModal .task-detail-content > *,
+#trainingJobDetailModal .task-detail-content > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#taskDetailModal .optimized-prompt-output,
+#taskDetailModal .job-result,
+#trainingJobDetailModal .job-result {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.task-table .task-prompt-cell {
+  min-width: 300px;
+  max-width: 460px;
+  white-space: normal;
+}
+
+.task-prompt-cell-content {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.task-prompt-cell-content .task-prompt-preview {
+  min-width: 0;
+}
+
+.prompt-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.prompt-action-group-inline {
+  gap: 5px;
+}
+
+.prompt-action-group .btn {
+  white-space: nowrap;
+}
+
+.prompt-result-section {
+  position: relative;
+}
+
+.prompt-section-heading {
+  padding-right: 132px;
+}
+
+.prompt-copy-float {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 1;
+}
+
+.prompt-round-list {
+  display: grid;
+  gap: 11px;
+  min-width: 0;
+}
+
+.prompt-round-row {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid #dce7f5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.prompt-round-heading,
+.prompt-round-status,
+.prompt-round-metrics {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.prompt-round-heading {
+  justify-content: space-between;
+}
+
+.prompt-round-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.prompt-round-heading small {
+  color: #6981a2;
+  font-size: .7rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+
+.prompt-round-heading strong {
+  overflow: hidden;
+  color: #28415f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-round-status {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  text-align: right;
+}
+
+.prompt-round-metrics {
+  flex-wrap: wrap;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f4f8fd;
+  color: #65768e;
+  font-size: .78rem;
+}
+
+.prompt-round-metrics span {
+  white-space: nowrap;
+}
+
+.prompt-round-metrics strong {
+  margin-left: 3px;
+  color: #294564;
+}
+
+.prompt-round-preview {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: #344b6b;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.prompt-round-actions {
+  justify-content: flex-end;
+}
+
+.prompt-viewer-output {
+  min-height: 240px;
+  max-height: min(60vh, 620px);
+}
+
+#trainingJobDetailModal .training-metrics-table {
+  min-width: 960px;
+}
+
+#trainingJobDetailModal .training-metrics-table th,
+#trainingJobDetailModal .training-metrics-table td {
+  white-space: normal;
+  vertical-align: top;
+}
+
+#trainingJobDetailModal .training-metrics-table th:nth-child(1),
+#trainingJobDetailModal .training-metrics-table td:nth-child(1) {
+  min-width: 150px;
+}
+
+#trainingJobDetailModal .training-metrics-table th:nth-child(2),
+#trainingJobDetailModal .training-metrics-table td:nth-child(2) {
+  min-width: 95px;
+  white-space: nowrap;
+}
+
+#trainingJobDetailModal .training-metrics-table th:nth-child(3),
+#trainingJobDetailModal .training-metrics-table td:nth-child(3),
+#trainingJobDetailModal .training-metrics-table th:nth-child(4),
+#trainingJobDetailModal .training-metrics-table td:nth-child(4) {
+  min-width: 250px;
+  line-height: 1.55;
+}
+
+#trainingJobDetailModal .training-artifact-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+#trainingJobDetailModal .training-artifact-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+}
+
+#trainingJobDetailModal .training-artifact-card .training-artifact-image {
+  width: 100%;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+}
+
+@media (max-width: 820px) {
+  #taskDetailModal .modal-dialog,
+  #trainingJobDetailModal .modal-dialog {
+    width: calc(100% - 1rem);
+    max-width: calc(100vw - 1rem);
+    margin: .5rem auto;
+  }
+
+  .prompt-section-heading {
+    padding-right: 0;
+    padding-bottom: 36px;
+  }
+
+  .prompt-copy-float {
+    top: auto;
+    bottom: 12px;
+    left: 14px;
+    right: auto;
+  }
+
+  .prompt-round-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .prompt-round-status,
+  .prompt-round-actions {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  #trainingJobDetailModal .training-artifact-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.management-page { max-width: 1540px; margin: 0 auto; padding: 28px 34px 42px; color: #152238; }
+.management-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.management-hero h1 { margin: 4px 0 8px; font-size: clamp(1.65rem, 2.2vw, 2.3rem); letter-spacing: -.035em; }
+.management-hero p { max-width: 720px; margin: 0; color: #617089; }
+.management-hero-actions, .detail-actions, .inline-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.management-tabs { display: flex; gap: 6px; border-bottom: 1px solid #dce5f0; margin: 0 0 22px; }
+.management-tab { border: 0; border-bottom: 3px solid transparent; padding: 11px 15px; color: #66758d; background: transparent; font-weight: 700; }
+.management-tab.active { color: #155eef; border-bottom-color: #155eef; }
+.management-view { display: none; }.management-view.active { display: block; }
+.management-grid { display: grid; grid-template-columns: minmax(250px, .72fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+.entity-list-card, .entity-detail-card { background: #fff; border: 1px solid #e0e8f2; border-radius: 16px; box-shadow: 0 10px 32px rgba(30, 57, 91, .06); padding: 18px; }
+.entity-list-card { position: sticky; top: 18px; max-height: calc(100vh - 54px); overflow: auto; }
+.card-heading, .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.card-heading small, .section-heading small { display: block; color: #76859a; font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.card-heading h2 { margin: 3px 0 0; font-size: 1.15rem; }.section-heading strong { display: block; font-size: 1rem; }
+.count-chip { min-width: 28px; padding: 4px 8px; border-radius: 999px; color: #155eef; background: #edf4ff; font-size: .78rem; font-weight: 800; text-align: center; }
+.entity-list { display: grid; gap: 8px; }.entity-list-item { width: 100%; text-align: left; border: 1px solid #e5ebf3; border-radius: 12px; background: #fff; padding: 12px; transition: .18s; }
+.entity-list-item:hover, .entity-list-item.active { border-color: #8db5ff; background: #f4f8ff; box-shadow: 0 6px 16px rgba(31, 87, 185, .1); }.entity-list-item strong, .entity-list-item small { display: block; }.entity-list-item small { color: #76859a; margin-bottom: 3px; }
+.entity-list-meta { display: flex; justify-content: space-between; gap: 8px; color: #738199; margin-top: 8px; font-size: .78rem; }.status-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 74px; padding: 4px 9px; border-radius: 999px; background: #eef2f6; color: #5f6b7b; font-size: .74rem; font-weight: 800; }.status-pill.published { color: #087443; background: #e7f8ef; }.status-pill.draft { color: #9a5d00; background: #fff3dc; }.status-pill.error { color: #b42318; background: #ffebe9; }
+.empty-state { min-height: 320px; display: grid; align-content: center; justify-items: center; text-align: center; color: #738199; gap: 8px; }.empty-state > span { display: grid; width: 52px; height: 52px; place-items: center; border-radius: 18px; background: #eff5ff; color: #155eef; font-size: 1.55rem; }.empty-state strong { color: #263751; }.empty-state p { max-width: 340px; margin: 0; }
+.scene-detail-heading { padding-bottom: 15px; border-bottom: 1px solid #ebf0f5; }.scene-meta-grid, .form-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }.scene-meta-grid { margin-bottom: 18px; }.management-page label { display: grid; gap: 6px; color: #3d4c61; font-size: .83rem; font-weight: 700; }.management-page label > span { color: #54647a; }.management-page textarea { resize: vertical; }
+.scene-editor-layout, .two-panel-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }.scene-prompt-card, .scene-workflow-card, .scene-test-card, .dataset-upload-card { border: 1px solid #e4eaf2; border-radius: 13px; padding: 16px; background: #fcfdff; }.stack-form { display: grid; gap: 12px; }.workflow-canvas { min-height: 245px; padding: 14px; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 12px; border: 1px dashed #b8c8df; border-radius: 12px; background: linear-gradient(45deg, #f8fbff 25%, transparent 25%), linear-gradient(-45deg, #f8fbff 25%, transparent 25%), #fff; background-size: 18px 18px; }.workflow-node { width: 150px; min-height: 84px; border-radius: 10px; padding: 10px; background: #fff; border: 1px solid #a9c4f0; box-shadow: 0 5px 12px rgba(34, 81, 150, .09); }.workflow-node small, .workflow-node strong { display: block; }.workflow-node small { color: #64748b; }.workflow-node strong { font-size: .85rem; margin-top: 5px; }.workflow-node-form { display: grid; grid-template-columns: 1fr 1fr .8fr 2fr auto; gap: 8px; margin-top: 12px; align-items: start; }.scene-test-card { margin-top: 18px; }.scene-test-input, .dataset-upload-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; }.scene-test-input label { display: flex; gap: 7px; align-items: center; white-space: nowrap; }.json-output { max-height: 360px; margin: 14px 0 0; padding: 13px; overflow: auto; border-radius: 10px; background: #0f1d33; color: #d6e5ff; font-size: .78rem; }
+.muted-copy { color: #69788e; }.dataset-summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }.summary-metric { padding: 12px; border-radius: 11px; background: #f4f7fb; }.summary-metric small, .summary-metric strong { display: block; }.summary-metric small { color: #6c7b90; }.summary-metric strong { margin-top: 4px; color: #1d2e48; }.dataset-item-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }.dataset-item-card { overflow: hidden; border: 1px solid #e2e9f2; border-radius: 11px; background: #fff; }.dataset-item-card img, .dataset-item-card video { width: 100%; height: 132px; object-fit: cover; background: #e7edf5; }.dataset-item-content { padding: 10px; }.dataset-item-content strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .84rem; }.dataset-item-actions { display: flex; gap: 6px; margin-top: 8px; }.dataset-item-actions .btn { flex: 1; }
+.model-card-list, .job-list { display: grid; gap: 10px; }.model-card, .job-card { border: 1px solid #e2e9f2; border-radius: 12px; padding: 13px; background: #fff; }.model-card-top, .job-card-top { display: flex; justify-content: space-between; gap: 10px; }.model-card strong, .job-card strong { display: block; }.model-card small, .job-card small { color: #718096; }.model-meta { margin-top: 8px; color: #516176; font-size: .82rem; }.model-card-actions, .job-card-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }.job-result { margin-top: 10px; padding: 8px; border-radius: 8px; background: #f6f8fb; color: #43546c; font-size: .78rem; white-space: pre-wrap; }.training-selection-hint { margin: -2px 0 2px; padding: 10px 12px; border-left: 3px solid #7da8ed; border-radius: 0 8px 8px 0; background: #f3f7fe; font-size: .82rem; }.job-split-summary { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: #edf7f1; color: #28714b; font-size: .78rem; }.job-split-summary span { color: #51806a; }.job-split-summary strong { color: #216541; }
+.model-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }.catalog-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 0 0 18px; }.catalog-section-heading small { color: #4f73b7; font-weight: 800; letter-spacing: .08em; }.catalog-section-heading h2 { margin: 4px 0 5px; font-size: 1.25rem; }.catalog-section-heading p { max-width: 650px; margin: 0; color: #68778c; }.catalog-model-card { min-height: 260px; display: flex; flex-direction: column; padding: 16px; transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }.catalog-model-card:hover { border-color: #adc5ef; box-shadow: 0 12px 26px rgba(31, 79, 142, .1); transform: translateY(-2px); }.model-card-title { display: flex; min-width: 0; gap: 10px; align-items: center; }.model-card-title div { min-width: 0; }.model-card-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.model-type-icon { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; border-radius: 11px; color: #155eef; background: #eaf2ff; font-size: 1.05rem; }.model-kind { margin: 14px 0 10px; color: #3265b3; font-size: .77rem; font-weight: 800; letter-spacing: .03em; }.model-detail-list { display: grid; gap: 8px; margin: 0; }.model-detail-list div { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; align-items: baseline; }.model-detail-list dt { color: #7a8799; font-size: .76rem; font-weight: 600; }.model-detail-list dd { min-width: 0; margin: 0; overflow: hidden; color: #42526a; font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }.catalog-model-card .model-card-actions { margin-top: auto; padding-top: 16px; }.model-test-result { max-height: 190px; overflow: auto; }.catalog-empty { grid-column: 1 / -1; min-height: 270px; }.model-create-menu { min-width: 260px; padding: 7px; }.model-create-menu .dropdown-item { display: grid; gap: 2px; padding: 10px 12px; border-radius: 8px; }.model-create-menu .dropdown-item small { color: #6a788d; white-space: normal; }.modal .form-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }.modal .modal-header h2 { margin: 2px 0 0; }.modal .modal-body { background: #fbfcff; }.scene-create-mode-hint { display: grid; gap: 3px; padding: 12px 14px; border: 1px solid #d5e4f9; border-left: 4px solid #3978db; border-radius: 10px; background: #f3f8ff; color: #475a74; font-size: .84rem; }.scene-create-mode-hint strong { color: #1955a6; }.workflow-arrow { align-self: center; color: #3978db; font-size: 1.35rem; font-weight: 800; }.workflow-node-start { border-color: #9ac7aa; background: #f4fcf6; }.workflow-node-end { border-color: #f0b2a7; background: #fff8f6; }.workflow-node-vlm { border-color: #aebef6; }.workflow-node-vision_model { border-color: #92cfd3; }.workflow-node-rule { border-color: #e5c98b; }.task-list-page { min-height: 500px; }.task-list { margin-top: 18px; }.task-card { display: grid; gap: 14px; padding: 17px; }.task-card:hover { border-color: #b8cdf0; }.task-reference-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 10px 12px; border-radius: 10px; background: #f6f8fc; color: #495b72; font-size: .82rem; }.task-reference-grid span { display: grid; gap: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.task-reference-grid small, .task-metric-grid small { color: #79879a; font-size: .72rem; font-weight: 700; }.task-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }.task-metric-grid > div { padding: 10px 12px; border: 1px solid #e2eaf5; border-radius: 10px; background: #fff; }.task-metric-grid small, .task-metric-grid strong { display: block; }.task-metric-grid strong { margin-top: 3px; color: #1b3153; font-size: 1rem; }.task-error { padding: 10px 12px; border-radius: 9px; color: #b42318; background: #fff1f0; font-size: .84rem; }.task-details { border-top: 1px solid #e6edf5; padding-top: 11px; }.task-details summary { color: #3865aa; cursor: pointer; font-size: .83rem; font-weight: 700; }.task-details .job-result { margin-bottom: 0; }.empty-task-state { display: grid; min-height: 250px; place-content: center; gap: 7px; border: 1px dashed #c9d6e7; border-radius: 12px; color: #6a7890; text-align: center; }.empty-task-state strong { color: #34465f; }.empty-task-state p { max-width: 430px; margin: 0; }
+.task-table-wrap { width: 100%; overflow: auto; border: 1px solid #e2e9f2; border-radius: 12px; background: #fff; }.task-table { width: 100%; min-width: 1120px; border-collapse: separate; border-spacing: 0; color: #40516a; font-size: .82rem; }.task-table-optimization { min-width: 1380px; }.task-table th, .task-table td { padding: 11px 12px; border-bottom: 1px solid #edf1f6; vertical-align: middle; text-align: left; white-space: nowrap; }.task-table th { position: sticky; top: 0; z-index: 1; color: #65758d; background: #f7f9fc; font-size: .74rem; font-weight: 800; letter-spacing: .03em; }.task-table tbody tr:last-child td { border-bottom: 0; }.task-table tbody tr:hover { background: #f8fbff; }.task-table .status-pill { min-width: 66px; }.task-prompt-cell { min-width: 380px; max-width: 480px; }.task-prompt-preview { display: block; overflow: hidden; color: #243b61; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }.task-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }.task-detail-grid > div { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid #e4ebf4; border-radius: 10px; background: #fff; }.task-detail-grid small { color: #738198; font-size: .72rem; font-weight: 700; }.task-detail-grid strong { overflow: hidden; color: #28415f; font-size: .84rem; text-overflow: ellipsis; white-space: nowrap; }.task-detail-content { display: grid; gap: 14px; }.task-result-section { padding: 15px; border: 1px solid #dbe7f8; border-radius: 12px; background: #f8fbff; }.task-result-section .section-heading { margin-bottom: 10px; }.optimized-prompt-output { margin: 0; padding: 12px; overflow: auto; border-radius: 9px; background: #10213a; color: #e2edff; font-size: .84rem; line-height: 1.6; white-space: pre-wrap; }
+@media (max-width: 1180px) { .scene-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.workflow-node-form { grid-template-columns: 1fr 1fr; }.management-grid { grid-template-columns: 280px minmax(0, 1fr); }.scene-editor-layout, .two-panel-grid { grid-template-columns: 1fr; } }
+@media (max-width: 820px) { .management-page { padding: 20px 16px; }.management-hero { display: grid; }.management-grid { grid-template-columns: 1fr; }.entity-list-card { position: static; max-height: none; }.scene-meta-grid, .form-row, .dataset-summary-grid, .task-reference-grid, .task-metric-grid, .task-detail-grid { grid-template-columns: 1fr 1fr; }.scene-test-input, .dataset-upload-form { grid-template-columns: 1fr; }.management-tabs { overflow-x: auto; }.management-tab { white-space: nowrap; } }
+.table-action-group { display: flex; gap: 6px; align-items: center; }.training-job-description { min-width: 270px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.training-config-grid { margin: 0; }.training-metric-grid { margin-bottom: 12px; }.training-metrics-table-wrap { border-radius: 9px; }.training-metrics-table { min-width: 420px; }.training-metrics-table th, .training-metrics-table td { padding: 9px 11px; }.task-description-copy { margin: 0; color: #43546c; line-height: 1.65; }.training-artifact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }.training-artifact-card { margin: 0; overflow: hidden; border: 1px solid #dce6f3; border-radius: 11px; background: #fff; }.training-artifact-card img { display: block; width: 100%; min-height: 180px; max-height: 360px; object-fit: contain; background: #f3f6fa; }.training-artifact-card figcaption { display: grid; gap: 4px; padding: 10px 12px; }.training-artifact-card strong { color: #294564; font-size: .88rem; }.training-artifact-card span { color: #6f7e93; font-size: .78rem; line-height: 1.5; }.artifact-empty-state { padding: 15px; border: 1px dashed #c7d6e8; border-radius: 10px; color: #6f7e93; background: #fff; font-size: .84rem; line-height: 1.6; }

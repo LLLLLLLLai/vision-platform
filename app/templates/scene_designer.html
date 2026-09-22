@@ -1,0 +1,112 @@
+{% extends "management_base.html" %}
+
+{% block title %}场景设计 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="scene-designer-page" id="sceneDesigner" data-scene-id="{{ scenario_id }}">
+  <header class="scene-designer-header">
+    <div class="scene-designer-title">
+      <a class="designer-back" href="/scenes/maintenance" aria-label="返回场景维护">←</a>
+      <div><span class="eyebrow" id="designerSceneCode">SCENE</span><h1 id="designerSceneName">正在加载场景…</h1><p id="designerSceneMeta">场景设计器</p></div>
+    </div>
+    <div class="scene-designer-actions">
+      <select class="form-select form-select-sm" id="designerVersionSelect" aria-label="场景版本"></select>
+      <span class="status-pill draft" id="designerVersionStatus">DRAFT</span>
+      <button class="btn btn-outline-secondary btn-sm" id="designerClone" type="button">新建草稿版本</button>
+      <button class="btn btn-outline-primary btn-sm" id="designerSave" type="button">保存草稿</button>
+      <button class="btn btn-primary btn-sm" id="designerPublish" type="button">发布</button>
+    </div>
+  </header>
+
+  <div id="designerAlert" class="scene-designer-alert"></div>
+
+  <section class="direct-designer" id="directDesigner" hidden>
+    <aside class="direct-config-panel">
+      <div class="designer-panel-heading"><div><small>VLM CONFIGURATION</small><h2>检测配置</h2></div><span id="directDraftTip" class="muted-copy">草稿可随时测试</span></div>
+      <div class="stack-form compact-stack-form">
+        <label><span>检测 VLM</span><select id="directPrimaryVlm" class="form-select"></select></label>
+        <label><span>独立复核 VLM（可选）</span><select id="directReviewVlm" class="form-select"></select></label>
+        <label><span>检测提示词</span><textarea id="directPrompt" class="form-control direct-prompt-editor" rows="16" placeholder="清晰说明检测对象、OK/NG 标准、看不清时的处理方式以及 JSON 输出要求。"></textarea></label>
+        <section class="node-parameter-section direct-input-parameter-section">
+          <div class="node-parameter-heading"><div><strong>ROI 可传入参数</strong><small>图片由系统自动传入；这里的参数可供配方 ROI 绑定，也可在提示词中引用。</small></div><button class="node-parameter-add" id="directInputAdd" type="button" data-parameter-add="directInputParameters" title="添加参数"><span aria-hidden="true">＋</span>添加参数</button></div>
+          <div class="node-parameter-columns"><span>参数键</span><span>参数名称</span><span aria-hidden="true"></span></div>
+          <div class="node-parameter-rows" id="directInputParameters" data-parameter-kind="SCHEMA" data-key-placeholder="例如 ocr_text" data-value-placeholder="例如 OCR 校验文字"></div>
+          <small class="muted-copy">字段键仅支持字母、数字和下划线，不能以数字开头。图片字段不需要填写。</small>
+        </section>
+        <div class="form-row direct-parameter-grid">
+          <label><span>温度</span><input id="directTemperature" class="form-control" type="number" min="0" max="2" step="0.1" value="0"></label>
+          <label><span>最大输出 Token</span><input id="directMaxTokens" class="form-control" type="number" min="64" max="8192" step="64" value="1024"></label>
+        </div>
+        <label class="form-check scene-inline-check"><input id="directThinking" class="form-check-input" type="checkbox"><span class="form-check-label">本场景开启思考模式（服务支持时生效）</span></label>
+        <details class="designer-advanced"><summary>高级参数（JSON）</summary><textarea id="directExtraParams" class="form-control" rows="4" placeholder='例如 {"top_p": 0.8}'></textarea></details>
+        <button class="btn btn-outline-primary" id="directSave" type="button">保存当前配置</button>
+      </div>
+    </aside>
+    <section class="direct-chat-panel">
+      <div class="designer-panel-heading"><div><small>LIVE PLAYGROUND</small><h2>图片测试与检测结果</h2><p>预览区固定显示当前图片；每次测试只保留最新结果，避免内容累积影响操作。</p></div></div>
+      <div class="direct-test-toolbar">
+        <label class="btn btn-outline-primary mb-0" for="directTestImage">上传测试图片</label><input id="directTestImage" type="file" accept="image/*" hidden>
+        <button class="btn btn-primary" id="directRunTest" type="button" disabled>开始检测</button>
+        <button class="btn btn-outline-secondary" id="directClearResult" type="button" disabled>清空结果</button>
+      </div>
+      <div class="direct-test-preview" id="directTestPreview"><div class="empty-state"><span>▧</span><strong>选择测试图片</strong><p>图片不会修改场景或生产数据，只用于当前草稿调试。</p></div></div>
+      <div class="direct-conversation" id="directConversation"><div class="empty-state compact-empty"><span>◌</span><strong>等待测试</strong><p>上传图片并开始检测后，这里仅展示本次测试的结果。</p></div></div>
+    </section>
+  </section>
+
+  <section class="workflow-designer" id="workflowDesigner" hidden>
+    <aside class="workflow-palette" aria-label="节点库">
+      <div class="workflow-palette-header">
+        <div><small>NODE LIBRARY</small><h2>节点库</h2><p>拖入画布后连接节点，配置会实时保存在当前草稿。</p></div>
+        <span class="workflow-palette-count" id="workflowPaletteCount">6</span>
+      </div>
+      <label class="workflow-palette-search" for="workflowNodeSearch"><span aria-hidden="true">⌕</span><input id="workflowNodeSearch" type="search" placeholder="搜索节点" autocomplete="off"></label>
+      <div class="workflow-palette-scroll">
+        <div class="palette-group" data-palette-group="ai"><small>AI 能力</small>
+          <button type="button" class="palette-node palette-vlm" draggable="true" data-node-type="VLM" data-node-keywords="vlm 大模型 提示词 图片 检测"><b>◇</b><span><strong>VLM 检测</strong><small>提示词驱动的图像判断</small></span><i aria-hidden="true">＋</i></button>
+          <button type="button" class="palette-node palette-vision" draggable="true" data-node-type="VISION_MODEL" data-node-keywords="yolo 模型 训练 目标检测 分割 分类"><b>◉</b><span><strong>训练模型</strong><small>引用已发布的 YOLO 模型</small></span><i aria-hidden="true">＋</i></button>
+        </div>
+        <div class="palette-group" data-palette-group="image"><small>图像处理</small>
+          <button type="button" class="palette-node palette-crop" draggable="true" data-node-type="IMAGE_CROP" data-node-keywords="裁剪 图片 bbox 检测框 目标框 roi"><b>✂</b><span><strong>图片裁剪</strong><small>按上游 bbox 裁剪图片</small></span><i aria-hidden="true">＋</i></button>
+        </div>
+        <div class="palette-group" data-palette-group="logic"><small>逻辑控制</small>
+          <button type="button" class="palette-node palette-rule" draggable="true" data-node-type="RULE" data-node-keywords="规则 判断 比较 校验"><b>✓</b><span><strong>规则判断</strong><small>对前序输出做确定性判断</small></span><i aria-hidden="true">＋</i></button>
+          <button type="button" class="palette-node palette-if" draggable="true" data-node-type="IF" data-node-keywords="if 条件 分支 判断"><b>?</b><span><strong>条件分支</strong><small>根据条件选择后续路径</small></span><i aria-hidden="true">＋</i></button>
+          <button type="button" class="palette-node palette-loop" draggable="true" data-node-type="LOOP" data-node-keywords="循环 遍历 集合"><b>↻</b><span><strong>循环控制</strong><small>限定集合处理次数</small></span><i aria-hidden="true">＋</i></button>
+        </div>
+        <div class="palette-group" data-palette-group="integration"><small>服务集成</small>
+          <button type="button" class="palette-node palette-api" draggable="true" data-node-type="WEB_API" data-node-keywords="web api http 接口 json text"><b>↗</b><span><strong>Web 接口</strong><small>调用 JSON 或文本接口</small></span><i aria-hidden="true">＋</i></button>
+        </div>
+        <div class="palette-search-empty" id="workflowPaletteEmpty" hidden><span>⌕</span><p>没有匹配的节点</p></div>
+      </div>
+      <div class="palette-note"><strong>变量引用</strong><p>节点可引用 <code>{% raw %}{{ input.* }}{% endraw %}</code> 和 <code>{% raw %}{{ nodes.节点键.* }}{% endraw %}</code>。选中节点后，可从右侧一键复制变量。</p></div>
+    </aside>
+    <main class="workflow-stage-panel">
+      <div class="workflow-stage-toolbar">
+        <div class="workflow-stage-title"><span class="workflow-stage-title-icon" aria-hidden="true">⌘</span><div><strong>编排画布</strong><span id="workflowGraphSummary">正在加载流程…</span></div></div>
+        <div class="workflow-stage-controls"><div class="workflow-run-controls"><label class="btn btn-primary btn-sm" for="workflowTestImage">选择测试图<input id="workflowTestImage" type="file" accept="image/*" hidden></label><button class="btn btn-outline-primary btn-sm" id="workflowRunTest" type="button" disabled>测试流程</button></div><div class="workflow-view-controls"><button class="btn btn-outline-secondary btn-sm" id="workflowAutoLayout" type="button">自动排版</button><button class="btn btn-outline-secondary btn-sm" id="workflowFitCanvas" type="button">适应视图</button><div class="workflow-zoom-controls" aria-label="画布缩放"><button class="btn btn-outline-secondary btn-sm" id="workflowZoomOut" type="button" title="缩小">−</button><button class="btn btn-outline-secondary btn-sm" id="workflowZoomReset" type="button" title="恢复 100%">100%</button><button class="btn btn-outline-secondary btn-sm" id="workflowZoomIn" type="button" title="放大">＋</button></div></div></div>
+      </div>
+      <div class="workflow-canvas-viewport" id="workflowCanvasViewport">
+        <div class="workflow-canvas-guide" aria-hidden="true"><span>拖拽移动节点</span><span>从圆点拉线连接</span><span>点击连线可删除</span></div>
+        <div class="workflow-canvas-surface" id="workflowCanvasSurface"><svg id="workflowEdgeLayer" class="workflow-edge-layer" aria-hidden="true"></svg><div id="workflowNodeLayer" class="workflow-node-layer"></div><div class="workflow-canvas-empty" id="workflowCanvasEmpty"><span>◇</span><strong>开始搭建检测流程</strong><p>从左侧拖入 VLM、训练模型或规则节点，再将“开始”连接到“结束”。</p></div></div>
+        <div class="workflow-canvas-legend" aria-hidden="true"><span><i class="legend-dot input"></i>输入</span><span><i class="legend-dot output"></i>输出</span><span><i class="legend-line"></i>执行路径</span></div>
+      </div>
+      <section class="workflow-test-panel" id="workflowTestPanel" hidden>
+        <header class="workflow-test-heading"><div><small>FLOW DEBUG</small><h3>流程测试结果</h3><p id="workflowTestSummary">上传测试图后，查看每个节点的输入、输出与处理耗时。</p></div><button class="btn btn-outline-secondary btn-sm" id="workflowTestClear" type="button">清空结果</button></header>
+        <div class="workflow-test-content">
+          <aside class="workflow-test-inputs"><div class="workflow-test-preview" id="workflowTestPreview"><div class="empty-state compact-empty"><span>▧</span><strong>选择测试图片</strong><p>图片仅用于当前草稿调试，不会写入生产记录。</p></div></div><label><span>测试参数（JSON，可选）</span><textarea class="form-control" id="workflowTestContext" rows="7" placeholder='例如 {&quot;expected_text&quot;:&quot;FUS&quot;}'>{}</textarea></label></aside>
+          <section class="workflow-trace-section"><div class="workflow-trace-list" id="workflowTestTraceList"><div class="empty-state compact-empty"><span>⌘</span><strong>等待流程测试</strong><p>结果会按执行顺序展示每个节点的输入、输出和耗时。</p></div></div></section>
+        </div>
+      </section>
+    </main>
+    <aside class="workflow-inspector" id="workflowInspector">
+      <div class="designer-panel-heading workflow-inspector-heading"><div><small>NODE INSPECTOR</small><h2>节点配置</h2><p id="workflowInspectorHint">点击画布上的节点进行配置。</p></div><span class="workflow-inspector-status" id="workflowInspectorStatus">未选择</span></div>
+      <div id="workflowInspectorContent" class="workflow-inspector-content"><div class="empty-state compact-empty"><span>◇</span><strong>未选择节点</strong><p>选择节点后配置模型、提示词、输入映射和输出。</p></div></div>
+    </aside>
+  </section>
+</div>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260920-11" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20260921-02" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260922-07" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260922-07"></script>
+{% endblock %}

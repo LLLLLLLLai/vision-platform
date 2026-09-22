@@ -14,7 +14,8 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
-from app.core.config import PROJECT_ROOT, settings
+from app.core.config import PROJECT_ROOT
+from app.harness.runtime import get_harness
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class ModelServiceDefinition:
     url: str
     script: Path
     python_candidates: tuple[Path, ...]
+    capabilities: tuple[str, ...] = ()
 
     @property
     def host(self) -> str:
@@ -49,51 +51,23 @@ def _python_path(environment: str) -> Path:
     return PROJECT_ROOT / environment / "bin" / "python"
 
 
-SERVICE_DEFINITIONS = {
-    service.code: service
-    for service in (
-        ModelServiceDefinition(
-            code="grounding_dino",
-            name="Grounding DINO",
-            category="开放词汇定位",
-            url=settings.grounding_service_url,
-            script=PROJECT_ROOT / "scripts" / "run_grounding.py",
-            python_candidates=(_python_path(".venv-qwen"), _python_path(".venv")),
-        ),
-        ModelServiceDefinition(
-            code="dinov2",
-            name="DINOv2",
-            category="参考图相似度",
-            url=settings.dinov2_service_url,
-            script=PROJECT_ROOT / "scripts" / "run_dinov2.py",
-            python_candidates=(_python_path(".venv"),),
-        ),
-        ModelServiceDefinition(
-            code="qwen3_vl",
-            name="Qwen3-VL",
-            category="VLM 结果复核",
-            url=settings.qwen_vl_service_url,
-            script=PROJECT_ROOT / "scripts" / "run_qwen_vl.py",
-            python_candidates=(_python_path(".venv-qwen"), _python_path(".venv")),
-        ),
-        ModelServiceDefinition(
-            code="paddleocr",
-            name="PaddleOCR",
-            category="专用 OCR",
-            url=settings.paddleocr_service_url,
-            script=PROJECT_ROOT / "scripts" / "run_ocr.py",
-            python_candidates=(_python_path("ocr_service/.venv"), _python_path(".venv")),
-        ),
-        ModelServiceDefinition(
-            code="sam2",
-            name="SAM2",
-            category="线束分割",
-            url=settings.sam2_service_url,
-            script=PROJECT_ROOT / "scripts" / "run_sam2.py",
-            python_candidates=(_python_path(".venv"), _python_path(".venv-qwen")),
-        ),
-    )
-}
+def _build_service_definitions() -> dict[str, ModelServiceDefinition]:
+    runtime = get_harness()
+    return {
+        plugin.code: ModelServiceDefinition(
+            code=plugin.code,
+            name=plugin.name,
+            category=plugin.category,
+            url=runtime.service_url(plugin.code),
+            script=PROJECT_ROOT / (plugin.launch_script or ""),
+            python_candidates=tuple(_python_path(name) for name in plugin.python_environments),
+            capabilities=plugin.capabilities,
+        )
+        for plugin in runtime.service_plugins()
+    }
+
+
+SERVICE_DEFINITIONS = _build_service_definitions()
 
 STATE_DIR = PROJECT_ROOT / "data" / "model_services"
 LOG_DIR = PROJECT_ROOT / "logs" / "model_services"
@@ -243,6 +217,7 @@ async def service_status(service: ModelServiceDefinition) -> dict[str, Any]:
         "code": service.code,
         "name": service.name,
         "category": service.category,
+        "capabilities": list(service.capabilities),
         "url": service.url,
         "host": service.host,
         "port": service.port,

@@ -1,8 +1,8 @@
 # Vision Platform 工业视觉智能平台交接手册（V1.2）
 
-> **更新日期：** 2026-09-03  
-> **代码分支：** `develop`  
-> **适用对象：** 平台开发、算法工程、实施运维、产线质量人员  
+> **更新日期：** 2026-09-19
+> **代码分支：** `develop`
+> **适用对象：** 平台开发、算法工程、实施运维、产线质量人员
 > **阅读顺序：** 本文 → 根目录 `README.md` → `docs/OCR-Service-Handover.md` → `docs/Vision-Platform-Operation-SOP.docx`
 
 ## 1. 平台定位与边界
@@ -12,7 +12,7 @@ Vision Platform 用于汽车电子装配中的**错装、漏装、混装**检测
 - 平台不是“上传整图后由大模型自动判定一切”的系统。
 - 配方决定当前拉线、物料、工序、相机和拍照次数应检查哪些区域与规则。
 - AI 自动解析只用于配置辅助；生产检测主路径仍使用经用户确认的 ROI。
-- 接口成功但产品不合格应返回 `code=0`、`result=NG`；模型或系统异常返回 `result=ERROR`，不得伪装为 `NG`。
+- 外围 `/api/detect` 接口成功应返回 `code=200`；产品不合格以 `result=NG` 表示。模型或系统异常返回 `result=ERROR`，不得伪装为 `NG`。
 - 当前不覆盖划痕、污渍、裂纹等表面缺陷，也不直接控制相机、PLC、运动轴或光源。
 
 ## 2. 当前架构
@@ -22,6 +22,7 @@ Vision Platform 用于汽车电子装配中的**错装、漏装、混装**检测
         │  上传图片，调用 /api/detect
         ▼
 Vision Platform :9010
+  ├─ Harness 风格插件运行时（运行档案、能力路由、模型替换）
   ├─ 配方路由（拉线、物料、工序、相机、拍照次）
   ├─ 基准点/特征点对齐
   ├─ 固定 ROI 裁剪
@@ -39,6 +40,30 @@ Vision Platform :9010
 
 模型服务独立运行，主平台通过 HTTP 调用。模型异常不会使平台进程退出；但该检测项必须返回 `ERROR`，不能作为合格结果。
 
+### 2.1 Harness 风格插件运行时
+
+平台参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的“能力皆插件、通过运行档案组合”的架构模式；并**没有**把开发者预览阶段的 DeepSeek Harness/Node 运行时放入生产检测链路。
+
+当前实现保持 FastAPI + Python 的确定性生产内核，在 `app/harness/` 中实现轻量插件运行时：
+
+```text
+HARNESS_PROFILE
+    -> config/harness.json
+        -> 启用插件
+            -> capability_routes（能力 -> 具体插件）
+                -> AlgorithmServiceClient / InspectionEngine
+```
+
+- `production`：默认完整生产档案；
+- `minimal`：DINOv2、OCR 与 OpenCV 的故障排查档案；
+- `configuration`：启用自动解析、分割与 VLM 的配方配置档案；
+- `HARNESS_DISABLED_PLUGINS`：可在不改配方、不改接口的前提下临时禁用服务；
+- `GET /api/v1/harness`：返回当前档案、启用插件和能力路由，供运维确认。
+
+新接入模型时先注册插件清单，声明它提供的能力、地址、启动脚本和 Python 环境；再在测试档案中将能力路由到新插件。确认后才更新 `production` 档案。这样可以替换 OCR、相似度、定位或 VLM 服务，而不破坏 `/api/detect`、配方字段和现有 ROI 规则。
+
+详细技术栈与扩展步骤见 `docs/DeepSeek-Harness-Inspired-Architecture.md`。
+
 ## 3. 核心功能模块
 
 ### 3.1 配方与路由
@@ -51,7 +76,7 @@ line_code + material_code + operation_code + camera_code + capture_index + versi
 
 配方编码示例：`L01_PDU001_OP10_CAMERA1_PICTURE1_V1`。
 
-生产接口保留供应商约定的 `/api/detect`，不破坏既有 `sn` 和 `image_paths` 参数；同时支持可选结构化字段：`line`、`materialcode`、`operation`、`camera`、`picture`。匹配优先级为：
+生产接口保留供应商约定的 `/api/detect`，不破坏既有 `sn` 和 `image_paths` 参数；同时支持结构化字段：`line`、`materialCode`、`operation`、`times`，以及可选 `camera`。相机和条码优先从文件名中的 `CAMERA1PICTURE1-<SN>` 解析。详细对接见 `docs/Detect-接口与SMB集成说明.md`。匹配优先级为：
 
 1. 请求中的结构化字段；
 2. 图片文件名解析，例如 `CAMERA1PICTURE1`；
@@ -133,17 +158,9 @@ Qwen3-VL 使用同一套 `:9023` 服务完成两类任务：
 
 VLM 的输出只能作为复核证据或风险信号，不是质量真值。VLM 可能存在幻觉、提示词敏感、版本变化和图像细节遗漏；当主模型、规则或 VLM 结果冲突时，应输出 `UNCERTAIN/ERROR` 或进入人工复判队列，不能为了“自动化”强制判 OK。
 
-### 3.7 候选基准与参考向量
+### 3.7 参考向量
 
-检测任务中，某 ROI 的所有主规则均为 `OK` 时，系统会尝试收集其 ROI 图作为候选基准。候选收集经过以下保护：
-
-- 图像质量检查；
-- 感知哈希去重；
-- 候选池数量限制（默认每个 ROI 保留约 20 张）；
-- Qwen3-VL 双图审核；
-- 用户在候选列表中人工提升为正式参考，或拒绝/清理。
-
-候选图不是立即成为正式标准图。高相似度也可能把持续性误装、错误配方、错误 ROI、错误参考或系统性拍摄问题逐步带入基准，因此保留人工确认入口。
+候选基准页面、候选接口和生产检测后的候选图后台采集均已停用。历史候选表和图片不自动删除，以免影响已有检测记录追溯；平台不会再新增候选图、调用候选图双图复核或将候选图加入参考集。
 
 正式参考图经 DINOv2 提取为 embedding（特征向量）。向量以按配方业务层级组织的 `.npy` 矩阵文件和 `.json` 清单保存；数据库保存组标识、路径、维度、模型版本和来源。检测时只读取当前配方/ROI 对应的向量组，计算余弦相似度，采用 **Top-K 鲁棒聚合**，而不是只取全库最大值。这样减少单张异常参考图误导，同时避免随着产品增多全库扫描。
 
@@ -259,4 +276,3 @@ tests/                          对齐、颜色、候选、报表、离线资源
 3. 对高风险线束锁付、空位、插接到位场景建立专用 ROI 组合规则或训练轻量模型；
 4. 在 RHEL 8.3 上完成 systemd、日志轮转、自动恢复、GPU 监控和数据备份；
 5. 将候选基准审核和参考版本变更纳入可追溯流程。
-

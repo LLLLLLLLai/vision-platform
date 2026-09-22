@@ -8,17 +8,12 @@ from typing import Any
 import httpx
 
 from app.core.config import PROJECT_ROOT, settings
+from app.harness.runtime import get_harness
+from app.services.inference_concurrency import vlm_inference_gate
 
 
 MODEL_CALL_LOG_DIR = PROJECT_ROOT / "logs" / "model_services"
 MODEL_CALL_LOG_LOCK = threading.Lock()
-SERVICE_CODES = {
-    settings.grounding_service_url.rstrip("/"): "grounding_dino",
-    settings.dinov2_service_url.rstrip("/"): "dinov2",
-    settings.qwen_vl_service_url.rstrip("/"): "qwen3_vl",
-    settings.paddleocr_service_url.rstrip("/"): "paddleocr",
-    settings.sam2_service_url.rstrip("/"): "sam2",
-}
 
 
 def _compact_value(value: Any, depth: int = 0) -> Any:
@@ -41,7 +36,7 @@ def _compact_value(value: Any, depth: int = 0) -> Any:
 
 def _write_call_log(
     *,
-    base_url: str,
+    service_code: str,
     path: str,
     payload: dict[str, Any],
     status: str,
@@ -50,7 +45,6 @@ def _write_call_log(
     response: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
-    service_code = SERVICE_CODES.get(base_url.rstrip("/"), "unknown")
     MODEL_CALL_LOG_DIR.mkdir(parents=True, exist_ok=True)
     record = {
         "time": datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds"),
@@ -72,6 +66,7 @@ def _write_call_log(
 class AlgorithmServiceClient:
     def __init__(self) -> None:
         self.timeout = settings.algorithm_timeout_seconds
+        self.harness = get_harness()
 
     async def health(self, service_url: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -93,7 +88,7 @@ class AlgorithmServiceClient:
             "text_threshold": text_threshold,
         }
         return await self._post(
-            settings.grounding_service_url,
+            "grounding_dino",
             "/v1/localize",
             payload,
             timeout=max(self.timeout, 60.0),
@@ -101,7 +96,7 @@ class AlgorithmServiceClient:
 
     async def embedding(self, image_path: str) -> dict[str, Any]:
         return await self._post(
-            settings.dinov2_service_url,
+            "dinov2",
             "/v1/embedding",
             {"image_path": image_path},
         )
@@ -118,7 +113,7 @@ class AlgorithmServiceClient:
             "top_k": top_k,
         }
         return await self._post(
-            settings.dinov2_service_url,
+            "dinov2",
             "/v1/similarity",
             payload,
         )
@@ -137,7 +132,7 @@ class AlgorithmServiceClient:
             "max_new_tokens": max_new_tokens,
         }
         return await self._post(
-            settings.qwen_vl_service_url,
+            "qwen3_vl",
             "/v1/judge",
             payload,
             timeout=max(self.timeout, 60.0),
@@ -159,29 +154,10 @@ class AlgorithmServiceClient:
             "max_new_tokens": max_new_tokens,
         }
         return await self._post(
-            settings.qwen_vl_service_url,
+            "qwen3_vl",
             "/v1/compare",
             payload,
             timeout=max(self.timeout, 90.0),
-        )
-
-    async def discover_objects(
-        self,
-        image_path: str,
-        object_types: list[str] | None = None,
-        max_objects: int = 30,
-    ) -> dict[str, Any]:
-        payload = {
-            "image_path": image_path,
-            "object_types": object_types or [],
-            "max_objects": max_objects,
-            "max_new_tokens": 1024,
-        }
-        return await self._post(
-            settings.qwen_vl_service_url,
-            "/v1/discover",
-            payload,
-            timeout=max(self.timeout, 120.0),
         )
 
     async def inventory_objects(
@@ -197,7 +173,7 @@ class AlgorithmServiceClient:
             "max_new_tokens": 320,
         }
         return await self._post(
-            settings.qwen_vl_service_url,
+            "qwen3_vl",
             "/v1/inventory",
             payload,
             timeout=max(self.timeout, 90.0),
@@ -209,7 +185,7 @@ class AlgorithmServiceClient:
         seeds: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return await self._post(
-            settings.sam2_service_url,
+            "sam2",
             "/v1/segment",
             {"image_path": image_path, "seeds": seeds},
             timeout=max(self.timeout, 180.0),
@@ -221,30 +197,41 @@ class AlgorithmServiceClient:
         expected_text: str | None = None,
     ) -> dict[str, Any]:
         return await self._post(
-            settings.paddleocr_service_url,
+            "paddleocr",
             "/ocr",
             {"image_path": image_path, "expected_text": expected_text},
         )
 
     async def _post(
         self,
-        base_url: str,
+        service_code: str,
         path: str,
         payload: dict[str, Any],
         timeout: float | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         response: httpx.Response | None = None
+        base_url = self.harness.service_url(service_code)
         try:
-            async with httpx.AsyncClient(timeout=timeout or self.timeout) as client:
-                response = await client.post(
-                    f"{base_url.rstrip('/')}{path}",
-                    json=payload,
-                )
-                response.raise_for_status()
-                result = response.json()
+            if service_code == "qwen3_vl":
+                async with vlm_inference_gate.acquire():
+                    async with httpx.AsyncClient(timeout=timeout or self.timeout) as client:
+                        response = await client.post(
+                            f"{base_url.rstrip('/')}{path}",
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+            else:
+                async with httpx.AsyncClient(timeout=timeout or self.timeout) as client:
+                    response = await client.post(
+                        f"{base_url.rstrip('/')}{path}",
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    result = response.json()
             _write_call_log(
-                base_url=base_url,
+                service_code=service_code,
                 path=path,
                 payload=payload,
                 status="SUCCESS",
@@ -255,7 +242,7 @@ class AlgorithmServiceClient:
             return result
         except Exception as exc:
             _write_call_log(
-                base_url=base_url,
+                service_code=service_code,
                 path=path,
                 payload=payload,
                 status="ERROR",

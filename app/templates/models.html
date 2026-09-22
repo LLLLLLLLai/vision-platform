@@ -1,0 +1,143 @@
+{% extends "management_base.html" %}
+
+{% block title %}模型中心 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="management-page model-center-page" id="modelsPage" data-page="models" data-active-model-view="{{ active_model_view | default('vlm') }}">
+  <header class="management-hero">
+    <div>
+      <span class="eyebrow">MODEL CENTER</span>
+      <h1>{{ page_title | default('VLM 模型配置') }}</h1>
+      <p>{{ page_description | default('维护 OpenAI 兼容接口的 VLM 服务，用提示词驱动检测、优化和独立复核。') }}</p>
+    </div>
+    <div class="management-hero-actions">
+      {% if active_model_view == 'training' %}
+      <button class="btn btn-primary" id="openTrainingTask" type="button">＋ 创建模型训练任务</button>
+      {% else %}
+      <div class="dropdown">
+        <button class="btn btn-primary dropdown-toggle" id="createModelMenu" type="button" data-bs-toggle="dropdown" aria-expanded="false">＋ 创建模型</button>
+        <ul class="dropdown-menu dropdown-menu-end model-create-menu" aria-labelledby="createModelMenu">
+          <li><button class="dropdown-item" type="button" data-create-model="vlm"><strong>创建 VLM 模型</strong><small>OpenAI 兼容接口、提示词场景与复核</small></button></li>
+          <li><button class="dropdown-item" type="button" data-create-model="vision"><strong>创建训练模型</strong><small>YOLO 的目标检测、分割和分类模型</small></button></li>
+        </ul>
+      </div>
+      {% endif %}
+      <button class="btn btn-outline-primary" id="reloadModels" type="button">刷新</button>
+    </div>
+  </header>
+
+  <div id="modelAlert"></div>
+
+  <section class="management-view {% if active_model_view == 'vlm' %}active{% endif %}" id="vlmView">
+    <div class="catalog-section-heading">
+      <div><small>OPENAI COMPATIBLE API</small><h2>VLM 模型卡片</h2><p>每张卡片代表一个可复用的 VLM 服务配置，可用于场景执行、提示词优化和异步复核。</p></div>
+      <button class="btn btn-sm btn-primary" type="button" data-create-model="vlm">创建 VLM 模型</button>
+    </div>
+    <div id="vlmModelList" class="model-card-grid"></div>
+  </section>
+
+  <section class="management-view {% if active_model_view == 'registry' %}active{% endif %}" id="visionView">
+    <div class="catalog-section-heading">
+      <div><small>TRAINABLE MODEL REGISTRY</small><h2>训练模型卡片</h2><p>先定义模型用途、架构和类别，再进入模型训练页关联数据集生成版本。</p></div>
+      <button class="btn btn-sm btn-primary" type="button" data-create-model="vision">创建训练模型</button>
+    </div>
+    <div id="visionModelList" class="model-card-grid"></div>
+  </section>
+
+  <section class="management-view {% if active_model_view == 'training' %}active{% endif %}" id="jobsView">
+    <div class="d-grid gap-3">
+      <section class="entity-detail-card">
+        <div class="card-heading"><div><small>MODEL TRAINING TASKS</small><h2>模型训练任务列表</h2></div><div class="d-flex gap-2"><button class="btn btn-primary btn-sm" id="openTrainingTaskInline" type="button">＋ 创建任务</button><button class="btn btn-outline-secondary btn-sm" id="reloadModelJobs" type="button">刷新</button></div></div>
+        <p class="muted-copy">创建任务后立即进入列表。这里仅显示模型训练任务；点击“详情”可查看配置、数据切分、训练指标，以及训练曲线、混淆矩阵等诊断图。</p>
+        <div id="automationJobList" class="job-list"></div>
+      </section>
+    </div>
+  </section>
+</div>
+
+<div class="modal fade" id="vlmModelModal" tabindex="-1" aria-labelledby="vlmModelModalTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <form id="vlmModelForm">
+      <div class="modal-header"><div><small class="text-primary">OPENAI COMPATIBLE API</small><h2 class="modal-title fs-5" id="vlmModelModalTitle">创建 VLM 模型</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body stack-form">
+        <input id="vlmEditId" type="hidden">
+        <p class="muted-copy">Base URL 可填写服务根地址或 <code>/v1</code> 地址，例如 <code>http://127.0.0.1:8000</code>。误粘贴 <code>/v1/models</code> 也会自动兼容。API Key 优先使用环境变量，也可在设置 <code>VLM_SECRET_KEY</code> 后加密保存。</p>
+        <div class="form-row">
+          <label><span>模型编码</span><input class="form-control" name="code" placeholder="QWEN_VL_REVIEW" required></label>
+          <label><span>模型名称</span><input class="form-control" name="name" placeholder="Qwen 视觉复核" required></label>
+        </div>
+        <label><span>Base URL</span><input class="form-control" name="base_url" placeholder="https://example.com/v1" required></label>
+        <label><span>模型 ID</span><input class="form-control" name="model_name" placeholder="Qwen/Qwen3-VL-4B-Instruct" required></label>
+        <div class="form-row">
+          <label><span>API Key 环境变量（推荐）</span><input class="form-control" name="api_key_env_name" placeholder="OPENAI_API_KEY"></label>
+          <label><span>API Key（加密保存）</span><input class="form-control" name="api_key" type="password" placeholder="编辑时留空可保留原配置"></label>
+        </div>
+        <div class="form-check"><input class="form-check-input" name="thinking_enabled" type="checkbox" id="thinkingEnabled"><label class="form-check-label" for="thinkingEnabled">启用思考模式（由服务端决定是否支持）</label></div>
+        <div class="form-row">
+          <label><span>温度</span><input class="form-control" name="temperature" type="number" min="0" max="2" step="0.1" value="0"></label>
+          <label><span>最大输出 Token</span><input class="form-control" name="max_tokens" type="number" min="1" value="1024"></label>
+          <label><span>超时（秒）</span><input class="form-control" name="timeout_seconds" type="number" min="1" value="60"></label>
+        </div>
+        <label><span>扩展参数 JSON（可选）</span><textarea class="form-control" name="extra_params_json" rows="3" placeholder='例如 {"top_p":0.8}'></textarea></label>
+      </div>
+      <div class="modal-footer"><button class="btn btn-light" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="saveVlmModel" type="submit">保存 VLM 模型</button></div>
+    </form>
+  </div></div>
+</div>
+
+<div class="modal fade" id="visionModelModal" tabindex="-1" aria-labelledby="visionModelModalTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <form id="visionModelForm">
+      <div class="modal-header"><div><small class="text-primary">TRAINABLE MODEL REGISTRY</small><h2 class="modal-title fs-5" id="visionModelModalTitle">创建训练模型</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body stack-form">
+        <input id="visionEditId" type="hidden">
+        <div class="form-row">
+          <label><span>模型编码</span><input class="form-control" name="code" placeholder="AI_HARNESS_DETECTION" required></label>
+          <label><span>模型名称</span><input class="form-control" name="name" placeholder="AI 检测线束" required></label>
+        </div>
+        <div class="form-row">
+            <label><span>模型系列</span><input class="form-control" id="visionModelFamily" name="model_family" value="YOLO 系列" readonly></label>
+          <label><span>任务类型</span><select class="form-select" id="visionModelTaskType" name="task_type"></select></label>
+        </div>
+        <label><span>具体模型 / 基础权重</span><input class="form-control" id="visionBaseModel" name="base_model" list="visionBaseModelOptions" placeholder="例如 yolo26n.pt 或 custom/harness.pt" required><datalist id="visionBaseModelOptions"></datalist><small class="muted-copy">可从推荐权重中选择，也可直接填写兼容 Ultralytics 的权重名或相对路径。生产或离线服务器请将权重放入 <code>vision-models/</code>；平台会优先从本地读取。</small></label>
+        <label><span>识别类别（每行一个）</span><textarea class="form-control" name="labels" rows="5" placeholder="harness\nconnector\nscrew"></textarea></label>
+        <label><span>说明</span><textarea class="form-control" name="description" rows="3" placeholder="说明这个模型解决的检测问题"></textarea></label>
+      </div>
+      <div class="modal-footer"><button class="btn btn-light" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit">保存训练模型</button></div>
+    </form>
+  </div></div>
+</div>
+
+<div class="modal fade" id="trainingJobModal" tabindex="-1" aria-labelledby="trainingJobModalTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <form id="trainingJobForm">
+      <div class="modal-header"><div><small class="text-primary">MODEL TRAINING</small><h2 class="modal-title fs-5" id="trainingJobModalTitle">创建模型训练任务</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body stack-form">
+        <p class="muted-copy">选择已维护的训练模型和训练数据集。保存后任务会立即进入训练任务列表，并由 GPU Worker 自动调度。</p>
+        <label><span>视觉模型</span><select class="form-select" id="trainingVisionModel"></select></label>
+        <label><span>训练数据集</span><select class="form-select" id="trainingDataset"></select></label>
+        <p class="muted-copy training-selection-hint" id="trainingSelectionHint">请选择模型和数据集；训练数据会在首次提交时自动按 70% / 20% / 10% 切分。</p>
+        <div class="form-row">
+          <label><span>版本</span><input class="form-control" id="trainingVersion" value="1.0"></label>
+          <label><span>训练轮数</span><input class="form-control" id="trainingEpochs" type="number" value="100" min="1"></label>
+          <label><span>输入尺寸</span><input class="form-control" id="trainingImageSize" type="number" value="640" min="64" max="4096"></label>
+          <label><span>批大小（可选）</span><input class="form-control" id="trainingBatchSize" type="number" min="1" placeholder="自动"></label>
+        </div>
+        <label><span>最小可用显存 MB</span><input class="form-control" id="trainingMemory" type="number" value="4096" min="512"></label>
+      </div>
+      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit">保存并创建训练任务</button></div>
+    </form>
+  </div></div>
+</div>
+
+<div class="modal fade" id="trainingJobDetailModal" tabindex="-1" aria-labelledby="trainingJobDetailTitle" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header"><div><small class="text-primary">MODEL TRAINING DETAIL</small><h2 class="modal-title fs-5" id="trainingJobDetailTitle">模型训练任务详情</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+    <div class="modal-body"><div id="trainingJobDetailMeta" class="task-detail-grid"></div><div id="trainingJobDetailContent" class="task-detail-content"></div></div>
+    <div class="modal-footer"><button class="btn btn-primary" type="button" data-bs-dismiss="modal">关闭</button></div>
+  </div></div>
+</div>
+
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260922-01" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20260922-01"></script>
+{% endblock %}

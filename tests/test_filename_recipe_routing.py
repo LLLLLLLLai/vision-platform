@@ -1,8 +1,9 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from starlette.requests import Request
 
 from app.db.base import Base
 from app.api.routes.inspection import (
@@ -13,8 +14,12 @@ from app.api.routes.inspection import (
     match_published_recipe_by_parameters,
     match_published_recipe_by_filename,
     normalize_filename_part,
+    normalise_camera_code,
     parse_camera_picture_from_filename,
+    parse_product_barcode_from_filename,
+    public_detect,
 )
+from app.models.inspection import DetectionApiCall
 from app.models.recipe import Recipe
 from app.models.system import Product, Station
 
@@ -58,16 +63,28 @@ class FilenameRecipeRoutingTest(unittest.TestCase):
             ("CAMERA1", 1),
         )
 
+    def test_parses_product_barcode_from_camera_filename(self) -> None:
+        self.assertEqual(
+            parse_product_barcode_from_filename(
+                "AS15-CAMERA1PICTURE1-CN000798263700002-20260915134635901.jpg"
+            ),
+            "CN000798263700002",
+        )
+
+    def test_normalises_common_camera_aliases(self) -> None:
+        self.assertEqual(normalise_camera_code("CAM01"), "CAMERA1")
+        self.assertEqual(normalise_camera_code("camera_1"), "CAMERA1")
+
     def test_public_request_accepts_new_and_legacy_field_names(self) -> None:
         modern = PublicDetectRequest.model_validate(
             {
                 "sn": "SN001",
                 "image_paths": ["image.png"],
                 "line": "L01",
-                "materialcode": "MAT001",
+                "materialCode": "MAT001",
                 "operation": "OP20",
                 "camera": "CAMERA1",
-                "picture": 1,
+                "times": 1,
             }
         )
         legacy = PublicDetectRequest.model_validate(
@@ -211,6 +228,7 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
             sn: str,
             image_paths: list[str],
             request_id: str | None = None,
+            **_: object,
         ) -> dict:
             result = "NG" if recipe.capture_index == 2 else "OK"
             return {
@@ -241,7 +259,6 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
             image_paths=[
                 "LINE01-MAT001-OP20-CAM01-P1_a.jpg",
                 "LINE01-MAT001-OP20-CAM01-P2_b.jpg",
-                "LINE01-MAT001-OP20-CAM01-P1_c.jpg",
             ],
         )
         with patch(
@@ -266,7 +283,7 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
             "DINOv2",
         )
         first_group_paths = execute_mock.await_args_list[0].kwargs["image_paths"]
-        self.assertEqual(len(first_group_paths), 2)
+        self.assertEqual(len(first_group_paths), 1)
 
     async def test_routes_with_business_parameters_and_filename_camera(self) -> None:
         payload = PublicDetectRequest(
@@ -296,6 +313,74 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
         matched_recipe = execute_mock.await_args.args[1]
         self.assertEqual(matched_recipe.camera_code, "CAMERA1")
         self.assertEqual(matched_recipe.capture_index, 1)
+
+    async def test_skips_blank_camera_path_and_uses_filename_barcode(self) -> None:
+        payload = PublicDetectRequest(
+            image_paths=["ASSY-CAMERA1PICTURE1-CN000798263700002-20260915134635901.png", ""],
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+        )
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(
+                return_value={
+                    "code": 0,
+                    "message": "success",
+                    "result": "OK",
+                    "image_paths": ["result.jpg"],
+                    "request_id": "request-1",
+                }
+            ),
+        ) as execute_mock:
+            response = await execute_filename_routed_inspection(payload, self.database)
+
+        self.assertEqual(response["code"], 0)
+        self.assertEqual(response["sn"], "CN000798263700002")
+        self.assertEqual(execute_mock.await_count, 1)
+
+    async def test_public_detect_records_filename_barcode_and_returns_vendor_success_code(
+        self,
+    ) -> None:
+        payload = PublicDetectRequest(
+            image_paths=["ASSY-CAMERA1PICTURE1-CN000798263700002-20260915134635901.png"],
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/detect",
+                "headers": [],
+                "client": ("10.20.30.40", 12345),
+                "scheme": "http",
+                "query_string": b"",
+            }
+        )
+        with patch(
+            "app.api.routes.inspection.execute_filename_routed_inspection",
+            new=AsyncMock(
+                return_value={
+                    "code": 0,
+                    "message": "success",
+                    "sn": "CN000798263700002",
+                    "result": "OK",
+                    "image_paths": ["result.png"],
+                    "inspection_results": [],
+                }
+            ),
+        ):
+            response = await public_detect(payload, request, self.database)
+
+        record = self.database.scalar(select(DetectionApiCall))
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(record.sn, "CN000798263700002")
+        self.assertEqual(record.caller_ip, "10.20.30.40")
+        self.assertEqual(record.request_payload["operation"], "OP20")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import PROJECT_ROOT
 from app.db.session import get_db
 from app.models.inspection import InspectionItem
-from app.models.recipe import Recipe, RegionOfInterest
+from app.models.intelligence import InspectionScenarioVersion, RoiScenarioBinding
+from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObjectType
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
@@ -47,6 +48,7 @@ class RecipeCreate(BaseModel):
     code: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     version: str = "1.0"
+    project_name: str | None = Field(default=None, max_length=200)
     product_id: int
     station_id: int
     line_code: str | None = None
@@ -60,6 +62,7 @@ class RecipeUpdate(BaseModel):
     code: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     version: str = "1.0"
+    project_name: str | None = Field(default=None, max_length=200)
     product_id: int
     station_id: int
     line_code: str | None = None
@@ -80,6 +83,17 @@ class RoiCreate(BaseModel):
     padding: int = Field(default=0, ge=0, le=500)
     sort_order: int = 0
     alignment_anchor: bool = False
+
+
+class FeatureAnchorCreate(BaseModel):
+    code: str = Field(default="FEATURE_ANCHOR", min_length=1, max_length=100)
+    name: str = Field(default="图像定位特征点", min_length=1, max_length=200)
+    x_ratio: float = Field(ge=0, le=1)
+    y_ratio: float = Field(ge=0, le=1)
+    width_ratio: float = Field(gt=0, le=1)
+    height_ratio: float = Field(gt=0, le=1)
+    padding: int = Field(default=0, ge=0, le=500)
+    enabled: bool = True
 
 
 class InspectionItemCreate(BaseModel):
@@ -149,6 +163,10 @@ def _recipe_values(
         raise HTTPException(status_code=404, detail="Station not found.")
 
     values = payload.model_dump()
+    # Version numbers are system-managed.  A saved draft deliberately keeps
+    # the currently published number until it is explicitly published.
+    values.pop("version", None)
+    values["project_name"] = (values.get("project_name") or "").strip() or None
     values["line_code"] = payload.line_code or station.line_code
     values["material_code"] = payload.material_code or product.code
     values["process_code"] = payload.process_code or station.process_code
@@ -174,6 +192,259 @@ def _recipe_values(
             ]
         )[:100]
     return values
+
+
+def _ensure_recipe_editable(recipe: Recipe) -> None:
+    if recipe.is_deleted:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    if recipe.status not in {"DRAFT", "SAVED"}:
+        raise HTTPException(
+            status_code=409,
+            detail="已发布或已归档配方不能直接修改，请先创建新的编辑草稿。",
+        )
+
+
+def _mark_recipe_changed(recipe: Recipe) -> None:
+    if recipe.status == "SAVED":
+        recipe.status = "DRAFT"
+
+
+def _recipe_family_code(recipe: Recipe) -> str:
+    """Return the stable family key for both new and legacy recipe rows."""
+
+    return (recipe.recipe_family_code or recipe.code or "").strip()
+
+
+def _normalize_recipe_family(recipe: Recipe) -> str:
+    """Fill a legacy row's family key before it joins a new draft/version.
+
+    Fresh installations receive this value at creation time and existing
+    SQLite installations receive it through ``init_database``.  Keeping this
+    tiny safeguard here also makes direct API use safe while an upgrade is in
+    progress and avoids treating an empty family key as a shared family.
+    """
+
+    family_code = _recipe_family_code(recipe)
+    if family_code and recipe.recipe_family_code != family_code:
+        recipe.recipe_family_code = family_code
+    return family_code
+
+
+def _recipe_version_metadata(database: Session, recipe: Recipe) -> dict[str, Any]:
+    """Expose draft/published state without treating the draft as production.
+
+    Existing installations may contain published rows created before
+    ``version_no`` was introduced.  Those rows are considered version one for
+    display and for calculating the next published revision.
+    """
+
+    family_code = _recipe_family_code(recipe)
+    family_filter = (
+        Recipe.recipe_family_code == family_code
+        if recipe.recipe_family_code
+        else Recipe.code == family_code
+    )
+    family_rows = database.scalars(
+        select(Recipe)
+        .where(
+            family_filter,
+            Recipe.is_deleted.is_(False),
+        )
+        .order_by(Recipe.id.desc())
+    ).all()
+    if not family_rows and family_code:
+        # Legacy rows in a unit test or a database that has not yet completed
+        # the SQLite migration can still be addressed by their business code.
+        family_rows = [recipe]
+    version_numbers = [
+        item.version_no or (1 if item.status == "PUBLISHED" else 0)
+        for item in family_rows
+    ]
+    next_version_no = max(version_numbers, default=0) + 1
+    production = next(
+        (item for item in family_rows if item.status == "PUBLISHED"),
+        None,
+    )
+    draft = next(
+        (item for item in family_rows if item.status in {"DRAFT", "SAVED"}),
+        None,
+    )
+    current_version_no = recipe.version_no or (
+        1 if recipe.status == "PUBLISHED" else 0
+    )
+    if recipe.status == "PUBLISHED":
+        display_version = f"V{current_version_no}（生产）"
+    elif recipe.status in {"DRAFT", "SAVED"}:
+        display_version = f"草稿（待发布 V{next_version_no}）"
+    else:
+        display_version = f"V{current_version_no or '-'}（历史）"
+    return {
+        "recipe_family_code": family_code,
+        "version_no": current_version_no,
+        "display_version": display_version,
+        "next_version_no": next_version_no,
+        "source_recipe_id": recipe.source_recipe_id,
+        "production_recipe_id": production.id if production else None,
+        "draft_recipe_id": draft.id if draft else None,
+        "history_count": len(family_rows),
+        "is_production_version": recipe.status == "PUBLISHED",
+    }
+
+
+def _load_recipe_with_content(database: Session, recipe_id: int) -> Recipe:
+    recipe = database.scalar(
+        select(Recipe)
+        .options(
+            selectinload(Recipe.feature_anchor),
+            selectinload(Recipe.rois).selectinload(
+                RegionOfInterest.inspection_items
+            ),
+        )
+        .where(Recipe.id == recipe_id, Recipe.is_deleted.is_(False))
+    )
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    return recipe
+
+
+def _find_recipe_draft(database: Session, family_code: str) -> Recipe | None:
+    return database.scalar(
+        select(Recipe)
+        .where(
+            Recipe.recipe_family_code == family_code,
+            Recipe.status.in_(("DRAFT", "SAVED")),
+            Recipe.is_deleted.is_(False),
+        )
+        .order_by(Recipe.updated_at.desc(), Recipe.id.desc())
+    )
+
+
+def _clone_recipe_content(
+    database: Session,
+    source: Recipe,
+    *,
+    code: str,
+    name: str,
+    recipe_family_code: str,
+) -> Recipe:
+    """Create an isolated editable copy, including ROI-scene bindings.
+
+    Published rows are immutable.  Copying the base image and the complete
+    ROI tree means changing a draft can never alter a historical production
+    version or the evidence attached to older detection records.
+    """
+
+    clone = Recipe(
+        code=code,
+        recipe_family_code=recipe_family_code,
+        version_no=0,
+        source_recipe_id=source.id,
+        name=name,
+        version=source.version,
+        status="DRAFT",
+        project_name=source.project_name,
+        product_id=source.product_id,
+        station_id=source.station_id,
+        line_code=source.line_code,
+        material_code=source.material_code,
+        process_code=source.process_code,
+        camera_code=source.camera_code,
+        capture_index=source.capture_index,
+        reference_width=source.reference_width,
+        reference_height=source.reference_height,
+    )
+    database.add(clone)
+    database.flush()
+
+    copied_image_path: Path | None = None
+    try:
+        if source.base_image_path:
+            source_path = Path(source.base_image_path)
+            if source_path.is_file():
+                copied_image_path = (
+                    Path(PROJECT_ROOT / "uploads" / "recipes" / str(clone.id))
+                    / f"base{source_path.suffix.lower() or '.jpg'}"
+                )
+                copied_image_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, copied_image_path)
+                clone.base_image_path = str(copied_image_path)
+
+        roi_id_map: dict[int, int] = {}
+        for source_roi in source.rois:
+            cloned_roi = RegionOfInterest(
+                recipe_id=clone.id,
+                scene_object_id=None,
+                code=source_roi.code,
+                name=source_roi.name,
+                object_type=source_roi.object_type,
+                shape_type=source_roi.shape_type,
+                x_ratio=source_roi.x_ratio,
+                y_ratio=source_roi.y_ratio,
+                width_ratio=source_roi.width_ratio,
+                height_ratio=source_roi.height_ratio,
+                pixel_coordinates=dict(source_roi.pixel_coordinates or {}),
+                padding=source_roi.padding,
+                sort_order=source_roi.sort_order,
+                alignment_anchor=False,
+                enabled=source_roi.enabled,
+            )
+            database.add(cloned_roi)
+            database.flush()
+            roi_id_map[source_roi.id] = cloned_roi.id
+            for source_item in source_roi.inspection_items:
+                database.add(
+                    InspectionItem(
+                        roi_id=cloned_roi.id,
+                        code=source_item.code,
+                        name=source_item.name,
+                        inspection_type=source_item.inspection_type,
+                        capability=source_item.capability,
+                        reference_group_id=source_item.reference_group_id,
+                        expected_json=dict(source_item.expected_json or {}),
+                        rule_json=dict(source_item.rule_json or {}),
+                        execution_order=source_item.execution_order,
+                        required=source_item.required,
+                        enabled=source_item.enabled,
+                    )
+                )
+
+        source_roi_ids = list(roi_id_map)
+        bindings = database.scalars(
+            select(RoiScenarioBinding).where(
+                RoiScenarioBinding.roi_id.in_(source_roi_ids)
+            )
+        ).all() if source_roi_ids else []
+        for binding in bindings:
+            database.add(
+                RoiScenarioBinding(
+                    roi_id=roi_id_map[binding.roi_id],
+                    scenario_version_id=binding.scenario_version_id,
+                    input_mapping_json=dict(binding.input_mapping_json or {}),
+                    enabled=binding.enabled,
+                )
+            )
+
+        if source.feature_anchor is not None:
+            anchor = source.feature_anchor
+            database.add(
+                RecipeFeatureAnchor(
+                    recipe_id=clone.id,
+                    code=anchor.code,
+                    name=anchor.name,
+                    x_ratio=anchor.x_ratio,
+                    y_ratio=anchor.y_ratio,
+                    width_ratio=anchor.width_ratio,
+                    height_ratio=anchor.height_ratio,
+                    padding=anchor.padding,
+                    enabled=anchor.enabled,
+                )
+            )
+        database.flush()
+    except Exception:
+        if copied_image_path is not None:
+            copied_image_path.unlink(missing_ok=True)
+        raise
+    return clone
 
 
 def _save_upload(upload: UploadFile, directory: Path) -> Path:
@@ -266,6 +537,22 @@ def _roi_payload(roi: RegionOfInterest) -> dict[str, Any]:
             else None
         ),
         "inspection_items": [_item_payload(item) for item in roi.inspection_items],
+    }
+
+
+def _feature_anchor_payload(anchor: RecipeFeatureAnchor | None) -> dict[str, Any] | None:
+    if anchor is None:
+        return None
+    return {
+        "id": anchor.id,
+        "code": anchor.code,
+        "name": anchor.name,
+        "x_ratio": anchor.x_ratio,
+        "y_ratio": anchor.y_ratio,
+        "width_ratio": anchor.width_ratio,
+        "height_ratio": anchor.height_ratio,
+        "padding": anchor.padding,
+        "enabled": anchor.enabled,
     }
 
 
@@ -376,6 +663,7 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
     recipes = database.scalars(
         select(Recipe)
         .options(
+            selectinload(Recipe.feature_anchor),
             selectinload(Recipe.rois).selectinload(
                 RegionOfInterest.inspection_items
             )
@@ -393,6 +681,7 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "name": item.name,
             "version": item.version,
             "status": item.status,
+            "project_name": item.project_name,
             "product_id": item.product_id,
             "station_id": item.station_id,
             "base_image_url": _file_url(item.base_image_path),
@@ -404,6 +693,7 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "station_code": station.code if station else "",
             "camera_code": item.camera_code or "",
             "capture_index": item.capture_index,
+            **_recipe_version_metadata(database, item),
         })
     return payload
 
@@ -413,11 +703,23 @@ def create_recipe(
     payload: RecipeCreate,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    recipe = Recipe(**_recipe_values(database, payload))
+    values = _recipe_values(database, payload)
+    recipe = Recipe(
+        **values,
+        recipe_family_code=values["code"],
+        version_no=0,
+        version="",
+        status="DRAFT",
+    )
     database.add(recipe)
     _commit(database)
     database.refresh(recipe)
-    return {"id": recipe.id, "code": recipe.code, "status": recipe.status}
+    return {
+        "id": recipe.id,
+        "code": recipe.code,
+        "status": recipe.status,
+        **_recipe_version_metadata(database, recipe),
+    }
 
 
 @router.put("/recipes/{recipe_id}")
@@ -429,10 +731,29 @@ def update_recipe(
     recipe = database.get(Recipe, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     for field, value in _recipe_values(database, payload).items():
         setattr(recipe, field, value)
+    _mark_recipe_changed(recipe)
     database.commit()
     return {"id": recipe.id, "code": recipe.code, "status": recipe.status}
+
+
+@router.delete("/recipes/{recipe_id}")
+def delete_recipe(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, bool]:
+    """Soft-delete a recipe without removing its historical inspection trace."""
+
+    recipe = database.get(Recipe, recipe_id)
+    if recipe is None or recipe.is_deleted:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    was_published = recipe.status == "PUBLISHED"
+    recipe.is_deleted = True
+    recipe.status = "ARCHIVED"
+    database.commit()
+    return {"deleted": True, "was_published": was_published}
 
 
 @router.get("/recipes/{recipe_id}")
@@ -443,11 +764,12 @@ def recipe_detail(
     recipe = database.scalar(
         select(Recipe)
         .options(
+            selectinload(Recipe.feature_anchor),
             selectinload(Recipe.rois).selectinload(
                 RegionOfInterest.inspection_items
             )
         )
-        .where(Recipe.id == recipe_id)
+        .where(Recipe.id == recipe_id, Recipe.is_deleted.is_(False))
     )
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
@@ -459,6 +781,7 @@ def recipe_detail(
         "name": recipe.name,
         "version": recipe.version,
         "status": recipe.status,
+        "project_name": recipe.project_name,
         "product_id": recipe.product_id,
         "station_id": recipe.station_id,
         "material_code": recipe.material_code or (product.code if product else ""),
@@ -467,10 +790,12 @@ def recipe_detail(
         "station_code": station.code if station else "",
         "camera_code": recipe.camera_code,
         "capture_index": recipe.capture_index,
+        **_recipe_version_metadata(database, recipe),
         "base_image_path": recipe.base_image_path,
         "base_image_url": _file_url(recipe.base_image_path),
         "reference_width": recipe.reference_width,
         "reference_height": recipe.reference_height,
+        "feature_anchor": _feature_anchor_payload(recipe.feature_anchor),
         "rois": [
             {
                 **_roi_payload(roi),
@@ -490,6 +815,7 @@ def upload_recipe_image(
     recipe = database.get(Recipe, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     path = _save_upload(file, Path(PROJECT_ROOT / "uploads" / "recipes" / str(recipe_id)))
     old_image_path = recipe.base_image_path
     old_rois = list(recipe.rois)
@@ -513,6 +839,8 @@ def upload_recipe_image(
         recipe.reference_height = image.height
     recipe.base_image_path = str(path)
     recipe.status = "DRAFT"
+    if recipe.feature_anchor is not None:
+        database.delete(recipe.feature_anchor)
     try:
         for roi in old_rois:
             database.delete(roi)
@@ -534,7 +862,55 @@ def upload_recipe_image(
         "width": recipe.reference_width,
         "height": recipe.reference_height,
         "cleared_roi_count": len(old_rois),
+        "cleared_feature_anchor": True,
     }
+
+
+@router.put("/recipes/{recipe_id}/feature-anchor")
+def save_recipe_feature_anchor(
+    recipe_id: int,
+    payload: FeatureAnchorCreate,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    recipe = database.get(Recipe, recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
+    if recipe.base_image_path is None:
+        raise HTTPException(status_code=400, detail="请先上传配方基准图片。")
+    anchor = database.scalar(
+        select(RecipeFeatureAnchor).where(RecipeFeatureAnchor.recipe_id == recipe.id)
+    )
+    values = payload.model_dump()
+    if anchor is None:
+        anchor = RecipeFeatureAnchor(recipe_id=recipe.id, **values)
+        database.add(anchor)
+    else:
+        for field, value in values.items():
+            setattr(anchor, field, value)
+    _mark_recipe_changed(recipe)
+    database.commit()
+    database.refresh(anchor)
+    return _feature_anchor_payload(anchor) or {}
+
+
+@router.delete("/recipes/{recipe_id}/feature-anchor")
+def delete_recipe_feature_anchor(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, bool]:
+    recipe = database.get(Recipe, recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
+    anchor = database.scalar(
+        select(RecipeFeatureAnchor).where(RecipeFeatureAnchor.recipe_id == recipe.id)
+    )
+    if anchor is not None:
+        database.delete(anchor)
+        _mark_recipe_changed(recipe)
+        database.commit()
+    return {"deleted": anchor is not None}
 
 
 @router.post("/recipes/{recipe_id}/rois")
@@ -546,6 +922,7 @@ def create_roi(
     recipe = database.get(Recipe, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     values = payload.model_dump()
     values["object_type"] = _validated_reference_object_type(
         database,
@@ -564,6 +941,7 @@ def create_roi(
     database.add(roi)
     database.flush()
     sync_roi_to_world_object(database, recipe, roi)
+    _mark_recipe_changed(recipe)
     database.commit()
     database.refresh(roi)
     return _roi_payload(roi)
@@ -578,6 +956,10 @@ def update_roi(
     roi = database.get(RegionOfInterest, roi_id)
     if roi is None:
         raise HTTPException(status_code=404, detail="ROI not found.")
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     values = payload.model_dump()
     values["object_type"] = _validated_reference_object_type(
         database,
@@ -591,10 +973,8 @@ def update_roi(
         ).update({RegionOfInterest.alignment_anchor: False})
     for field, value in values.items():
         setattr(roi, field, value)
-    recipe = database.get(Recipe, roi.recipe_id)
-    if recipe is None:
-        raise HTTPException(status_code=404, detail="Recipe not found.")
     sync_roi_to_world_object(database, recipe, roi)
+    _mark_recipe_changed(recipe)
     database.commit()
     database.refresh(roi)
     return _roi_payload(roi)
@@ -741,7 +1121,12 @@ def delete_roi(roi_id: int, database: Session = Depends(get_db)) -> dict[str, bo
     roi = database.get(RegionOfInterest, roi_id)
     if roi is None:
         raise HTTPException(status_code=404, detail="ROI not found.")
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     database.delete(roi)
+    _mark_recipe_changed(recipe)
     database.commit()
     return {"deleted": True}
 
@@ -755,12 +1140,15 @@ def create_inspection_item(
     roi = database.get(RegionOfInterest, roi_id)
     if roi is None:
         raise HTTPException(status_code=404, detail="ROI not found.")
+    recipe = database.get(Recipe, roi.recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     item = InspectionItem(roi_id=roi_id, **payload.model_dump())
     database.add(item)
     database.flush()
-    recipe = database.get(Recipe, roi.recipe_id)
-    if recipe is not None:
-        sync_roi_to_world_object(database, recipe, roi)
+    sync_roi_to_world_object(database, recipe, roi)
+    _mark_recipe_changed(recipe)
     database.commit()
     database.refresh(item)
     return _item_payload(item)
@@ -775,15 +1163,296 @@ def delete_inspection_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Inspection item not found.")
     roi = database.get(RegionOfInterest, item.roi_id)
+    recipe = database.get(Recipe, roi.recipe_id) if roi is not None else None
+    if recipe is not None:
+        _ensure_recipe_editable(recipe)
     database.delete(item)
     database.flush()
     if roi is not None:
         database.expire(roi, ["inspection_items"])
-        recipe = database.get(Recipe, roi.recipe_id)
         if recipe is not None:
             sync_roi_to_world_object(database, recipe, roi)
+            _mark_recipe_changed(recipe)
     database.commit()
     return {"deleted": True}
+
+
+@router.post("/recipes/{recipe_id}/save")
+def save_recipe_draft(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Persist an editable recipe without making it available to ``/detect``."""
+
+    recipe = database.get(Recipe, recipe_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
+    recipe.status = "SAVED"
+    database.commit()
+    return {"id": recipe.id, "code": recipe.code, "status": recipe.status}
+
+
+@router.post("/recipes/{recipe_id}/copy")
+def copy_recipe(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Clone a recipe into an independent draft before operators edit it."""
+
+    source = _load_recipe_with_content(database, recipe_id)
+
+    clone_code = f"{source.code}_COPY_{uuid.uuid4().hex[:6].upper()}"[:100]
+    clone = Recipe(
+        code=clone_code,
+        recipe_family_code=clone_code,
+        version_no=0,
+        source_recipe_id=source.id,
+        name=f"{source.name}（副本）"[:200],
+        version=source.version,
+        status="DRAFT",
+        project_name=source.project_name,
+        product_id=source.product_id,
+        station_id=source.station_id,
+        line_code=source.line_code,
+        material_code=source.material_code,
+        process_code=source.process_code,
+        camera_code=source.camera_code,
+        capture_index=source.capture_index,
+        reference_width=source.reference_width,
+        reference_height=source.reference_height,
+    )
+    database.add(clone)
+    database.flush()
+
+    copied_image_path: Path | None = None
+    try:
+        if source.base_image_path:
+            source_path = Path(source.base_image_path)
+            if source_path.is_file():
+                copied_image_path = (
+                    Path(PROJECT_ROOT / "uploads" / "recipes" / str(clone.id))
+                    / f"base{source_path.suffix.lower() or '.jpg'}"
+                )
+                copied_image_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, copied_image_path)
+                clone.base_image_path = str(copied_image_path)
+
+        roi_id_map: dict[int, int] = {}
+        for source_roi in source.rois:
+            cloned_roi = RegionOfInterest(
+                recipe_id=clone.id,
+                scene_object_id=None,
+                code=source_roi.code,
+                name=source_roi.name,
+                object_type=source_roi.object_type,
+                shape_type=source_roi.shape_type,
+                x_ratio=source_roi.x_ratio,
+                y_ratio=source_roi.y_ratio,
+                width_ratio=source_roi.width_ratio,
+                height_ratio=source_roi.height_ratio,
+                pixel_coordinates=dict(source_roi.pixel_coordinates or {}),
+                padding=source_roi.padding,
+                sort_order=source_roi.sort_order,
+                alignment_anchor=False,
+                enabled=source_roi.enabled,
+            )
+            database.add(cloned_roi)
+            database.flush()
+            roi_id_map[source_roi.id] = cloned_roi.id
+            for source_item in source_roi.inspection_items:
+                database.add(
+                    InspectionItem(
+                        roi_id=cloned_roi.id,
+                        code=source_item.code,
+                        name=source_item.name,
+                        inspection_type=source_item.inspection_type,
+                        capability=source_item.capability,
+                        reference_group_id=source_item.reference_group_id,
+                        expected_json=dict(source_item.expected_json or {}),
+                        rule_json=dict(source_item.rule_json or {}),
+                        execution_order=source_item.execution_order,
+                        required=source_item.required,
+                        enabled=source_item.enabled,
+                    )
+                )
+
+        bindings = database.scalars(
+            select(RoiScenarioBinding).where(
+                RoiScenarioBinding.roi_id.in_(list(roi_id_map.keys()))
+            )
+        ).all()
+        for binding in bindings:
+            database.add(
+                RoiScenarioBinding(
+                    roi_id=roi_id_map[binding.roi_id],
+                    scenario_version_id=binding.scenario_version_id,
+                    input_mapping_json=dict(binding.input_mapping_json or {}),
+                    enabled=binding.enabled,
+                )
+            )
+
+        if source.feature_anchor is not None:
+            anchor = source.feature_anchor
+            database.add(
+                RecipeFeatureAnchor(
+                    recipe_id=clone.id,
+                    code=anchor.code,
+                    name=anchor.name,
+                    x_ratio=anchor.x_ratio,
+                    y_ratio=anchor.y_ratio,
+                    width_ratio=anchor.width_ratio,
+                    height_ratio=anchor.height_ratio,
+                    padding=anchor.padding,
+                    enabled=anchor.enabled,
+                )
+            )
+        database.commit()
+    except Exception:
+        database.rollback()
+        if copied_image_path is not None:
+            copied_image_path.unlink(missing_ok=True)
+        raise
+    return {
+        "id": clone.id,
+        "code": clone.code,
+        "name": clone.name,
+        "status": clone.status,
+        "source_recipe_id": source.id,
+        **_recipe_version_metadata(database, clone),
+    }
+
+
+@router.post("/recipes/{recipe_id}/draft")
+def create_recipe_draft(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Open one editable draft for a logical recipe without duplicating it."""
+
+    source = _load_recipe_with_content(database, recipe_id)
+    if source.status in {"DRAFT", "SAVED"}:
+        return {
+            "id": source.id,
+            "code": source.code,
+            "name": source.name,
+            "status": source.status,
+            "reused": True,
+            **_recipe_version_metadata(database, source),
+        }
+
+    family_code = _normalize_recipe_family(source)
+    existing_draft = _find_recipe_draft(database, family_code)
+    if existing_draft is not None:
+        return {
+            "id": existing_draft.id,
+            "code": existing_draft.code,
+            "name": existing_draft.name,
+            "status": existing_draft.status,
+            "reused": True,
+            **_recipe_version_metadata(database, existing_draft),
+        }
+    try:
+        draft = _clone_recipe_content(
+            database,
+            source,
+            code=source.code,
+            name=source.name,
+            recipe_family_code=family_code,
+        )
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+    return {
+        "id": draft.id,
+        "code": draft.code,
+        "name": draft.name,
+        "status": draft.status,
+        "reused": False,
+        **_recipe_version_metadata(database, draft),
+    }
+
+
+@router.get("/recipes/{recipe_id}/versions")
+def list_recipe_versions(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    recipe = _load_recipe_with_content(database, recipe_id)
+    family_code = _recipe_family_code(recipe)
+    family_filter = (
+        Recipe.recipe_family_code == family_code
+        if recipe.recipe_family_code
+        else Recipe.code == family_code
+    )
+    rows = database.scalars(
+        select(Recipe)
+        .where(
+            family_filter,
+            Recipe.is_deleted.is_(False),
+        )
+        .order_by(Recipe.version_no.desc(), Recipe.id.desc())
+    ).all()
+    return {
+        "recipe_family_code": family_code,
+        "versions": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "code": item.code,
+                "status": item.status,
+                "version": item.version,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+                "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+                **_recipe_version_metadata(database, item),
+            }
+            for item in rows
+        ],
+    }
+
+
+@router.post("/recipes/{recipe_id}/rollback")
+def rollback_recipe_version(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Restore history by making a new editable draft, never by overwriting it."""
+
+    source = _load_recipe_with_content(database, recipe_id)
+    family_code = _normalize_recipe_family(source)
+    existing_draft = _find_recipe_draft(database, family_code)
+    if existing_draft is not None:
+        if existing_draft.source_recipe_id == source.id:
+            return {
+                "id": existing_draft.id,
+                "status": existing_draft.status,
+                "reused": True,
+                **_recipe_version_metadata(database, existing_draft),
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="该配方已有未发布草稿；请先继续编辑、发布或删除当前草稿后再回滚。",
+        )
+    try:
+        draft = _clone_recipe_content(
+            database,
+            source,
+            code=source.code,
+            name=source.name,
+            recipe_family_code=family_code,
+        )
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+    return {
+        "id": draft.id,
+        "status": draft.status,
+        "reused": False,
+        "rollback_from_recipe_id": source.id,
+        **_recipe_version_metadata(database, draft),
+    }
 
 
 @router.post("/recipes/{recipe_id}/publish")
@@ -794,32 +1463,68 @@ def publish_recipe(
     recipe = database.get(Recipe, recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
+    _ensure_recipe_editable(recipe)
     if not recipe.base_image_path:
         raise HTTPException(status_code=400, detail="Base image is required.")
     if not recipe.rois:
         raise HTTPException(status_code=400, detail="At least one ROI is required.")
-    if not any(roi.inspection_items for roi in recipe.rois):
+    bindings = database.scalars(
+        select(RoiScenarioBinding).join(InspectionScenarioVersion).where(
+            RoiScenarioBinding.roi_id.in_([roi.id for roi in recipe.rois]),
+            RoiScenarioBinding.enabled.is_(True),
+            InspectionScenarioVersion.status == "PUBLISHED",
+        )
+    ).all()
+    bound_roi_ids = {binding.roi_id for binding in bindings}
+    unconfigured = [
+        roi.code
+        for roi in recipe.rois
+        if roi.enabled and not roi.inspection_items and roi.id not in bound_roi_ids
+    ]
+    if unconfigured:
         raise HTTPException(
             status_code=400,
-            detail="At least one inspection rule is required.",
+            detail=f"以下 ROI 尚未关联已发布场景或旧规则：{'、'.join(unconfigured)}。",
         )
+    if not any(roi.inspection_items or roi.id in bound_roi_ids for roi in recipe.rois):
+        raise HTTPException(
+            status_code=400,
+            detail="至少需要一个已发布场景关联或检测规则。",
+        )
+    family_code = _normalize_recipe_family(recipe)
     other_recipes = database.scalars(
         select(Recipe).where(
-            Recipe.line_code == recipe.line_code,
-            Recipe.material_code == recipe.material_code,
-            Recipe.process_code == recipe.process_code,
-            Recipe.camera_code == recipe.camera_code,
-            Recipe.capture_index == recipe.capture_index,
+            Recipe.recipe_family_code == family_code,
             Recipe.status == "PUBLISHED",
+            Recipe.is_deleted.is_(False),
             Recipe.id != recipe.id,
         )
     ).all()
     for other in other_recipes:
         other.status = "ARCHIVED"
+    all_family_versions = database.scalars(
+        select(Recipe).where(
+            Recipe.recipe_family_code == family_code,
+            Recipe.is_deleted.is_(False),
+        )
+    ).all()
+    next_version_no = max(
+        (
+            item.version_no or (1 if item.status == "PUBLISHED" else 0)
+            for item in all_family_versions
+        ),
+        default=0,
+    ) + 1
+    recipe.version_no = next_version_no
+    recipe.version = f"V{next_version_no}"
     sync_recipe_world_model(database, recipe)
     recipe.status = "PUBLISHED"
     database.commit()
-    return {"id": recipe.id, "status": recipe.status}
+    return {
+        "id": recipe.id,
+        "status": recipe.status,
+        **_recipe_version_metadata(database, recipe),
+    }
 
 
 @router.get("/recipes/{recipe_id}/export")

@@ -10,11 +10,13 @@ __pycache__/
 data/*.db
 data/*.sqlite3
 data/model_services/
+data/training_runs/
 data/backups/
 logs/*.log
 logs/*.json
 logs/*.pid
 logs/model_services/
+logs/platform/
 uploads/*
 !uploads/.gitkeep
 detection_results/*
@@ -24,6 +26,11 @@ embeddings/*
 vision-models/**
 !vision-models/README.md
 vision-models/**/.cache/
+weights/
+*.pt
+*.onnx
+*.engine
+*.safetensors
 test_images/*
 !test_images/.gitkeep
 third_party/

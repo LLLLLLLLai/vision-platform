@@ -6,7 +6,7 @@ from app.core.config import PROJECT_ROOT, settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.world import ModelRegistry
-from app.models.recipe import RegionOfInterest
+from app.models.recipe import RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceObjectType
 
 
@@ -30,9 +30,13 @@ def _upgrade_sqlite_schema() -> None:
         return
     columns = {column["name"] for column in inspector.get_columns("recipes")}
     additions = {
+        "project_name": "VARCHAR(200)",
         "line_code": "VARCHAR(100)",
         "material_code": "VARCHAR(100)",
         "process_code": "VARCHAR(100)",
+        "recipe_family_code": "VARCHAR(100) NOT NULL DEFAULT ''",
+        "version_no": "INTEGER NOT NULL DEFAULT 0",
+        "source_recipe_id": "INTEGER",
     }
     with engine.begin() as connection:
         for column_name, column_type in additions.items():
@@ -61,6 +65,63 @@ def _upgrade_sqlite_schema() -> None:
                 """
             )
         )
+        connection.execute(
+            text(
+                """
+                UPDATE recipes
+                SET recipe_family_code = CASE
+                    WHEN recipe_family_code IS NULL OR recipe_family_code = '' THEN code
+                    ELSE recipe_family_code
+                END
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE recipes
+                SET version_no = CASE
+                    WHEN version_no IS NULL OR version_no = 0
+                    THEN CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END
+                    ELSE version_no
+                END
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_recipes_recipe_family_code "
+                "ON recipes (recipe_family_code)"
+            )
+        )
+
+    inspector = inspect(engine)
+    if "datasets" in inspector.get_table_names():
+        dataset_columns = {
+            column["name"] for column in inspector.get_columns("datasets")
+        }
+        dataset_additions = {
+            "label_schema_json": "JSON NOT NULL DEFAULT '[]'",
+            "collection_scenario_version_id": "INTEGER",
+            "auto_collect_enabled": "BOOLEAN NOT NULL DEFAULT 0",
+            "auto_collect_limit": "INTEGER NOT NULL DEFAULT 1000",
+        }
+        with engine.begin() as connection:
+            for column_name, column_type in dataset_additions.items():
+                if column_name not in dataset_columns:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE datasets "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
+                    )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_datasets_collection_scenario_version_id "
+                    "ON datasets (collection_scenario_version_id)"
+                )
+            )
 
     inspector = inspect(engine)
     if "reference_groups" in inspector.get_table_names():
@@ -147,6 +208,7 @@ def init_database() -> None:
         "uploads",
         "embeddings",
         "detection_results",
+        "data/inspection_cache",
         "logs",
     ):
         Path(PROJECT_ROOT / directory).mkdir(parents=True, exist_ok=True)
@@ -157,6 +219,7 @@ def init_database() -> None:
 
     _upgrade_sqlite_schema()
     Base.metadata.create_all(bind=engine)
+    _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()
     _seed_model_registry()
 
@@ -199,6 +262,40 @@ def _seed_reference_object_types() -> None:
                 )
             )
         database.commit()
+
+
+def _migrate_legacy_alignment_anchors() -> None:
+    """Keep existing recipes usable after moving anchors out of inspection ROIs."""
+
+    with SessionLocal() as database:
+        legacy_anchors = database.scalars(
+            select(RegionOfInterest).where(RegionOfInterest.alignment_anchor.is_(True))
+        ).all()
+        changed = False
+        for roi in legacy_anchors:
+            existing = database.scalar(
+                select(RecipeFeatureAnchor).where(
+                    RecipeFeatureAnchor.recipe_id == roi.recipe_id
+                )
+            )
+            if existing is None:
+                database.add(
+                    RecipeFeatureAnchor(
+                        recipe_id=roi.recipe_id,
+                        code="FEATURE_ANCHOR",
+                        name="由旧 ROI 迁移的图像定位特征点",
+                        x_ratio=roi.x_ratio,
+                        y_ratio=roi.y_ratio,
+                        width_ratio=roi.width_ratio,
+                        height_ratio=roi.height_ratio,
+                        padding=roi.padding,
+                        enabled=roi.enabled,
+                    )
+                )
+            roi.alignment_anchor = False
+            changed = True
+        if changed:
+            database.commit()
 
 
 def _seed_model_registry() -> None:

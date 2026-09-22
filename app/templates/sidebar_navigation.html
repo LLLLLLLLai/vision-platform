@@ -1,0 +1,59 @@
+<div class="sidebar-menu-group sidebar-folder-group">
+  <span class="sidebar-folder-label"><span>▾</span>工艺配方</span>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'workspace_library' %}active{% endif %}" href="/recipes/library">
+    <span class="sidebar-menu-icon">⌕</span>
+    <span class="sidebar-menu-copy"><strong>工艺配方库</strong><small>创建、检索、测试和修改配方</small></span>
+  </a>
+</div>
+
+<div class="sidebar-menu-group sidebar-folder-group">
+  <span class="sidebar-folder-label"><span>▾</span>质量运营</span>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'workspace_records' %}active{% endif %}" href="/operations/records">
+    <span class="sidebar-menu-icon">≡</span>
+    <span class="sidebar-menu-copy"><strong>检测记录</strong><small>接口调用和检测结果</small></span>
+  </a>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'workspace_reports' %}active{% endif %}" href="/operations/reports">
+    <span class="sidebar-menu-icon">▥</span>
+    <span class="sidebar-menu-copy"><strong>统计报表</strong><small>生产质量趋势与指标</small></span>
+  </a>
+</div>
+
+<div class="sidebar-menu-group sidebar-folder-group">
+  <span class="sidebar-folder-label"><span>▾</span>场景管理</span>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'scene_maintenance' %}active{% endif %}" href="/scenes/maintenance">
+    <span class="sidebar-menu-icon">◇</span>
+    <span class="sidebar-menu-copy"><strong>场景维护</strong><small>创建、编辑和发布检测场景</small></span>
+  </a>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'scene_optimization' %}active{% endif %}" href="/scenes/optimization">
+    <span class="sidebar-menu-icon">↗</span>
+    <span class="sidebar-menu-copy"><strong>场景优化</strong><small>提示词优化与候选方案</small></span>
+  </a>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'scene_evaluation' %}active{% endif %}" href="/scenes/evaluation">
+    <span class="sidebar-menu-icon">▤</span>
+    <span class="sidebar-menu-copy"><strong>场景评测</strong><small>基于测试集评估准确率</small></span>
+  </a>
+</div>
+
+<div class="sidebar-menu-group sidebar-folder-group">
+  <span class="sidebar-folder-label"><span>▾</span>数据集管理</span>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'dataset_maintenance' %}active{% endif %}" href="/datasets/maintenance">
+    <span class="sidebar-menu-icon">▤</span>
+    <span class="sidebar-menu-copy"><strong>数据集维护</strong><small>训练、测试素材和标注</small></span>
+  </a>
+</div>
+
+<div class="sidebar-menu-group sidebar-folder-group">
+  <span class="sidebar-folder-label"><span>▾</span>模型管理</span>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'model_vlm' %}active{% endif %}" href="/models/vlm">
+    <span class="sidebar-menu-icon">◈</span>
+    <span class="sidebar-menu-copy"><strong>VLM 模型配置</strong><small>OpenAI 兼容接口与连接测试</small></span>
+  </a>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'model_registry' %}active{% endif %}" href="/models/registry">
+    <span class="sidebar-menu-icon">◉</span>
+    <span class="sidebar-menu-copy"><strong>训练模型维护</strong><small>YOLO、ResNet 模型定义</small></span>
+  </a>
+  <a class="sidebar-menu-link sidebar-menu-child {% if active_section == 'model_training' %}active{% endif %}" href="/models/training">
+    <span class="sidebar-menu-icon">↻</span>
+    <span class="sidebar-menu-copy"><strong>模型训练</strong><small>数据集切分、GPU 调度和任务</small></span>
+  </a>
+</div>

@@ -7,7 +7,7 @@ from app.core.config import settings
 
 
 connect_args = (
-    {"check_same_thread": False}
+    {"check_same_thread": False, "timeout": 30}
     if settings.database_url.startswith("sqlite")
     else {}
 )
@@ -32,4 +32,3 @@ def get_db() -> Generator[Session, None, None]:
         yield database
     finally:
         database.close()
-
