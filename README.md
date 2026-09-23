@@ -5,7 +5,8 @@
 - Word 交接文档：`docs/Vision-Platform-System-Handover.docx`
 - 启动与接口 SOP：`docs/Vision-Platform-Operation-SOP.docx`
 - 场景、数据集与模型模块：`docs/Scene-Dataset-Model-Architecture.md`
-- 当前版本交接文档：`docs/Vision-Platform-Handover-V2.0.md`
+- 当前版本交接文档：`docs/Vision-Platform-Handover-V3.0.md`
+- 历史 V2 交接文档：`docs/Vision-Platform-Handover-V2.0.md`
 - MySQL 8 字段说明：`docs/MySQL-Table-Structure.md`
 - MySQL 8 建表基线：`docs/mysql/vision_platform_mysql8.sql`
 

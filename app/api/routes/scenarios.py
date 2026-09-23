@@ -2,17 +2,18 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+from secrets import compare_digest
 import shutil
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.db.session import get_db
 from app.models.intelligence import (
     AutomationJob,
@@ -35,6 +36,7 @@ from app.services.vision_model_runtime import resolve_weights_path, task_output_
 router = APIRouter()
 
 SCENE_MODES = {"VLM_DIRECT", "WORKFLOW"}
+SCENE_API_FAILURE_CODE = 5001
 NODE_TYPES = {
     "START",
     "VLM",
@@ -195,7 +197,7 @@ class RoiBindingRequest(BaseModel):
     input_mapping_json: dict[str, Any] = Field(default_factory=dict)
 
 
-def _scene_input_fields(version: InspectionScenarioVersion) -> list[dict[str, str]]:
+def _scene_input_fields(version: InspectionScenarioVersion) -> list[dict[str, Any]]:
     """Return operator-configurable inputs exposed by a published scene.
 
     Image data is injected by the recipe runtime, so it is intentionally not
@@ -216,7 +218,7 @@ def _scene_input_fields(version: InspectionScenarioVersion) -> list[dict[str, st
     else:
         raw_fields = schema
 
-    fields: list[dict[str, str]] = []
+    fields: list[dict[str, Any]] = []
     if isinstance(raw_fields, dict):
         raw_fields = [
             {"name": key, **(value if isinstance(value, dict) else {"label": value})}
@@ -234,13 +236,14 @@ def _scene_input_fields(version: InspectionScenarioVersion) -> list[dict[str, st
         if not name or name.lower() in IMAGE_INPUT_NAMES or name in seen:
             continue
         seen.add(name)
-        fields.append(
-            {
-                "name": name,
-                "label": str(item.get("label") or item.get("title") or name),
-                "type": str(item.get("type") or "TEXT").upper(),
-            }
-        )
+        field = {
+            "name": name,
+            "label": str(item.get("label") or item.get("title") or name),
+            "type": str(item.get("type") or "TEXT").upper(),
+        }
+        if bool(item.get("required", False)):
+            field["required"] = True
+        fields.append(field)
     return fields
 
 
@@ -248,6 +251,20 @@ class ScenarioExecuteRequest(BaseModel):
     image_path: str = Field(min_length=1, max_length=1000)
     context: dict[str, Any] = Field(default_factory=dict)
     enqueue_review: bool = False
+
+
+class PublishedScenarioInvokeRequest(BaseModel):
+    """Stable external API payload for the currently published scene version."""
+
+    request_id: str | None = Field(default=None, max_length=100)
+    image_path: str = Field(min_length=1, max_length=1000)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    enqueue_review: bool = False
+
+    @field_validator("request_id", "image_path", mode="before")
+    @classmethod
+    def normalize_request_text(cls, value: Any) -> Any:
+        return _blank_to_none(value)
 
 
 class ManualReviewRequest(BaseModel):
@@ -753,6 +770,136 @@ def _execution_payload(execution: ScenarioExecution) -> dict[str, Any]:
     }
 
 
+def _scene_api_endpoint_path(scene_code: str) -> str:
+    return f"/api/v1/scenarios/invoke/{scene_code}"
+
+
+def _published_scene_for_invoke(
+    database: Session,
+    scene_code: str,
+) -> tuple[InspectionScenario, InspectionScenarioVersion]:
+    normalized_code = str(scene_code or "").strip()
+    scene = database.scalar(
+        select(InspectionScenario).where(
+            InspectionScenario.code == normalized_code,
+            InspectionScenario.is_deleted.is_(False),
+        )
+    )
+    if scene is None:
+        raise HTTPException(status_code=404, detail="检测场景不存在。")
+    if not scene.enabled:
+        raise HTTPException(status_code=409, detail="检测场景已停用，不能通过外部接口调用。")
+    if not scene.published_version_id:
+        raise HTTPException(status_code=409, detail="检测场景尚未发布，不能通过外部接口调用。")
+
+    version = database.scalar(
+        select(InspectionScenarioVersion)
+        .options(
+            selectinload(InspectionScenarioVersion.nodes),
+            selectinload(InspectionScenarioVersion.scenario),
+        )
+        .where(InspectionScenarioVersion.id == scene.published_version_id)
+    )
+    if (
+        version is None
+        or version.scenario_id != scene.id
+        or version.status != "PUBLISHED"
+    ):
+        raise HTTPException(status_code=409, detail="检测场景没有可用的已发布版本。")
+    return scene, version
+
+
+def _validate_scene_api_key(api_key: str | None) -> None:
+    configured_key = settings.scene_api_key.strip()
+    if not configured_key:
+        return
+    if not api_key:
+        raise HTTPException(status_code=401, detail="缺少 X-Scene-API-Key 请求头。")
+    if not compare_digest(configured_key, api_key):
+        raise HTTPException(status_code=401, detail="X-Scene-API-Key 无效。")
+
+
+def _validate_published_scene_inputs(
+    version: InspectionScenarioVersion,
+    inputs: dict[str, Any],
+) -> None:
+    input_fields = _scene_input_fields(version)
+    allowed_names = {str(field["name"]) for field in input_fields}
+    unknown_names = sorted(set(inputs) - allowed_names)
+    if unknown_names:
+        raise HTTPException(
+            status_code=422,
+            detail="存在未声明的场景参数：" + "、".join(unknown_names) + "。",
+        )
+
+    missing_labels: list[str] = []
+    for field in input_fields:
+        if not field.get("required"):
+            continue
+        value = inputs.get(field["name"])
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_labels.append(str(field["label"]))
+    if missing_labels:
+        raise HTTPException(
+            status_code=422,
+            detail="缺少必填场景参数：" + "、".join(missing_labels) + "。",
+        )
+
+
+def _published_scene_api_contract(
+    scene: InspectionScenario,
+    version: InspectionScenarioVersion,
+) -> dict[str, Any]:
+    input_fields = _scene_input_fields(version)
+    request_inputs = {
+        field["name"]: f"<{field['label']}>" for field in input_fields
+    }
+    api_key_required = bool(settings.scene_api_key.strip())
+    return {
+        "scene": {
+            "code": scene.code,
+            "name": scene.name,
+            "mode": scene.mode,
+            "version": version.version,
+        },
+        "method": "POST",
+        "endpoint_path": _scene_api_endpoint_path(scene.code),
+        "authentication": {
+            "required": api_key_required,
+            "header_name": "X-Scene-API-Key" if api_key_required else None,
+            "description": (
+                "生产环境请在 .env 配置 SCENE_API_KEY，并通过请求头传入。"
+                if api_key_required
+                else "当前未配置 SCENE_API_KEY，仅适用于本地或受控网络测试。"
+            ),
+        },
+        "input_fields": input_fields,
+        "request_example": {
+            "request_id": "scene-call-001",
+            "image_path": "C:/vision-share/sample.jpg",
+            "inputs": request_inputs,
+            "enqueue_review": False,
+        },
+        "response_example": {
+            "code": 0,
+            "message": "success",
+            "request_id": "scene-call-001",
+            "scene": {
+                "code": scene.code,
+                "name": scene.name,
+                "mode": scene.mode,
+                "version": version.version,
+            },
+            "execution_id": 123,
+            "result": "OK",
+            "score": 0.98,
+            "elapsed_ms": 135.2,
+            "output": {"result": "OK"},
+            "review_queued": False,
+        },
+    }
+
+
 @router.get("")
 def list_scenarios(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
     scenes = database.scalars(
@@ -800,6 +947,80 @@ def list_published_scenarios(database: Session = Depends(get_db)) -> list[dict[s
         }
         for scene, version in rows
     ]
+
+
+@router.get("/invoke/{scene_code}")
+def get_published_scene_api_contract(
+    scene_code: str,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the stable public contract of a scene's active version."""
+
+    scene, version = _published_scene_for_invoke(database, scene_code)
+    return _published_scene_api_contract(scene, version)
+
+
+@router.post("/invoke/{scene_code}")
+async def invoke_published_scene(
+    scene_code: str,
+    payload: PublishedScenarioInvokeRequest,
+    x_scene_api_key: str | None = Header(default=None, alias="X-Scene-API-Key"),
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Execute the active published version for an external caller.
+
+    The route deliberately resolves the scene's ``published_version_id`` instead
+    of accepting a version id. Drafts and archived versions can therefore never
+    be selected by an outside system.
+    """
+
+    _validate_scene_api_key(x_scene_api_key)
+    scene, version = _published_scene_for_invoke(database, scene_code)
+    _validate_published_scene_inputs(version, payload.inputs)
+
+    execution = await scenario_runtime.execute(
+        database,
+        version,
+        image_path=payload.image_path,
+        source="SCENE_API",
+        context=payload.inputs,
+    )
+    review_queued = False
+    if payload.enqueue_review and execution.result in REVIEW_VERDICTS:
+        database.add(
+            AutomationJob(
+                job_type="VLM_REVIEW",
+                scenario_version_id=version.id,
+                config_json={"execution_id": execution.id},
+                input_snapshot_json={"execution_id": execution.id},
+            )
+        )
+        review_queued = True
+    database.commit()
+    database.refresh(execution)
+
+    execution_output = execution.output_json or {}
+    output = execution_output.get("result") if isinstance(execution_output, dict) else None
+    if output is None:
+        output = {}
+    succeeded = execution.status == "COMPLETED" and execution.result != "ERROR"
+    return {
+        "code": 0 if succeeded else SCENE_API_FAILURE_CODE,
+        "message": "success" if succeeded else (execution.error_message or "场景执行失败。"),
+        "request_id": payload.request_id or f"scene-{execution.id}",
+        "scene": {
+            "code": scene.code,
+            "name": scene.name,
+            "mode": scene.mode,
+            "version": version.version,
+        },
+        "execution_id": execution.id,
+        "result": execution.result or "ERROR",
+        "score": execution.score,
+        "elapsed_ms": execution.elapsed_ms,
+        "output": output,
+        "review_queued": review_queued,
+    }
 
 
 @router.post("")
@@ -1106,7 +1327,12 @@ def publish_scenario_version(
     version.published_at = datetime.utcnow()
     scene.published_version_id = version.id
     database.commit()
-    return {"id": version.id, "status": version.status, "published": True}
+    return {
+        "id": version.id,
+        "status": version.status,
+        "published": True,
+        "api_endpoint_path": _scene_api_endpoint_path(scene.code),
+    }
 
 
 @router.put("/rois/{roi_id}/binding")

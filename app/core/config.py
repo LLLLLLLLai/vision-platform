@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     production_roi_parallelism: int = 3
     production_vlm_parallelism: int = 3
     public_detect_success_code: int = 200
+    scene_api_key: str = ""
     trusted_proxy_headers: bool = False
     smb_enabled: bool = False
     smb_server_root: str = r"\\caxaprdfile.catl.com\prd-file"

@@ -192,6 +192,81 @@ class WorkflowCanvasTests(unittest.TestCase):
         database.close()
         engine.dispose()
 
+    def test_referenced_vlm_node_configuration_is_persisted_and_publishable(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        database = Session(engine)
+        vlm = VlmModelConfig(
+            code="REFERENCE_VLM",
+            name="Reference VLM",
+            base_url="http://vlm.test/v1",
+            model_name="reference-vlm",
+        )
+        reference_scene = InspectionScenario(
+            code="PUBLISHED_DIRECT_REFERENCE",
+            name="已发布 VLM 场景",
+            mode="VLM_DIRECT",
+        )
+        database.add_all((vlm, reference_scene))
+        database.flush()
+        reference_version = InspectionScenarioVersion(
+            scenario_id=reference_scene.id,
+            version="1.0",
+            status="PUBLISHED",
+            primary_vlm_model_id=vlm.id,
+            prompt_template="检查 {{ params.expected_text }}",
+        )
+        database.add(reference_version)
+        database.commit()
+
+        workflow = create_scenario(
+            ScenarioCreate(name="引用 VLM 流程", category="HARNESS", mode="WORKFLOW"),
+            database=database,
+        )
+        version_id = workflow["version_id"]
+        node = add_node(
+            version_id,
+            NodeCreate(
+                node_key="vlm_reference",
+                name="引用场景检测",
+                node_type="VLM",
+                config_json={"vlm_mode": "CUSTOM"},
+                auto_connect=False,
+            ),
+            database=database,
+        )
+        saved = update_node(
+            version_id,
+            node["id"],
+            NodeUpdate(
+                config_json={
+                    "vlm_mode": "SCENE",
+                    "referenced_scenario_version_id": reference_version.id,
+                    "input_mapping": {"expected_text": "{{ input.expected_text }}"},
+                    "output_mapping": {"result": "{{ response.result }}"},
+                }
+            ),
+            database=database,
+        )
+        self.assertEqual(saved["config_json"]["vlm_mode"], "SCENE")
+        self.assertEqual(
+            saved["config_json"]["referenced_scenario_version_id"], reference_version.id
+        )
+
+        add_edge(
+            version_id,
+            EdgeCreate(source_node_key="start", target_node_key="vlm_reference"),
+            database=database,
+        )
+        add_edge(
+            version_id,
+            EdgeCreate(source_node_key="vlm_reference", target_node_key="end"),
+            database=database,
+        )
+        self.assertEqual(publish_scenario_version(version_id, database=database)["status"], "PUBLISHED")
+        database.close()
+        engine.dispose()
+
 
 class RecipeSceneBindingAndFeatureAnchorTests(unittest.TestCase):
     def setUp(self) -> None:

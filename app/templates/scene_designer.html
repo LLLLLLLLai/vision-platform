@@ -12,6 +12,7 @@
     <div class="scene-designer-actions">
       <select class="form-select form-select-sm" id="designerVersionSelect" aria-label="场景版本"></select>
       <span class="status-pill draft" id="designerVersionStatus">DRAFT</span>
+      <button class="btn btn-outline-secondary btn-sm" id="designerApi" type="button">接口调用</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerClone" type="button">新建草稿版本</button>
       <button class="btn btn-outline-primary btn-sm" id="designerSave" type="button">保存草稿</button>
       <button class="btn btn-primary btn-sm" id="designerPublish" type="button">发布</button>
@@ -19,6 +20,33 @@
   </header>
 
   <div id="designerAlert" class="scene-designer-alert"></div>
+
+  <div class="modal fade" id="sceneApiModal" tabindex="-1" aria-labelledby="sceneApiModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content scene-api-modal">
+        <div class="modal-header">
+          <div><small>SCENE API</small><h2 class="modal-title fs-5" id="sceneApiModalTitle">已发布场景接口</h2></div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body scene-api-modal-body">
+          <p class="scene-api-description" id="sceneApiDescription"></p>
+          <section class="scene-api-contract-card">
+            <div class="scene-api-contract-heading"><div><small>POST</small><strong>调用地址</strong></div><button class="btn btn-outline-secondary btn-sm" id="copySceneApiEndpoint" type="button">复制地址</button></div>
+            <code class="scene-api-endpoint" id="sceneApiEndpoint"></code>
+          </section>
+          <section class="scene-api-contract-card">
+            <div class="scene-api-contract-heading"><div><small>REQUEST BODY</small><strong>请求参数</strong></div><button class="btn btn-outline-secondary btn-sm" id="copySceneApiRequest" type="button">复制请求示例</button></div>
+            <div class="scene-api-fields" id="sceneApiFields"></div>
+            <pre class="scene-api-code" id="sceneApiRequestExample"></pre>
+          </section>
+          <section class="scene-api-contract-card">
+            <div class="scene-api-contract-heading"><div><small>RESPONSE BODY</small><strong>返回示例</strong></div><button class="btn btn-outline-secondary btn-sm" id="copySceneApiResponse" type="button">复制返回示例</button></div>
+            <pre class="scene-api-code" id="sceneApiResponseExample"></pre>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <section class="direct-designer" id="directDesigner" hidden>
     <aside class="direct-config-panel">
@@ -54,11 +82,11 @@
     </section>
   </section>
 
-  <section class="workflow-designer" id="workflowDesigner" hidden>
+  <section class="workflow-designer workflow-inspector-collapsed" id="workflowDesigner" hidden>
     <aside class="workflow-palette" aria-label="节点库">
       <div class="workflow-palette-header">
         <div><small>NODE LIBRARY</small><h2>节点库</h2><p>拖入画布后连接节点，配置会实时保存在当前草稿。</p></div>
-        <span class="workflow-palette-count" id="workflowPaletteCount">6</span>
+        <div class="workbench-panel-header-actions"><span class="workflow-palette-count" id="workflowPaletteCount">6</span><button class="workbench-panel-close" id="workflowPaletteClose" type="button" title="收起节点库" aria-label="收起节点库">‹</button></div>
       </div>
       <label class="workflow-palette-search" for="workflowNodeSearch"><span aria-hidden="true">⌕</span><input id="workflowNodeSearch" type="search" placeholder="搜索节点" autocomplete="off"></label>
       <div class="workflow-palette-scroll">
@@ -79,11 +107,11 @@
         </div>
         <div class="palette-search-empty" id="workflowPaletteEmpty" hidden><span>⌕</span><p>没有匹配的节点</p></div>
       </div>
-      <div class="palette-note"><strong>变量引用</strong><p>节点可引用 <code>{% raw %}{{ input.* }}{% endraw %}</code> 和 <code>{% raw %}{{ nodes.节点键.* }}{% endraw %}</code>。选中节点后，可从右侧一键复制变量。</p></div>
+      <div class="palette-note"><strong>变量引用</strong><p>节点可引用 <code>{% raw %}{{ input.* }}{% endraw %}</code> 和 <code>{% raw %}{{ nodes.节点键.* }}{% endraw %}</code>。在右侧字段点击 <code>{ }</code>，或输入 <code>{</code>，即可按“开始输入 / 上游节点输出”搜索并选择变量。</p></div>
     </aside>
     <main class="workflow-stage-panel">
       <div class="workflow-stage-toolbar">
-        <div class="workflow-stage-title"><span class="workflow-stage-title-icon" aria-hidden="true">⌘</span><div><strong>编排画布</strong><span id="workflowGraphSummary">正在加载流程…</span></div></div>
+        <div class="workflow-stage-title"><div class="workflow-workbench-toggles"><button class="workflow-panel-toggle" id="workflowPaletteToggle" type="button" title="展开或收起节点库" aria-label="展开或收起节点库"><span aria-hidden="true">☷</span><b>节点</b></button><button class="workflow-panel-toggle" id="workflowInspectorToggle" type="button" title="展开或收起节点配置" aria-label="展开或收起节点配置"><span aria-hidden="true">☰</span><b>配置</b></button></div><span class="workflow-stage-title-icon" aria-hidden="true">⌘</span><div><strong>编排画布</strong><span id="workflowGraphSummary">正在加载流程…</span></div></div>
         <div class="workflow-stage-controls"><div class="workflow-run-controls"><label class="btn btn-primary btn-sm" for="workflowTestImage">选择测试图<input id="workflowTestImage" type="file" accept="image/*" hidden></label><button class="btn btn-outline-primary btn-sm" id="workflowRunTest" type="button" disabled>测试流程</button></div><div class="workflow-view-controls"><button class="btn btn-outline-secondary btn-sm" id="workflowAutoLayout" type="button">自动排版</button><button class="btn btn-outline-secondary btn-sm" id="workflowFitCanvas" type="button">适应视图</button><div class="workflow-zoom-controls" aria-label="画布缩放"><button class="btn btn-outline-secondary btn-sm" id="workflowZoomOut" type="button" title="缩小">−</button><button class="btn btn-outline-secondary btn-sm" id="workflowZoomReset" type="button" title="恢复 100%">100%</button><button class="btn btn-outline-secondary btn-sm" id="workflowZoomIn" type="button" title="放大">＋</button></div></div></div>
       </div>
       <div class="workflow-canvas-viewport" id="workflowCanvasViewport">
@@ -92,21 +120,36 @@
         <div class="workflow-canvas-legend" aria-hidden="true"><span><i class="legend-dot input"></i>输入</span><span><i class="legend-dot output"></i>输出</span><span><i class="legend-line"></i>执行路径</span></div>
       </div>
       <section class="workflow-test-panel" id="workflowTestPanel" hidden>
-        <header class="workflow-test-heading"><div><small>FLOW DEBUG</small><h3>流程测试结果</h3><p id="workflowTestSummary">上传测试图后，查看每个节点的输入、输出与处理耗时。</p></div><button class="btn btn-outline-secondary btn-sm" id="workflowTestClear" type="button">清空结果</button></header>
+        <header class="workflow-test-heading">
+          <div class="workflow-test-heading-copy"><small>FLOW RUN / DEBUG</small><h3>流程调试</h3><p id="workflowTestSummary">选择图片、填写输入参数后运行流程；右侧会逐节点展示输入、输出和耗时。</p></div>
+          <div class="workflow-test-run-meta"><span class="workflow-test-result-badge muted" id="workflowTestResultBadge">未运行</span><span class="workflow-test-elapsed" id="workflowTestElapsed">— ms</span></div>
+          <div class="workflow-test-actions"><button class="btn btn-outline-primary btn-sm" id="workflowTestRunPanel" type="button" disabled>运行流程</button><button class="btn btn-outline-secondary btn-sm" id="workflowTestClear" type="button">清空结果</button></div>
+        </header>
         <div class="workflow-test-content">
-          <aside class="workflow-test-inputs"><div class="workflow-test-preview" id="workflowTestPreview"><div class="empty-state compact-empty"><span>▧</span><strong>选择测试图片</strong><p>图片仅用于当前草稿调试，不会写入生产记录。</p></div></div><label><span>测试参数（JSON，可选）</span><textarea class="form-control" id="workflowTestContext" rows="7" placeholder='例如 {&quot;expected_text&quot;:&quot;FUS&quot;}'>{}</textarea></label></aside>
-          <section class="workflow-trace-section"><div class="workflow-trace-list" id="workflowTestTraceList"><div class="empty-state compact-empty"><span>⌘</span><strong>等待流程测试</strong><p>结果会按执行顺序展示每个节点的输入、输出和耗时。</p></div></div></section>
+          <aside class="workflow-test-inputs">
+            <header class="workflow-test-section-heading"><span class="workflow-test-step">1</span><div><strong>运行输入</strong><small>本次调试不会写入生产记录。</small></div></header>
+            <div class="workflow-test-preview" id="workflowTestPreview"><div class="empty-state compact-empty"><span>▧</span><strong>选择测试图片</strong><p>图片仅用于当前草稿调试。</p></div></div>
+            <label><span>场景输入参数（JSON，可选）</span><textarea class="form-control" id="workflowTestContext" rows="7" placeholder='例如 {&quot;expected_text&quot;:&quot;FUS&quot;}'>{}</textarea></label>
+          </aside>
+          <section class="workflow-trace-section">
+            <header class="workflow-test-section-heading"><span class="workflow-test-step">2</span><div><strong>节点执行追踪</strong><small>按实际执行顺序展示变量解析、模型输出和耗时。</small></div><span class="workflow-trace-count" id="workflowTestTraceCount">0 个节点</span></header>
+            <div class="workflow-trace-list" id="workflowTestTraceList"><div class="empty-state compact-empty"><span>⌘</span><strong>等待流程测试</strong><p>运行后可展开任意节点，查看输入、输出和处理耗时。</p></div></div>
+          </section>
+          <aside class="workflow-test-output">
+            <header class="workflow-test-section-heading"><span class="workflow-test-step">3</span><div><strong>最终输出</strong><small>对应结束节点的对外返回结果。</small></div></header>
+            <div class="workflow-test-final-output" id="workflowTestFinalOutput"><div class="empty-state compact-empty"><span>✓</span><strong>等待最终结果</strong><p>运行流程后，这里会展示最终状态和完整返回内容。</p></div></div>
+          </aside>
         </div>
       </section>
     </main>
     <aside class="workflow-inspector" id="workflowInspector">
-      <div class="designer-panel-heading workflow-inspector-heading"><div><small>NODE INSPECTOR</small><h2>节点配置</h2><p id="workflowInspectorHint">点击画布上的节点进行配置。</p></div><span class="workflow-inspector-status" id="workflowInspectorStatus">未选择</span></div>
+      <div class="designer-panel-heading workflow-inspector-heading"><div><small>NODE INSPECTOR</small><h2>节点配置</h2><p id="workflowInspectorHint">点击画布上的节点进行配置。</p></div><div class="workbench-panel-header-actions"><span class="workflow-inspector-status" id="workflowInspectorStatus">未选择</span><button class="workbench-panel-close" id="workflowInspectorClose" type="button" title="收起节点配置" aria-label="收起节点配置">›</button></div></div>
       <div id="workflowInspectorContent" class="workflow-inspector-content"><div class="empty-state compact-empty"><span>◇</span><strong>未选择节点</strong><p>选择节点后配置模型、提示词、输入映射和输出。</p></div></div>
     </aside>
   </section>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260920-11" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20260921-02" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260922-07" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260922-07"></script>
+<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260923-02" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260923-02"></script>
 {% endblock %}

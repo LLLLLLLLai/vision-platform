@@ -17,11 +17,25 @@ class SceneDesignerAssetTests(unittest.TestCase):
             "workflowFitCanvas",
             "workflowTestImage",
             "workflowRunTest",
+            "workflowTestRunPanel",
             "workflowTestPanel",
+            "workflowTestResultBadge",
+            "workflowTestElapsed",
             "workflowTestTraceList",
+            "workflowTestTraceCount",
+            "workflowTestFinalOutput",
             "workflowTestClear",
             "workflowGraphSummary",
             "workflowInspectorStatus",
+            "workflowPaletteToggle",
+            "workflowPaletteClose",
+            "workflowInspectorToggle",
+            "workflowInspectorClose",
+            "designerApi",
+            "sceneApiModal",
+            "sceneApiEndpoint",
+            "sceneApiRequestExample",
+            "sceneApiResponseExample",
         ):
             self.assertIn(f'id="{element_id}"', template)
         self.assertIn("scene_designer_dify.css", template)
@@ -41,13 +55,46 @@ class SceneDesignerAssetTests(unittest.TestCase):
         self.assertIn("function fitDirectDesignerToViewport()", script)
         self.assertIn('byId("directClearResult").addEventListener', script)
         self.assertIn("function inputMappingMarkup(", script)
+        self.assertIn("function promptParameterMappingMarkup(", script)
+        self.assertIn("function promptMappedParameterKeys(", script)
         self.assertIn("function outputMappingMarkup(", script)
         self.assertIn("function upstreamNodeKeys(", script)
+        self.assertIn("function readVlmInspectorConfig(", script)
+        self.assertIn("function insertVariableToken(", script)
+        self.assertIn("function promptTemplateEditorMarkup(", script)
+        self.assertIn("function insertPromptVariableChip(", script)
+        self.assertIn("function syncPromptTemplateEditor(", script)
+        self.assertIn("data-prompt-template-editor", script)
+        self.assertIn("data-prompt-variable-remove", script)
+        self.assertIn("prompt-variable-chip", script)
+        self.assertIn("function openVariablePicker(", script)
+        self.assertIn("function variableGroups(", script)
+        self.assertIn("function applyVariablePickerToken(", script)
+        self.assertIn("function updateWorkflowWorkbenchPanels(", script)
+        self.assertIn("function showSceneApiContract()", script)
+        self.assertIn("function copySceneApiValue(kind)", script)
+        self.assertIn('byId("designerApi").addEventListener', script)
+        self.assertIn("function setInspectorTab(", script)
+        self.assertIn("function setupInspectorTabs(", script)
+        self.assertIn("node-config-tabs", script)
+        self.assertIn("data-inspector-tab", script)
+        self.assertIn("data-variable-target", script)
+        self.assertIn("data-variable-picker", script)
+        self.assertIn("workflowVariablePicker", script)
+        self.assertIn("保存当前节点", script)
         self.assertIn('id: "nodeEndOutputParameters"', script)
         self.assertIn("IMAGE_CROP", script)
         self.assertIn("function runWorkflowTest()", script)
+        self.assertIn("function startWorkflowTestRun()", script)
         self.assertIn("function renderWorkflowTestResult(", script)
         self.assertIn('byId("workflowRunTest").addEventListener', script)
+        self.assertIn('byId("workflowTestRunPanel").addEventListener', script)
+        self.assertIn("提示词参数映射", script)
+        self.assertIn("{{ params.", script)
+        self.assertIn("function nextDraftVersionName(", script)
+        self.assertNotIn('prompt("新草稿版本号"', script)
+        self.assertIn('const systemNode = ["START", "END"].includes(node.node_type);', script)
+        self.assertNotIn('element.classList.contains("locked")', script)
 
 
 if __name__ == "__main__":
