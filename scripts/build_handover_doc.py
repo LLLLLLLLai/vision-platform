@@ -470,7 +470,7 @@ def build() -> Path:
     properties.title = "Vision Platform 工业视觉智能平台系统交接手册"
     properties.subject = "系统功能、实现、架构、接口、部署和运维交接"
     properties.author = "Vision Platform Project"
-    properties.keywords = "工业视觉, FastAPI, DINOv2, Qwen3-VL, Grounding DINO, SAM2, PaddleOCR"
+    properties.keywords = "工业视觉, FastAPI, MySQL, OpenAI 兼容 VLM, YOLO, OpenCV"
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     document.save(OUTPUT)

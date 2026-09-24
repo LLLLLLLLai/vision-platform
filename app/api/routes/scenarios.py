@@ -254,7 +254,13 @@ class ScenarioExecuteRequest(BaseModel):
 
 
 class PublishedScenarioInvokeRequest(BaseModel):
-    """Stable external API payload for the currently published scene version."""
+    """Stable external API payload for the currently published scene version.
+
+    ``image_path`` is a reserved, top-level input injected into the Start node.
+    Business inputs belong in ``inputs``. The current runtime executes one image
+    per request; callers with multiple images should invoke the scene once for
+    each image, or use the recipe-level ``/api/detect`` integration endpoint.
+    """
 
     request_id: str | None = Field(default=None, max_length=100)
     image_path: str = Field(min_length=1, max_length=1000)
@@ -874,6 +880,15 @@ def _published_scene_api_contract(
             ),
         },
         "input_fields": input_fields,
+        "image_input": {
+            "field_name": "image_path",
+            "required": True,
+            "description": "系统保留的检测图片字段，自动注入开始节点；不要填写到 inputs 中。",
+        },
+        "batch_images": {
+            "supported": False,
+            "description": "当前场景接口一次处理一张图片。多相机或多张图片请逐张调用，或交由 /api/detect 按配方并发分发。",
+        },
         "request_example": {
             "request_id": "scene-call-001",
             "image_path": "C:/vision-share/sample.jpg",

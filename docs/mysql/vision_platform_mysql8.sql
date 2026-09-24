@@ -97,7 +97,7 @@ CREATE TABLE products (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE UNIQUE INDEX ix_products_code ON products (code);
 
--- reference_groups: DINOv2 相似度参考组与合并向量矩阵信息。
+-- reference_groups: 历史 DINOv2 相似度参考组与向量矩阵信息；当前仅保留追溯。
 CREATE TABLE reference_groups (
 	id INTEGER NOT NULL AUTO_INCREMENT,
 	code VARCHAR(100) NOT NULL,
@@ -276,7 +276,7 @@ CREATE INDEX ix_recipes_recipe_family_code ON recipes (recipe_family_code);
 CREATE INDEX ix_recipes_source_recipe_id ON recipes (source_recipe_id);
 CREATE INDEX ix_recipes_status ON recipes (status);
 
--- reference_images: 参考组中的标准图及其向量索引。
+-- reference_images: 历史参考组中的标准图及其向量索引；当前仅保留追溯。
 CREATE TABLE reference_images (
 	id INTEGER NOT NULL AUTO_INCREMENT,
 	group_id INTEGER NOT NULL,
@@ -679,7 +679,7 @@ CREATE UNIQUE INDEX ix_scenario_execution_reviews_execution_id ON scenario_execu
 CREATE INDEX ix_scenario_execution_reviews_status ON scenario_execution_reviews (status);
 CREATE INDEX ix_scenario_execution_reviews_verdict ON scenario_execution_reviews (verdict);
 
--- reference_candidates: 历史候选基准记录；当前自动采集关闭时不再新增。
+-- reference_candidates: 历史候选基准记录；当前功能已下线，不再新增。
 CREATE TABLE reference_candidates (
 	id INTEGER NOT NULL AUTO_INCREMENT,
 	group_id INTEGER NOT NULL,

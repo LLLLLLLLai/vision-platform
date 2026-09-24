@@ -151,6 +151,9 @@ class PublishedSceneApiTests(unittest.IsolatedAsyncioTestCase):
                     contract_payload["endpoint_path"],
                     "/api/v1/scenarios/invoke/API_DIRECT",
                 )
+                self.assertEqual(contract_payload["image_input"]["field_name"], "image_path")
+                self.assertTrue(contract_payload["image_input"]["required"])
+                self.assertFalse(contract_payload["batch_images"]["supported"])
                 self.assertEqual(contract_payload["input_fields"][0]["name"], "expected_text")
 
                 direct_response = await client.post(

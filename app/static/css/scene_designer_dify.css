@@ -1422,6 +1422,26 @@
   min-width: 0;
 }
 
+.workflow-trace-detail section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.workflow-trace-detail section > header small {
+  color: #8492a4;
+  font-size: .64rem;
+  font-weight: 800;
+  letter-spacing: .06em;
+}
+
+.workflow-trace-detail section > header span {
+  color: #7c8ea4;
+  font-size: .66rem;
+}
+
 .workflow-trace-detail section > small {
   display: block;
   margin-bottom: 4px;
@@ -1432,8 +1452,8 @@
 }
 
 .workflow-trace-detail pre {
-  max-height: 220px;
-  min-height: 82px;
+  max-height: min(42vh, 420px);
+  min-height: 130px;
   margin: 0;
   overflow: auto;
   padding: 9px;

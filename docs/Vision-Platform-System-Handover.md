@@ -1,5 +1,7 @@
 # Vision Platform 工业视觉智能平台系统交接手册
 
+> **历史文档提示（2026-09-24）**：本文件描述的是早期平台。文中的本地 DINOv2、PaddleOCR、Qwen3-VL、Grounding DINO 与 SAM2 服务均已下线，不能作为当前部署或运维说明。请以 `README.md`、`docs/Vision-Platform-Handover-V3.0.md` 和 `docs/Scene-Dataset-Model-Architecture.md` 为准。
+
 > 文档版本：V1.1
 > 对应代码分支：`develop`
 > 编制日期：2026-08-16；最近更新：2026-08-21

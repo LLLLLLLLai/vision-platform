@@ -1,6 +1,6 @@
 # Vision Platform V3.0 交接手册
 
-> 更新日期：2026-09-23
+> 更新日期：2026-09-24
 > 代码分支：`develop`
 > 适用范围：汽车电子装配的错装、漏装、混装检测，以及基于 VLM / YOLO 的场景设计、评测与训练。
 > 本文不包含模型权重、产线图片、SMB 密码或 VLM API Key；这些内容只保存在服务器的 `.env`、NAS 或模型制品库中。
@@ -42,10 +42,10 @@ ROI / 特征点对齐（在哪检查）
 | --- | --- |
 | 后端 | Python 3.11、FastAPI、SQLAlchemy 2.0、Pydantic 2 |
 | 管理端 | Jinja2 + 本地 Bootstrap 5.3 + 原生 JavaScript/CSS，可离线使用 |
-| 本地数据库 | SQLite（默认） |
-| 生产数据库 | MySQL 8 / PostgreSQL 均可接入；当前提供 MySQL 8 建表基线 |
+| 本地数据库 | SQLite（迁移前兼容模式） |
+| 生产数据库 | MySQL 8（当前生产目标，提供受控 SQLite 迁移脚本） |
 | 异步任务 | 平台内持久化 `automation_jobs` + 单 Worker；生产建议拆为独立 Worker |
-| 模型接入 | OpenAI 兼容 VLM、YOLO、PaddleOCR、DINOv2、Grounding DINO、SAM2 |
+| 模型接入 | OpenAI 兼容 VLM、已发布 YOLO、OpenCV 对齐规则 |
 
 ```text
 app/
@@ -63,7 +63,7 @@ vision-models/         基础权重、已发布权重（不提交 Git）
 uploads/               配方图、数据集上传内容（不提交 Git）
 detection_results/     检测中间图、结果图（不提交 Git）
 data/training_runs/    YOLO 训练产物（不提交 Git）
-embeddings/            参考向量（不提交 Git）
+embeddings/            历史参考向量归档（不再新增，不提交 Git）
 ```
 
 ---
@@ -256,11 +256,12 @@ X-Scene-API-Key: <同一个密钥>
 | 配置 | 用途 |
 | --- | --- |
 | `APP_HOST` / `APP_PORT` | 平台监听地址，默认端口 `9010`。 |
-| `DATABASE_URL` | SQLite 或 MySQL/PostgreSQL 连接串。 |
+| `DATABASE_URL` | 本地 SQLite 或生产 MySQL 8 连接串。 |
+| `DATABASE_POOL_*` | MySQL 连接池大小、溢出连接和回收周期。 |
 | `SMB_ENABLED`、`SMB_SERVER_ROOT`、`SMB_USERNAME`、`SMB_PASSWORD` | 生产图片下载和结果图回写。 |
 | `SCENE_API_KEY` | 新场景外部接口认证。 |
 | `VLM_SECRET_KEY` | 加密数据库中保存的 VLM API Key。 |
-| `GROUNDING_SERVICE_URL` 至 `SAM2_SERVICE_URL` | 各模型服务地址。 |
+| VLM 模型配置 | OpenAI 兼容地址、模型名、密钥和推理参数保存在数据库中；通过页面测试连接。 |
 | `PRODUCTION_IMAGE_PARALLELISM` | 两相机/多图并行上限。 |
 | `PRODUCTION_ROI_PARALLELISM` | 单图 ROI 并行上限。 |
 | `PRODUCTION_VLM_PARALLELISM` | VLM 全局并发上限，应与实例数量一致。 |
@@ -274,11 +275,11 @@ X-Scene-API-Key: <同一个密钥>
 | `uploads/` | 配方图、数据集素材 | 与数据库一并备份。 |
 | `detection_results/` | 原图暂存、ROI 图、结果图 | 按工厂保留策略归档。 |
 | `data/training_runs/` | 训练日志、指标、权重 | 保留可追溯训练证据。 |
-| `embeddings/` | DINOv2 参考向量 | 与相应数据库记录同时备份。 |
+| `embeddings/` | 历史 DINOv2 参考向量 | 仅为历史记录追溯保留；当前不再写入。 |
 | `vision-models/` | 基础/发布模型权重 | 放 NAS、制品库或模型仓库；不进入 Git。 |
 | `.env` | 密钥与服务配置 | 加密保管、单独备份。 |
 
-MySQL 8 建表基线：`docs/mysql/vision_platform_mysql8.sql`；字段说明：`docs/MySQL-Table-Structure.md`。
+MySQL 8 建表基线：`docs/mysql/vision_platform_mysql8.sql`；字段说明：`docs/MySQL-Table-Structure.md`；迁移步骤：`docs/MySQL-Migration.md`。
 
 ---
 
@@ -294,7 +295,7 @@ py -3.11 -m venv .venv
 Copy-Item .env.example .env
 ```
 
-完成 `.env` 中的数据库、SMB、VLM 和模型服务地址配置后启动：
+完成 `.env` 中的数据库、SMB、场景接口密钥配置后启动：
 
 ```powershell
 .\start.ps1
@@ -306,7 +307,7 @@ Copy-Item .env.example .env
 管理页面：http://127.0.0.1:9010/
 接口文档：http://127.0.0.1:9010/docs
 平台健康：http://127.0.0.1:9010/api/v1/health
-模型状态：http://127.0.0.1:9010/api/v1/algorithms/status
+旧服务状态：http://127.0.0.1:9010/api/v1/algorithms/status（显示已下线）
 ```
 
 ### 6.2 RHEL 8.3 / Linux 启动
@@ -325,26 +326,16 @@ chmod +x start.sh
 
 直接运行时，`start.sh` 会先初始化数据库再启动 Uvicorn。正式生产不要使用 `APP_DEBUG=true`；应由 systemd 或容器负责重启、日志轮转、权限和健康检查。
 
-### 6.3 可选模型服务启动
+### 6.3 VLM 与 YOLO 运行方式
 
-平台可在模型服务未全部启动时运行，但对应场景会返回错误或不可用。常用本地脚本：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\run_ocr.py        # 9024，PaddleOCR
-.\.venv\Scripts\python.exe scripts\run_grounding.py  # 9021，Grounding DINO
-.\.venv\Scripts\python.exe scripts\run_dinov2.py     # 9022，DINOv2
-.\.venv\Scripts\python.exe scripts\run_qwen_vl.py    # 9023，本地 Transformers Qwen 服务
-.\.venv\Scripts\python.exe scripts\run_sam2.py       # 9025，SAM2
-```
-
-如果使用 Docker/vLLM 的 Qwen3-VL，应保证其 OpenAI 兼容地址可访问，例如：
+本地 DINOv2、PaddleOCR、Qwen3-VL、SAM2 服务已经下线，不再启动对应脚本。VLM 场景使用在“VLM 模型配置”中登记的 OpenAI 兼容服务；该地址应可访问，例如：
 
 ```text
 http://<vlm-host>:8000/v1/models
 http://<vlm-host>:8000/v1/chat/completions
 ```
 
-随后在“VLM 模型配置”中维护 `base_url`、`model_name` 和认证方式，并执行“测试连接”。平台不要求 VLM 必须部署在本机。
+随后在“VLM 模型配置”中维护 `base_url`、`model_name` 和认证方式，并执行“测试连接”。平台不要求 VLM 必须部署在本机。YOLO 由已发布模型版本和流程场景的“训练模型”节点执行。
 
 ### 6.4 停止和日志
 

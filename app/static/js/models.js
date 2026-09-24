@@ -290,6 +290,11 @@
     form.elements.code.readOnly = Boolean(model);
     byId("vlmModelModalTitle").textContent = model ? "编辑 VLM 模型" : "创建 VLM 模型";
     byId("saveVlmModel").textContent = model ? "保存修改" : "保存 VLM 模型";
+    const apiKeyInput = form.elements.api_key;
+    const apiKeyState = byId("vlmApiKeyState");
+    apiKeyInput.value = "";
+    apiKeyInput.placeholder = "留空可保留已保存的 API Key";
+    apiKeyState.textContent = "未填写时不会保存 API Key。";
     if (model) {
       form.elements.code.value = model.code;
       form.elements.name.value = model.name;
@@ -303,6 +308,13 @@
       form.elements.extra_params_json.value = Object.keys(model.extra_params_json || {}).length
         ? JSON.stringify(model.extra_params_json, null, 2)
         : "";
+      if (model.api_key_configured) {
+        const hint = model.api_key_hint || "已保存";
+        apiKeyInput.placeholder = `已保存：${hint}；留空不会修改`;
+        apiKeyState.textContent = `当前凭据已配置（${hint}）。为安全起见不会回显明文；留空即可保留。`;
+      } else {
+        apiKeyState.textContent = "当前未保存 API Key；也可使用上方环境变量。";
+      }
     }
     modal("vlmModelModal").show();
   }

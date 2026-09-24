@@ -89,6 +89,59 @@
   min-width: 0;
 }
 
+.optimization-input-values {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8e6f6;
+  border-radius: 10px;
+  background: #f7fbff;
+}
+
+.optimization-input-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.optimization-input-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.optimization-input-heading small {
+  color: #6684a7;
+  font-size: .65rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.optimization-input-heading strong { color: #294e7d; font-size: .82rem; }
+.optimization-input-heading > span { max-width: 360px; color: #607891; font-size: .75rem; line-height: 1.5; }
+.optimization-input-heading code { color: #225d9c; font-size: .72rem; }
+.optimization-input-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; }
+.optimization-input-grid label { display: grid; gap: 4px; }
+.optimization-input-grid label > span { color: #58708d; font-size: .74rem; font-weight: 700; }
+.optimization-input-grid label em { color: #b4513c; font-size: .66rem; font-style: normal; }
+
+.optimization-round-table { width: 100%; min-width: 1040px; table-layout: fixed; }
+.optimization-round-table th,
+.optimization-round-table td { vertical-align: top; white-space: normal; }
+.optimization-round-table td:nth-child(1),
+.optimization-round-table td:nth-child(3),
+.optimization-round-table td:nth-child(4),
+.optimization-round-table td:nth-child(5),
+.optimization-round-table td:nth-child(6),
+.optimization-round-table td:nth-child(7) { white-space: nowrap; }
+.optimization-round-table td:nth-child(2) { min-width: 130px; }
+.optimization-round-table td:nth-child(2) small { display: block; margin-top: 5px; color: #77899c; font-size: .68rem; }
+.optimization-round-table th:nth-child(8),
+.optimization-round-table td:nth-child(8) { width: 20%; }
+.optimization-round-table th:nth-child(9),
+.optimization-round-table td:nth-child(9) { width: 24%; }
+.optimization-round-reason { min-width: 0; max-width: none; overflow-wrap: anywhere; word-break: break-word; color: #5b7088; line-height: 1.5; }
+
 .prompt-round-row {
   display: grid;
   gap: 10px;

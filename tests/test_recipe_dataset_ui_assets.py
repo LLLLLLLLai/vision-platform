@@ -37,6 +37,7 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
             "function undoAnnotationChange(",
             "function changeAnnotationZoom(",
             "data-annotation-handle",
+            "dragging empty image space pans the image",
         ):
             self.assertIn(implementation_marker, script)
 

@@ -22,6 +22,7 @@ from app.api.routes.automation import (
     get_training_artifact,
     queue_prompt_optimization,
     queue_scene_evaluation,
+    restart_automation_job,
 )
 from app.core.config import settings
 from app.api.routes.datasets import (
@@ -436,6 +437,10 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(cancel_automation_job(canceled["job_id"], database=self.database)["status"], "CANCELED")
         self.assertEqual(
+            restart_automation_job(canceled["job_id"], database=self.database)["status"],
+            "QUEUED",
+        )
+        self.assertEqual(
             create_scenario_version(
                 scene["id"],
                 VersionCreate(version="2.0", primary_vlm_model_id=self.primary_vlm_id, prompt_template="new prompt"),
@@ -464,6 +469,16 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         recovered_job = self.database.get(AutomationJob, running_job.id)
         self.assertEqual(recovered_job.status, "FAILED")
         self.assertIn("服务重启导致任务中断", recovered_job.error_message)
+
+    async def test_running_scene_job_can_request_cooperative_stop(self) -> None:
+        running_job = AutomationJob(job_type="SCENE_EVALUATION", status="RUNNING")
+        self.database.add(running_job)
+        self.database.commit()
+
+        result = cancel_automation_job(running_job.id, database=self.database)
+
+        self.assertEqual(result["status"], "CANCEL_REQUESTED")
+        self.assertIn("当前模型调用", result["message"])
 
     async def test_dataset_vlm_and_training_model_maintenance(self) -> None:
         vlm = create_vlm_model(

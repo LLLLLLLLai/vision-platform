@@ -44,7 +44,9 @@ class PluginRuntimeTest(unittest.TestCase):
         runtime = get_harness()
         capability_routes = runtime.describe()["capability_routes"]
 
-        self.assertIn("reference.similarity", capability_routes)
-        self.assertIn("text.ocr", capability_routes)
         self.assertIn("image.color", capability_routes)
-        self.assertTrue(any(plugin.code == "dinov2" for plugin in BUILTIN_PLUGINS))
+        self.assertIn("image.alignment", capability_routes)
+        self.assertTrue(any(plugin.code == "opencv_rules" for plugin in BUILTIN_PLUGINS))
+        self.assertFalse(
+            any(plugin.code in {"dinov2", "paddleocr", "qwen3_vl"} for plugin in BUILTIN_PLUGINS)
+        )

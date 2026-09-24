@@ -642,7 +642,15 @@
   function startDetectionInteraction(event) {
     if (state.annotation.type !== "DETECTION") return;
     if (event.pointerType !== "touch" && ![0, 1].includes(event.button)) return;
-    const isPan = event.button === 1 || state.annotation.viewport.spacePressed;
+    const target = event.target;
+    const handle = target.closest?.("[data-annotation-handle]");
+    const boxTarget = target.closest?.("[data-box-index]");
+    // In selection mode, dragging empty image space pans the image.  This
+    // keeps the familiar direct-manipulation behavior while boxes remain
+    // click-selectable and draggable.
+    const isPan = event.button === 1
+      || state.annotation.viewport.spacePressed
+      || (state.annotation.tool === "SELECT" && !boxTarget);
     if (isPan) {
       event.preventDefault();
       state.annotation.interaction = {
@@ -652,20 +660,13 @@
         startClientY: event.clientY,
         originX: state.annotation.viewport.translateX,
         originY: state.annotation.viewport.translateY,
+        moved: false,
       };
       event.currentTarget.setPointerCapture?.(event.pointerId);
       return;
     }
     if (event.button !== 0 && event.pointerType !== "touch") return;
-    const target = event.target;
-    const handle = target.closest?.("[data-annotation-handle]");
-    const boxTarget = target.closest?.("[data-box-index]");
     if (state.annotation.tool === "SELECT") {
-      if (!boxTarget) {
-        state.annotation.selectedBoxIndex = null;
-        renderDetectionCanvas();
-        return;
-      }
       const index = Number((handle || boxTarget).dataset.boxIndex);
       const box = state.annotation.boxes[index];
       if (!box) return;
@@ -699,8 +700,11 @@
   function moveDetectionInteraction(event) {
     const interaction = state.annotation.interaction;
     if (interaction?.kind === "PAN") {
-      state.annotation.viewport.translateX = interaction.originX + (event.clientX - interaction.startClientX);
-      state.annotation.viewport.translateY = interaction.originY + (event.clientY - interaction.startClientY);
+      const deltaX = event.clientX - interaction.startClientX;
+      const deltaY = event.clientY - interaction.startClientY;
+      interaction.moved = interaction.moved || Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
+      state.annotation.viewport.translateX = interaction.originX + deltaX;
+      state.annotation.viewport.translateY = interaction.originY + deltaY;
       applyAnnotationViewport();
       return;
     }
@@ -719,6 +723,10 @@
   }
 
   function finishDetectionInteraction(event) {
+    const interaction = state.annotation.interaction;
+    if (interaction?.kind === "PAN" && !interaction.moved) {
+      state.annotation.selectedBoxIndex = null;
+    }
     if (state.annotation.start) {
       const box = boxFromPoints(state.annotation.start, pointFromEvent(event), byId("annotationCurrentLabel").value.trim());
       state.annotation.start = null;

@@ -13,6 +13,7 @@ import math
 import mimetypes
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import httpx
@@ -138,15 +139,64 @@ def _as_content_text(content: Any) -> str:
     return str(content or "")
 
 
+_THINKING_BLOCK = re.compile(r"<think(?:\s[^>]*)?>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_code_fence(value: str) -> str:
+    """Remove a single Markdown JSON fence without touching prompt content."""
+
+    stripped = value.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    stripped = re.sub(r"^```(?:json|JSON)?\s*", "", stripped, count=1)
+    return re.sub(r"\s*```$", "", stripped, count=1).strip()
+
+
+def _find_json_object(text: str) -> dict[str, Any] | None:
+    """Find the final structured object in normal or thinking-mode responses.
+
+    Some OpenAI-compatible reasoning endpoints prepend ``<think>`` content or
+    prose before the JSON object despite ``response_format=json_object``.  A
+    direct ``json.loads`` would treat that otherwise usable response as an
+    unknown result, which is especially harmful to prompt-optimization jobs.
+    """
+
+    without_thinking = _THINKING_BLOCK.sub("", text).strip()
+    candidates = [_strip_code_fence(without_thinking), _strip_code_fence(text)]
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict):
+            return value
+        # Prefer the final JSON object because reasoning text can itself
+        # contain an example schema before the model emits its answer.
+        matches: list[dict[str, Any]] = []
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                matches.append(value)
+        if matches:
+            return matches[-1]
+    return None
+
+
 def _parse_json_response(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`").removeprefix("json").strip()
-    try:
-        value = json.loads(stripped)
-    except json.JSONDecodeError:
-        return {"result": "UNCERTAIN", "raw_text": text}
-    return value if isinstance(value, dict) else {"result": "UNCERTAIN", "raw": value}
+    value = _find_json_object(text)
+    return value if isinstance(value, dict) else {"result": "UNCERTAIN", "raw_text": text}
+
+
+def _is_unparsed_json_response(value: dict[str, Any]) -> bool:
+    return value.get("result") == "UNCERTAIN" and "raw_text" in value
 
 
 def _image_content(
@@ -346,10 +396,31 @@ class OpenAiCompatibleVlmClient:
             raise VlmRequestError(str(exc)) from exc
         data = response.json()
         try:
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
+            content = message["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise VlmRequestError("OpenAI 兼容接口响应中缺少 choices[0].message.content。") from exc
-        parsed = _parse_json_response(_as_content_text(content))
+        content_text = _as_content_text(content)
+        parsed = _parse_json_response(content_text)
+        # Qwen/GLM reasoning variants do not use a completely uniform field
+        # name.  Only fall back to the reasoning channel when normal content
+        # did not yield JSON, so a valid final answer always takes priority.
+        reasoning_text = _as_content_text(
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("analysis")
+        )
+        if reasoning_text and _is_unparsed_json_response(parsed):
+            reasoning_result = _parse_json_response(reasoning_text)
+            if not _is_unparsed_json_response(reasoning_result):
+                parsed = reasoning_result
+                parsed["_content_source"] = "reasoning_fallback"
+        parsed["_response_content"] = content_text
+        if reasoning_text:
+            # Keep enough diagnostics to debug a thinking-model response while
+            # preventing a very long chain-of-thought field from bloating task
+            # records indefinitely.
+            parsed["_reasoning_excerpt"] = reasoning_text[-12000:]
         parsed["_raw_response"] = data
         return parsed
 

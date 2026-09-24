@@ -95,6 +95,14 @@ class SceneDesignerAssetTests(unittest.TestCase):
         self.assertNotIn('prompt("新草稿版本号"', script)
         self.assertIn('const systemNode = ["START", "END"].includes(node.node_type);', script)
         self.assertNotIn('element.classList.contains("locked")', script)
+        self.assertNotIn("workflow-debug-open", script)
+
+    def test_workflow_debug_layout_keeps_trace_and_inspector_scrollable(self) -> None:
+        stylesheet = (PROJECT_ROOT / "app" / "static" / "css" / "scene_designer_dify.css").read_text(encoding="utf-8")
+
+        self.assertIn("workflow-stage-panel.has-test .workflow-test-panel", stylesheet)
+        self.assertIn("workflow-trace-detail pre", stylesheet)
+        self.assertIn("overflow: auto", stylesheet)
 
 
 if __name__ == "__main__":

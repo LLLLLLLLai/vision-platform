@@ -70,7 +70,7 @@
         <label><span>模型 ID</span><input class="form-control" name="model_name" placeholder="Qwen/Qwen3-VL-4B-Instruct" required></label>
         <div class="form-row">
           <label><span>API Key 环境变量（推荐）</span><input class="form-control" name="api_key_env_name" placeholder="OPENAI_API_KEY"></label>
-          <label><span>API Key（加密保存）</span><input class="form-control" name="api_key" type="password" placeholder="编辑时留空可保留原配置"></label>
+          <label><span>API Key（加密保存）</span><input class="form-control" name="api_key" type="password" placeholder="编辑时留空可保留原配置"><small id="vlmApiKeyState" class="muted-copy">未填写时不会保存 API Key。</small></label>
         </div>
         <div class="form-check"><input class="form-check-input" name="thinking_enabled" type="checkbox" id="thinkingEnabled"><label class="form-check-label" for="thinkingEnabled">启用思考模式（由服务端决定是否支持）</label></div>
         <div class="form-row">
@@ -138,6 +138,6 @@
   </div></div>
 </div>
 
-<link href="{{ url_for('static', path='/css/management.css') }}?v=20260922-01" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/models.js') }}?v=20260922-01"></script>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20260923-04"></script>
 {% endblock %}

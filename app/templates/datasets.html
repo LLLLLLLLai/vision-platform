@@ -50,7 +50,7 @@
       </section>
 
       <section class="dataset-label-card">
-        <div class="section-heading"><div><strong>数据集类别</strong><small>类别由当前数据集维护；标注图片时可直接选择或新增，不依赖已创建模型。</small></div></div>
+        <div class="section-heading"><div><strong>数据集类别（类别字典）</strong><small>这里定义该数据集允许使用的全部类别，并决定 YOLO 导出的类别编号顺序；每张训练图片的每个框再从此字典选择对应类别，同一张图可标注多个类别。</small></div></div>
         <div class="dataset-label-editor"><div id="datasetLabelList" class="dataset-label-list"></div><div class="dataset-label-add"><input id="datasetLabelInput" class="form-control" placeholder="例如：harness、connector"><button class="btn btn-outline-primary" id="addDatasetLabel" type="button">＋ 添加类别</button></div></div>
       </section>
 
@@ -127,7 +127,7 @@
               </div>
               <footer class="annotation-canvas-footer">
                 <span>当前工具：<strong id="annotationToolName">选择 / 移动</strong></span>
-                <span>快捷键：<kbd>V</kbd> 选择 · <kbd>R</kbd> 画框 · <kbd>Delete</kbd> 删除 · <kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销 · <kbd>Space</kbd>+拖动移动图片</span>
+                <span>操作：拖动空白图片可移动 · 点击框后可拖动或缩放 · <kbd>V</kbd> 选择 · <kbd>R</kbd> 画框 · <kbd>Delete</kbd> 删除 · <kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销</span>
               </footer>
             </section>
 
@@ -173,7 +173,7 @@
     </div></div>
   </div>
 </div>
-<link href="{{ url_for('static', path='/css/management.css') }}?v=20260920-07" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260922-04" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260922-04"></script>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260923-05" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260923-05"></script>
 {% endblock %}

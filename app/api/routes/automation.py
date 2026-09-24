@@ -45,6 +45,10 @@ class PromptOptimizationRequest(BaseModel):
     target_accuracy: float = Field(default=0.95, gt=0.0, le=1.0)
     max_rounds: int = Field(default=10, ge=1, le=100)
     cost_limit: float | None = Field(default=None, ge=0.0)
+    # Values are used only to render a variable prompt against the selected
+    # test dataset.  The prompt template itself keeps its {{ input.xxx }}
+    # placeholders so it remains reusable after optimization.
+    input_values: dict[str, Any] = Field(default_factory=dict)
 
 
 def _training_artifact_paths(job: AutomationJob) -> dict[str, str]:
@@ -97,6 +101,10 @@ def _job_payload(job: AutomationJob) -> dict[str, Any]:
         "created_at": job.created_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "can_stop": job.job_type in {"SCENE_EVALUATION", "PROMPT_OPTIMIZATION"}
+        and job.status in {"QUEUED", "WAITING_GPU", "RUNNING"},
+        "can_restart": job.job_type in {"SCENE_EVALUATION", "PROMPT_OPTIMIZATION"}
+        and job.status in {"FAILED", "CANCELED", "COMPLETED"},
     }
 
 
@@ -241,14 +249,55 @@ def cancel_automation_job(
     job = database.get(AutomationJob, job_id)
     if job is None or job.is_deleted:
         raise HTTPException(status_code=404, detail="自动化任务不存在。")
+    if job.job_type not in {"SCENE_EVALUATION", "PROMPT_OPTIMIZATION"}:
+        raise HTTPException(status_code=409, detail="当前只支持停止场景评测和场景优化任务。")
+    if job.status in {"QUEUED", "WAITING_GPU"}:
+        job.status = "CANCELED"
+        job.completed_at = datetime.utcnow()
+        database.commit()
+        return {"id": job.id, "status": job.status, "message": "任务已停止。"}
     if job.status == "RUNNING":
-        raise HTTPException(
-            status_code=409,
-            detail="任务已开始执行，当前版本不支持强制终止。请等待当前运行结束；需要停止训练时请重启独立训练 Worker。",
-        )
-    if job.status not in {"QUEUED", "WAITING_GPU"}:
-        raise HTTPException(status_code=409, detail="当前任务已结束，不能取消。")
-    job.status = "CANCELED"
-    job.completed_at = datetime.utcnow()
+        # A remote VLM request cannot be interrupted safely from a second web
+        # request.  The worker checks this cooperative state before/after each
+        # sample and ends the task as soon as its current model call returns.
+        job.status = "CANCEL_REQUESTED"
+        database.commit()
+        return {
+            "id": job.id,
+            "status": job.status,
+            "message": "已请求停止；当前模型调用完成后将不再执行下一条样本。",
+        }
+    if job.status == "CANCEL_REQUESTED":
+        return {"id": job.id, "status": job.status, "message": "任务正在停止。"}
+    raise HTTPException(status_code=409, detail="当前任务已结束，不能停止。")
+
+
+@router.post("/{job_id}/restart")
+def restart_automation_job(
+    job_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Requeue a completed, canceled, or failed scene task with its snapshot."""
+
+    job = database.get(AutomationJob, job_id)
+    if job is None or job.is_deleted:
+        raise HTTPException(status_code=404, detail="自动化任务不存在。")
+    if job.job_type not in {"SCENE_EVALUATION", "PROMPT_OPTIMIZATION"}:
+        raise HTTPException(status_code=409, detail="当前只支持重新启动场景评测和场景优化任务。")
+    if job.status not in {"FAILED", "CANCELED", "COMPLETED"}:
+        raise HTTPException(status_code=409, detail="当前任务尚未结束，不能重新启动。")
+    config = dict(job.config_json or {})
+    config["restart_count"] = int(config.get("restart_count", 0)) + 1
+    config["last_restarted_at"] = datetime.utcnow().isoformat()
+    job.config_json = config
+    job.status = "QUEUED"
+    job.started_at = None
+    job.completed_at = None
+    job.error_message = None
+    job.result_json = {}
     database.commit()
-    return {"id": job.id, "status": job.status}
+    return {
+        "id": job.id,
+        "status": job.status,
+        "message": "任务已重新进入队列，将沿用原场景、数据集和任务参数执行。",
+    }

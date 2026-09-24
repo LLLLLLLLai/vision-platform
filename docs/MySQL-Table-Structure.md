@@ -5,7 +5,7 @@
 ## 使用范围
 
 - 推荐 MySQL `8.0.17+`、`InnoDB`、`utf8mb4` 与 `utf8mb4_0900_ai_ci`。
-- 平台当前本地开发默认使用 SQLite；迁移 MySQL 前应使用 Alembic 或受控迁移脚本，不应直接对已有生产库重复执行完整建表 SQL。
+- 平台当前本地开发可兼容 SQLite；迁移到 MySQL 前应使用 `scripts/migrate_sqlite_to_mysql.py` 等受控迁移脚本，不应直接对已有生产库重复执行完整建表 SQL。
 - JSON 字段保存流程定义、规则配置、模型输出和快照；查询高频 JSON 属性时建议再建立生成列和索引。
 - `created_at`、`updated_at` 等显示“应用默认值”的字段由应用写入 UTC 时间。
 
@@ -18,7 +18,7 @@
 | `inspection_scenarios` | 检测场景主对象及当前已发布版本。 |
 | `model_registry` | 基础模型和能力插件注册信息。 |
 | `products` | 产品主数据。 |
-| `reference_groups` | DINOv2 相似度参考组与合并向量矩阵信息。 |
+| `reference_groups` | 历史 DINOv2 相似度参考组与向量矩阵信息；当前仅保留追溯。 |
 | `reference_object_types` | 统一的视觉物体类型字典。 |
 | `stations` | 工位主数据。 |
 | `vision_models` | 可训练视觉模型的逻辑定义和类别集合。 |
@@ -26,7 +26,7 @@
 | `inspection_scenario_versions` | 检测场景的版本化定义、提示词、输入输出 Schema 和发布状态。 |
 | `product_scenes` | 产品二维空间世界模型及图像对齐配置。 |
 | `recipes` | 按拉线、物料、工序、相机、拍照次数管理的工艺配方版本。 |
-| `reference_images` | 参考组中的标准图及其向量索引。 |
+| `reference_images` | 历史参考组中的标准图及其向量索引；当前仅保留追溯。 |
 | `datasets` | 场景评测集和 YOLO 训练集定义。 |
 | `detection_tasks` | 一次工艺配方检测任务的总记录。 |
 | `recipe_feature_anchors` | 工艺配方的图像定位特征点。 |
@@ -43,7 +43,7 @@
 | `scenario_executions` | 场景在生产、测试或评测中的一次执行记录。 |
 | `detection_item_results` | 检测任务中每张图片、每个 ROI、每个规则的结果。 |
 | `scenario_execution_reviews` | 执行结果的 VLM 复核与人工复判记录。 |
-| `reference_candidates` | 历史候选基准记录；当前自动采集关闭时不再新增。 |
+| `reference_candidates` | 历史候选基准记录；当前功能已下线，不再新增。 |
 
 ## `algorithm_configs`
 
@@ -149,7 +149,7 @@
 
 ## `reference_groups`
 
-DINOv2 相似度参考组与合并向量矩阵信息。
+历史 DINOv2 相似度参考组与向量矩阵信息；当前仅保留追溯。
 
 | 字段 | MySQL 类型 | 可空 | 键 / 关联 | 默认值 |
 | --- | --- | --- | --- | --- |
@@ -332,7 +332,7 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 
 ## `reference_images`
 
-参考组中的标准图及其向量索引。
+历史参考组中的标准图及其向量索引；当前仅保留追溯。
 
 | 字段 | MySQL 类型 | 可空 | 键 / 关联 | 默认值 |
 | --- | --- | --- | --- | --- |
@@ -719,7 +719,7 @@ ROI 到已发布检测场景版本的绑定与变量映射。
 
 ## `reference_candidates`
 
-历史候选基准记录；当前自动采集关闭时不再新增。
+历史候选基准记录；当前功能已下线，不再新增。
 
 | 字段 | MySQL 类型 | 可空 | 键 / 关联 | 默认值 |
 | --- | --- | --- | --- | --- |

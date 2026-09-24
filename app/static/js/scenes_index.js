@@ -208,6 +208,33 @@
     byId("optimizationPromptTemplate").disabled = !selected;
     byId("optimizationPromptTemplate").value = selected?.version.prompt_template || "";
     if (selected?.version.primary_vlm_model_id) byId("optimizationDetectionVlm").value = String(selected.version.primary_vlm_model_id);
+    renderOptimizationInputValues(selected);
+  }
+
+  function optimizationVariableFields(selected) {
+    const fields = selected?.version?.input_schema_json?.fields;
+    if (!Array.isArray(fields)) return [];
+    return fields.filter((field) => {
+      const name = String(field?.name || "").trim();
+      return name && !["image", "image_path", "image_url"].includes(name.toLowerCase());
+    });
+  }
+
+  function renderOptimizationInputValues(selected) {
+    const container = byId("optimizationInputValues");
+    const fields = optimizationVariableFields(selected);
+    if (!fields.length) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    container.hidden = false;
+    container.innerHTML = `<div class="optimization-input-heading"><div><small>VARIABLE EXAMPLES</small><strong>评测变量示例</strong></div><span>只用于本次测试集渲染，提示词中的 <code>{{ input.xxx }}</code> 会自动保留。</span></div><div class="optimization-input-grid">${fields.map((field) => {
+      const name = String(field.name).trim();
+      const label = String(field.label || name).trim();
+      const value = field.default ?? "";
+      return `<label><span>${escapeHtml(label)}${field.required ? " <em>必填</em>" : ""}</span><input class="form-control form-control-sm" data-optimization-input="${escapeHtml(name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(name)}"></label>`;
+    }).join("")}</div>`;
   }
 
   function taskMetrics(job) {
@@ -220,8 +247,20 @@
       falseReject: metrics.false_reject ?? "—",
     };
   }
-  const taskStatus = (job) => `<span class="status-pill ${statusClass(job.status)}">${escapeHtml(job.status)}</span>`;
-  const taskButton = (job) => `<a class="btn btn-outline-secondary btn-sm" href="${window.location.pathname}?task_id=${job.id}">详情</a>`;
+  const taskStatus = (job) => {
+    const labels = { CANCEL_REQUESTED: "停止中", WAITING_GPU: "等待 GPU", QUEUED: "排队中" };
+    return `<span class="status-pill ${statusClass(job.status)}">${escapeHtml(labels[job.status] || job.status)}</span>`;
+  };
+  const taskButton = (job) => {
+    const stopping = job.status === "CANCEL_REQUESTED";
+    const stop = (job.can_stop || stopping)
+      ? `<button class="btn btn-outline-danger btn-sm" type="button" data-job-stop="${job.id}" ${stopping ? "disabled" : ""}>${stopping ? "停止中" : "停止"}</button>`
+      : "";
+    const restart = job.can_restart
+      ? `<button class="btn btn-outline-primary btn-sm" type="button" data-job-restart="${job.id}">重新启动</button>`
+      : "";
+    return `<div class="table-action-group"><button class="btn btn-outline-secondary btn-sm" type="button" data-job-detail="${job.id}">详情</button>${stop}${restart}</div>`;
+  };
 
   function renderEvaluationTasks(jobs) {
     if (!jobs.length) return '<div class="empty-task-state"><strong>还没有场景评测任务</strong><p>点击右上角“创建评测任务”，选择已发布场景和测试数据集。</p></div>';
@@ -304,25 +343,32 @@
         const roundCompleted = roundMetricTargetMet && requirementsClaimed;
         const roundStatus = round.status || "已评测";
         const roundResult = outcome.target === null
-          ? "目标无效，需重跑"
+          ? "目标无效"
           : roundCompleted
             ? "已完成"
             : roundMetricTargetMet
-              ? "实测达标，待要求核对"
+              ? "实测达标，待核对"
               : "实测未达标";
         const roundClassName = outcome.target === null
           ? "error"
           : roundCompleted
             ? "published"
-            : "draft";
+            : roundStatus === "SKIPPED"
+              ? "error"
+              : "draft";
         const reason = round.requirement_reason || round.reason || "—";
-        return `<article class="prompt-round-row"><div class="prompt-round-heading"><div><small>${Number(round.round) === 0 ? "BASELINE" : `ROUND ${escapeHtml(round.round ?? "—")}`}</small><strong>${Number(round.round) === 0 ? "基线提示词" : `第 ${escapeHtml(round.round ?? "—")} 轮候选提示词`}</strong></div><div class="prompt-round-status"><span class="status-pill ${roundClassName}">${escapeHtml(roundResult)}</span><span class="muted-copy">${escapeHtml(roundStatus)}</span></div></div><div class="prompt-round-metrics"><span>准确率 <strong>${percentage(round.accuracy ?? metrics.accuracy)}</strong></span><span>已标注样本 <strong>${escapeHtml(metrics.labeled ?? metrics.total ?? "—")}</strong></span><span>漏判 <strong>${escapeHtml(metrics.false_accept ?? "—")}</strong></span><span>误判 <strong>${escapeHtml(metrics.false_reject ?? "—")}</strong></span></div><p class="prompt-round-preview">${escapeHtml(compact(roundPrompt || reason, 180))}</p><p class="muted-copy mb-0">优化模型说明：${escapeHtml(reason)}${requirementsClaimed ? "（模型声明已满足优化要求）" : "（模型未声明已满足优化要求）"}</p>${roundPrompt ? promptActionButtons(roundPrompt, "prompt-round-actions") : ""}</article>`;
+        const attempts = round.optimizer_attempts?.attempt_count
+          ? `优化模型 ${round.optimizer_attempts.attempt_count} 次`
+          : round.retry_count !== undefined
+            ? `检测重试 ${round.retry_count} 次`
+            : "—";
+        return `<tr><td>${Number(round.round) === 0 ? "基线" : `第 ${escapeHtml(round.round ?? "—")} 轮`}</td><td><span class="status-pill ${roundClassName}">${escapeHtml(roundResult)}</span><small>${escapeHtml(roundStatus)}</small></td><td>${percentage(round.accuracy ?? metrics.accuracy)}</td><td>${escapeHtml(metrics.labeled ?? metrics.total ?? "—")}</td><td>${escapeHtml(metrics.false_accept ?? "—")}</td><td>${escapeHtml(metrics.false_reject ?? "—")}</td><td>${escapeHtml(attempts)}</td><td class="optimization-round-reason" title="${escapeHtml(reason)}">${escapeHtml(compact(reason, 90))}</td><td class="task-prompt-cell"><div class="task-prompt-cell-content"><span class="task-prompt-preview">${escapeHtml(compact(roundPrompt || reason, 130))}</span>${roundPrompt ? promptActionButtons(roundPrompt, "prompt-action-group-inline") : ""}</div></td></tr>`;
       }).join("")
-      : '<div class="artifact-empty-state">任务尚未产出优化轮次结果。</div>';
+      : '<tr><td colspan="9" class="text-center text-muted">任务尚未产出优化轮次结果。</td></tr>';
     const copyButton = bestPromptKey
       ? `<button class="btn btn-sm btn-outline-light prompt-copy-float" type="button" data-prompt-copy="${bestPromptKey}">⧉ 复制提示词</button>`
       : "";
-    return `<section class="task-result-section"><div class="section-heading"><div><small>OPTIMIZATION RESULT</small><strong>优化结果</strong></div><span class="status-pill ${outcome.className}">${escapeHtml(outcome.label)}</span></div>${cards}<p class="task-description-copy">停止原因：${escapeHtml(result.stop_reason || "任务尚未结束。")}</p><p class="muted-copy mb-0">达标规则：必须有已标注测试样本，实测准确率达到大于 0% 的目标值；同时由优化模型核对用户的优化要求。两项结果单独展示，避免将模型说明当作实际准确率。</p></section><section class="task-result-section prompt-result-section"><div class="section-heading prompt-section-heading"><div><small>OPTIMIZED PROMPT</small><strong>优化后检测提示词</strong></div></div>${copyButton}<pre class="optimized-prompt-output">${escapeHtml(bestPrompt || "任务尚未生成优化后的提示词。")}</pre></section><section class="task-result-section"><div class="section-heading"><div><small>OPTIMIZATION REQUIREMENT</small><strong>用户优化要求</strong></div></div><p class="task-description-copy">${escapeHtml(result.optimization_requirements || config.optimization_requirements || "—")}</p><p class="muted-copy mb-0">优化模型最终说明：${escapeHtml(result.requirement_reason || "尚未生成说明。")}</p></section><section class="task-result-section"><div class="section-heading"><div><small>ROUND HISTORY</small><strong>每轮优化结果</strong></div></div><div class="prompt-round-list">${rounds}</div></section>`;
+    return `<section class="task-result-section"><div class="section-heading"><div><small>OPTIMIZATION RESULT</small><strong>优化结果</strong></div><span class="status-pill ${outcome.className}">${escapeHtml(outcome.label)}</span></div>${cards}<p class="task-description-copy">停止原因：${escapeHtml(result.stop_reason || "任务尚未结束。")}</p><p class="muted-copy mb-0">达标规则：必须有已标注测试样本，实测准确率达到大于 0% 的目标值；同时由优化模型核对用户的优化要求。两项结果单独展示，避免将模型说明当作实际准确率。</p></section><section class="task-result-section prompt-result-section"><div class="section-heading prompt-section-heading"><div><small>OPTIMIZED PROMPT</small><strong>优化后检测提示词</strong></div></div>${copyButton}<pre class="optimized-prompt-output">${escapeHtml(bestPrompt || "任务尚未生成优化后的提示词。")}</pre></section><section class="task-result-section"><div class="section-heading"><div><small>OPTIMIZATION REQUIREMENT</small><strong>用户优化要求</strong></div></div><p class="task-description-copy">${escapeHtml(result.optimization_requirements || config.optimization_requirements || "—")}</p><p class="muted-copy mb-0">优化模型最终说明：${escapeHtml(result.requirement_reason || "尚未生成说明。")}</p></section><section class="task-result-section"><div class="section-heading"><div><small>ROUND HISTORY</small><strong>每轮优化结果</strong></div></div><div class="prompt-round-list task-table-wrap"><table class="task-table optimization-round-table"><thead><tr><th>轮次</th><th>状态</th><th>准确率</th><th>已标注</th><th>漏判</th><th>误判</th><th>调用/重试</th><th>优化说明</th><th>候选提示词</th></tr></thead><tbody>${rounds}</tbody></table></div></section>`;
   }
 
   function openTaskDetails(jobId) {
@@ -393,6 +439,11 @@
 
   async function queueOptimization() {
     const targetAccuracy = Number(byId("optimizationTargetAccuracy").value);
+    const inputValues = {};
+    document.querySelectorAll("[data-optimization-input]").forEach((input) => {
+      const name = String(input.dataset.optimizationInput || "").trim();
+      if (name) inputValues[name] = input.value;
+    });
     const payload = {
       scenario_version_id: Number(byId("optimizationSceneVersion").value),
       dataset_id: Number(byId("optimizationDataset").value),
@@ -402,6 +453,7 @@
       optimization_requirements: byId("optimizationRequirements").value.trim(),
       target_accuracy: targetAccuracy,
       max_rounds: Number(byId("optimizationMaxRounds").value),
+      input_values: inputValues,
     };
     if (
       !payload.scenario_version_id
@@ -446,6 +498,27 @@
     }
   }
 
+  async function stopTask(jobId) {
+    const job = state.jobs.find((item) => item.id === Number(jobId));
+    if (!job) return;
+    try {
+      const result = await request(`${api}/automation-jobs/${job.id}/cancel`, { method: "POST" });
+      notify(result.message || "已请求停止任务。");
+      await loadData();
+    } catch (error) { notify(error.message, "danger"); }
+  }
+
+  async function restartTask(jobId) {
+    const job = state.jobs.find((item) => item.id === Number(jobId));
+    if (!job) return;
+    if (!confirm(`重新启动任务 #${job.id} 吗？将沿用该任务原有的场景、数据集和参数。`)) return;
+    try {
+      const result = await request(`${api}/automation-jobs/${job.id}/restart`, { method: "POST" });
+      notify(result.message || "任务已重新进入队列。");
+      await loadData();
+    } catch (error) { notify(error.message, "danger"); }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     byId("reloadScenes").addEventListener("click", () => loadData().catch((error) => notify(error.message, "danger")));
     byId("sceneSearch").addEventListener("input", renderSceneTable);
@@ -460,6 +533,24 @@
       if (state.activePromptKey) copyPrompt(state.activePromptKey);
     });
     document.addEventListener("click", (event) => {
+      const detailButton = event.target.closest("[data-job-detail]");
+      if (detailButton) {
+        event.preventDefault();
+        openTaskDetails(detailButton.dataset.jobDetail);
+        return;
+      }
+      const stopButton = event.target.closest("[data-job-stop]");
+      if (stopButton) {
+        event.preventDefault();
+        stopTask(stopButton.dataset.jobStop);
+        return;
+      }
+      const restartButton = event.target.closest("[data-job-restart]");
+      if (restartButton) {
+        event.preventDefault();
+        restartTask(restartButton.dataset.jobRestart);
+        return;
+      }
       const viewButton = event.target.closest("[data-prompt-view]");
       if (viewButton) {
         event.preventDefault();

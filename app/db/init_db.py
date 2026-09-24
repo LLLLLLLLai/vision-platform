@@ -5,7 +5,6 @@ from sqlalchemy import inspect, select, text
 from app.core.config import PROJECT_ROOT, settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
-from app.models.world import ModelRegistry
 from app.models.recipe import RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceObjectType
 
@@ -221,7 +220,6 @@ def init_database() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()
-    _seed_model_registry()
 
 
 def _seed_reference_object_types() -> None:
@@ -296,53 +294,3 @@ def _migrate_legacy_alignment_anchors() -> None:
             changed = True
         if changed:
             database.commit()
-
-
-def _seed_model_registry() -> None:
-    defaults = (
-        {
-            "code": "DINOV2_REFERENCE",
-            "name": "DINOv2 参考图相似度",
-            "capability": "REFERENCE_SIMILARITY",
-            "runtime": "TRANSFORMERS",
-            "service_url": settings.dinov2_service_url,
-            "config_json": {"role": "PRIMARY", "batch_supported": True},
-        },
-        {
-            "code": "QWEN3_VL_INVENTORY",
-            "name": "Qwen3-VL 物体清单解析",
-            "capability": "SCENE_INVENTORY",
-            "runtime": "TRANSFORMERS_4BIT",
-            "service_url": settings.qwen_vl_service_url,
-            "config_json": {"role": "DISCOVERY", "coordinates_enabled": False},
-        },
-        {
-            "code": "GROUNDING_DINO_LOCALIZER",
-            "name": "Grounding DINO 开放词汇定位",
-            "capability": "OBJECT_LOCALIZATION",
-            "runtime": "TRANSFORMERS_FP16",
-            "service_url": settings.grounding_service_url,
-            "config_json": {"role": "DISCOVERY", "box_threshold": 0.22},
-        },
-        {
-            "code": "QWEN3_VL_REVIEW",
-            "name": "Qwen3-VL 低置信度复核",
-            "capability": "VLM_JUDGEMENT",
-            "runtime": "TRANSFORMERS_4BIT",
-            "service_url": settings.qwen_vl_service_url,
-            "config_json": {
-                "role": "FALLBACK_ONLY",
-                "uncertain_result": "NG",
-                "max_images": 1,
-            },
-        },
-    )
-    with SessionLocal() as database:
-        existing_codes = {
-            code
-            for (code,) in database.query(ModelRegistry.code).all()
-        }
-        for values in defaults:
-            if values["code"] not in existing_codes:
-                database.add(ModelRegistry(**values))
-        database.commit()

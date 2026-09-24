@@ -43,8 +43,13 @@ class OptimizationAndTrainingDetailAssetTests(unittest.TestCase):
         self.assertIn("data-prompt-view", script)
         self.assertIn("data-prompt-copy", script)
         self.assertIn("prompt-round-list", script)
+        self.assertIn("data-job-stop", script)
+        self.assertIn("data-job-restart", script)
+        self.assertIn("optimizationInputValues", template)
+        self.assertIn("optimization-round-table", script)
         self.assertIn("#taskDetailModal .modal-dialog", stylesheet)
         self.assertIn(".prompt-copy-float", stylesheet)
+        self.assertIn(".optimization-input-values", stylesheet)
 
     def test_training_detail_explains_metrics_and_uses_consistent_artifact_cards(self) -> None:
         script = (PROJECT_ROOT / "app" / "static" / "js" / "models.js").read_text(encoding="utf-8")

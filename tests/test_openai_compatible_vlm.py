@@ -8,7 +8,7 @@ from PIL import Image
 import httpx
 
 from app.core.config import settings
-from app.services.openai_compatible_vlm import _api_root, _http_error_message, _image_content
+from app.services.openai_compatible_vlm import _api_root, _http_error_message, _image_content, _parse_json_response
 
 
 class OpenAiCompatibleVlmUrlTests(unittest.TestCase):
@@ -48,3 +48,11 @@ class OpenAiCompatibleVlmUrlTests(unittest.TestCase):
         message = _http_error_message(response)
 
         self.assertEqual(message, "VLM 服务返回 HTTP 400：Input length exceeds model context.")
+
+    def test_reasoning_response_extracts_final_json_object(self) -> None:
+        response = "<think>先分析图片，再组织 JSON。</think>\n```json\n{\"prompt\": \"优化后的检测提示词\", \"requirements_satisfied\": true}\n```"
+
+        parsed = _parse_json_response(response)
+
+        self.assertEqual(parsed["prompt"], "优化后的检测提示词")
+        self.assertTrue(parsed["requirements_satisfied"])

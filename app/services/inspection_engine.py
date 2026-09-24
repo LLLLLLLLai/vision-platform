@@ -406,60 +406,33 @@ class InspectionEngine:
                 "annotation": {"box": box, "code": roi.code, "status": roi_status},
             }
 
-        for item in sorted(roi.inspection_items, key=lambda value: value.execution_order):
-            if not item.enabled:
-                continue
-            result = await self._execute_item(
-                database,
-                item,
-                str(roi_file),
-                force_vlm_review=force_vlm_review,
-            )
-            if result["status"] == "ERROR":
-                roi_status = "ERROR"
-            elif result["status"] == "NG" and roi_status != "ERROR":
-                roi_status = "NG"
-            database.add(
-                DetectionItemResult(
-                    task_id=task.id,
-                    image_path=str(image_file),
-                    roi_id=roi.id,
-                    inspection_item_id=item.id,
-                    status=result["status"],
-                    expected_json=item.expected_json,
-                    actual_json=result.get("actual", {}),
-                    score=result.get("score"),
-                    message=result.get("message"),
-                    roi_image_path=str(roi_file),
-                    elapsed_ms=result.get("elapsed_ms"),
-                )
-            )
-            item_results.append(
-                {
-                    "roi_code": roi.code,
-                    "roi_name": roi.name,
-                    "roi_image_url": roi_image_url,
-                    "item_code": item.code,
-                    "item_name": item.name,
-                    "inspection_type": item.inspection_type,
-                    "capability": item.capability,
-                    "scene_type": item.rule_json.get("scene_type"),
-                    "primary_model": (
-                        result.get("actual", {})
-                        .get("primary_result", {})
-                        .get("model")
-                        or item.rule_json.get("primary_model")
-                    ),
-                    "vlm_review_enabled": bool(
-                        item.rule_json.get("vlm_review_enabled", False)
-                    ),
-                    **result,
-                }
-            )
+        message = (
+            "检测区域未关联已发布场景；本地 DINOv2 / PaddleOCR / Qwen3-VL 服务已下线。"
+            "请在工艺配方中绑定一个已发布检测场景后再发布配方。"
+        )
+        item_results.append(
+            {
+                "roi_code": roi.code,
+                "roi_name": roi.name,
+                "roi_image_url": roi_image_url,
+                "item_code": "SCENARIO_BINDING_REQUIRED",
+                "item_name": "需绑定已发布检测场景",
+                "inspection_type": "SCENARIO",
+                "capability": "SCENARIO",
+                "primary_model": "场景运行时",
+                "vlm_review_enabled": False,
+                "status": "ERROR",
+                "raw_status": "ERROR",
+                "actual": {},
+                "score": None,
+                "message": message,
+                "elapsed_ms": 0,
+            }
+        )
         return {
-            "status": roi_status,
+            "status": "ERROR",
             "items": item_results,
-            "annotation": {"box": box, "code": roi.code, "status": roi_status},
+            "annotation": {"box": box, "code": roi.code, "status": "ERROR"},
         }
 
     async def _execute_item(

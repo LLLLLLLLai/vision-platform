@@ -1,11 +1,12 @@
 """Persistent worker for reviews and dataset-driven scene evaluation.
 
-The worker intentionally claims one job at a time.  This keeps SQLite safe in
-the local deployment and gives the Linux deployment a clear upgrade path to a
-separate worker process without changing job semantics.
+The worker intentionally claims one job at a time. SQLite keeps the local
+deployment simple; MySQL 8 uses ``FOR UPDATE SKIP LOCKED`` when multiple
+worker processes are enabled, so they do not claim the same job.
 """
 
 import asyncio
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -26,7 +27,7 @@ from app.models.intelligence import (
     VisionModel,
     VisionModelVersion,
 )
-from app.services.openai_compatible_vlm import vlm_client
+from app.services.openai_compatible_vlm import VlmRequestError, vlm_client
 from app.services.scenario_runtime import scenario_runtime
 from app.services.yolo_training import (
     YoloTrainingError,
@@ -65,6 +66,51 @@ def _optimization_target_reached(
     except (TypeError, ValueError):
         return False
     return 0.0 < target <= 1.0 and labeled > 0 and 0.0 <= accuracy <= 1.0 and accuracy >= target
+
+
+_PROMPT_VARIABLE = re.compile(r"\{\{\s*(input\.[A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+_TRANSIENT_VLM_MARKERS = (
+    "timeout",
+    "timed out",
+    "read timeout",
+    "connect timeout",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "http 408",
+    "http 409",
+    "http 425",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+)
+
+
+def _prompt_variables(template: str) -> set[str]:
+    return {match.group(1) for match in _PROMPT_VARIABLE.finditer(template or "")}
+
+
+def _render_prompt_template(template: str, values: dict[str, Any]) -> str:
+    """Render only runtime values while retaining the reusable source template."""
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1).split(".", 1)[1]
+        value = values.get(key)
+        return "" if value is None else str(value)
+
+    return _PROMPT_VARIABLE.sub(replace, template)
+
+
+def _is_transient_vlm_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return isinstance(error, VlmRequestError) and any(
+        marker in message for marker in _TRANSIENT_VLM_MARKERS
+    )
 
 
 def _gpu_free_memory_mb() -> list[int]:
@@ -120,14 +166,33 @@ class AutomationWorker:
         """
 
         with SessionLocal() as database:
+            cancellation_requested = list(
+                database.scalars(
+                    select(AutomationJob).where(
+                        AutomationJob.status == "CANCEL_REQUESTED"
+                    )
+                )
+            )
             jobs = list(
                 database.scalars(
                     select(AutomationJob).where(AutomationJob.status == "RUNNING")
                 )
             )
-            if not jobs:
+            if not jobs and not cancellation_requested:
                 return
             recovered_at = datetime.utcnow()
+            for job in cancellation_requested:
+                result = dict(job.result_json or {})
+                result.update(
+                    {
+                        "canceled": True,
+                        "canceled_at": recovered_at.isoformat(),
+                        "message": "服务重启时已完成停止请求。",
+                    }
+                )
+                job.result_json = result
+                job.status = "CANCELED"
+                job.completed_at = recovered_at
             for job in jobs:
                 previous_error = (job.error_message or "").strip()
                 message = "服务重启导致任务中断，请确认运行日志后重新创建任务。"
@@ -135,6 +200,76 @@ class AutomationWorker:
                 job.error_message = f"{previous_error}\n{message}".strip()
                 job.completed_at = recovered_at
             database.commit()
+
+    @staticmethod
+    def _cancellation_requested(database: Any, job: AutomationJob) -> bool:
+        """Refresh the row so a web-request stop reaches an active worker."""
+
+        database.refresh(job)
+        return job.status in {"CANCELED", "CANCEL_REQUESTED"}
+
+    @staticmethod
+    def _finish_canceled(
+        database: Any,
+        job: AutomationJob,
+        *,
+        partial_result: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a useful partial result instead of turning stop into failure."""
+
+        database.refresh(job)
+        result = dict(job.result_json or {})
+        if partial_result:
+            result.update(partial_result)
+        result.update(
+            {
+                "canceled": True,
+                "canceled_at": datetime.utcnow().isoformat(),
+                "message": "任务已按请求停止；已保留当前已完成的样本和轮次结果。",
+            }
+        )
+        job.result_json = result
+        job.status = "CANCELED"
+        job.completed_at = datetime.utcnow()
+        database.commit()
+
+    async def _judge_with_retry(
+        self,
+        model: VlmModelConfig,
+        *,
+        purpose: str,
+        retries: int = 1,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Retry only temporary OpenAI-compatible VLM failures once.
+
+        Retrying invalid prompt/model configuration would hide useful errors,
+        while a one-time retry handles transient worker, network and gateway
+        failures without immediately discarding a long-running optimization.
+        """
+
+        attempts: list[dict[str, Any]] = []
+        for attempt in range(1, retries + 2):
+            try:
+                output = await vlm_client.judge(model, **kwargs)
+                return output, {
+                    "attempt_count": attempt,
+                    "retry_count": attempt - 1,
+                    "attempt_errors": attempts,
+                }
+            except Exception as exc:
+                transient = _is_transient_vlm_error(exc)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "transient": transient,
+                        "error": str(exc),
+                    }
+                )
+                if not transient or attempt > retries:
+                    retry_text = f"已重试 {attempt - 1} 次" if attempt > 1 else "未重试"
+                    raise RuntimeError(f"{purpose}调用失败（{retry_text}）：{exc}") from exc
+                await asyncio.sleep(min(1.0 * attempt, 3.0))
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -150,19 +285,20 @@ class AutomationWorker:
 
     async def process_once(self) -> bool:
         with SessionLocal() as database:
-            job = database.scalar(
-                select(AutomationJob)
-                .where(AutomationJob.status == "QUEUED")
-                .order_by(AutomationJob.id)
-                .limit(1)
-            )
-            if job is None and time.monotonic() >= self._next_gpu_poll_at:
-                job = database.scalar(
+            def next_job(status: str) -> AutomationJob | None:
+                statement = (
                     select(AutomationJob)
-                    .where(AutomationJob.status == "WAITING_GPU")
+                    .where(AutomationJob.status == status)
                     .order_by(AutomationJob.id)
                     .limit(1)
                 )
+                if database.get_bind().dialect.name == "mysql":
+                    statement = statement.with_for_update(skip_locked=True)
+                return database.scalar(statement)
+
+            job = next_job("QUEUED")
+            if job is None and time.monotonic() >= self._next_gpu_poll_at:
+                job = next_job("WAITING_GPU")
             if job is None:
                 return False
             job.status = "RUNNING"
@@ -171,10 +307,25 @@ class AutomationWorker:
             try:
                 await self._dispatch(database, job)
             except Exception as exc:
-                job.status = "FAILED"
-                job.error_message = str(exc)
-                job.completed_at = datetime.utcnow()
-                database.commit()
+                database.refresh(job)
+                if job.status in {"CANCELED", "CANCEL_REQUESTED"}:
+                    self._finish_canceled(database, job)
+                else:
+                    result = dict(job.result_json or {})
+                    result["failure"] = {
+                        "message": str(exc),
+                        "failed_at": datetime.utcnow().isoformat(),
+                        "retry_policy": "VLM 临时超时、网关和连接异常自动重试 1 次；非临时错误不重试。",
+                    }
+                    job.result_json = result
+                    job.status = "FAILED"
+                    job.error_message = str(exc)
+                    job.completed_at = datetime.utcnow()
+                    database.commit()
+            else:
+                database.refresh(job)
+                if job.status == "CANCEL_REQUESTED":
+                    self._finish_canceled(database, job)
             return True
 
     async def _dispatch(self, database: Any, job: AutomationJob) -> None:
@@ -218,6 +369,13 @@ class AutomationWorker:
         rows: list[tuple[str | None, str | None]] = []
         detail: list[dict[str, Any]] = []
         for item in items:
+            if self._cancellation_requested(database, job):
+                self._finish_canceled(
+                    database,
+                    job,
+                    partial_result={"metrics": _metrics(rows), "items": detail},
+                )
+                return
             execution = await scenario_runtime.execute(
                 database,
                 version,
@@ -236,6 +394,13 @@ class AutomationWorker:
                     "elapsed_ms": execution.elapsed_ms,
                 }
             )
+            if self._cancellation_requested(database, job):
+                self._finish_canceled(
+                    database,
+                    job,
+                    partial_result={"metrics": _metrics(rows), "items": detail},
+                )
+                return
         job.result_json = {"metrics": _metrics(rows), "items": detail}
         job.status = "COMPLETED"
         job.completed_at = datetime.utcnow()
@@ -308,11 +473,25 @@ class AutomationWorker:
             config.get("optimization_requirements")
             or "保持当前检测目标和 JSON 输出约定，优先降低漏判风险。"
         ).strip()
+        input_values = config.get("input_values")
+        if not isinstance(input_values, dict):
+            input_values = {}
         if not candidate_prompt:
             raise RuntimeError("待优化检测提示词为空。")
         if not optimization_requirements:
             raise RuntimeError("请填写优化要求。")
-        best = await self._evaluate_prompt(detection_model, candidate_prompt, items)
+        preserved_variables = _prompt_variables(candidate_prompt)
+        best = await self._evaluate_prompt(
+            database,
+            job,
+            detection_model,
+            candidate_prompt,
+            items,
+            input_values=input_values,
+        )
+        if best.get("canceled"):
+            self._finish_canceled(database, job, partial_result={"history": []})
+            return
         baseline_metric_target_reached = _optimization_target_reached(
             best.get("metrics", {}),
             target_accuracy,
@@ -336,21 +515,37 @@ class AutomationWorker:
         stop_reason = "已达到最大优化轮数。"
 
         for round_number in range(1, max_rounds + 1):
-            database.refresh(job)
-            if job.status == "CANCELED":
+            if self._cancellation_requested(database, job):
+                self._finish_canceled(
+                    database,
+                    job,
+                    partial_result={
+                        "baseline_prompt": candidate_prompt,
+                        "best_prompt": best_prompt,
+                        "best_metrics": best,
+                        "history": history,
+                        "optimization_requirements": optimization_requirements,
+                    },
+                )
                 return
+            placeholder_text = ", ".join(f"{{{{ {item} }}}}" for item in sorted(preserved_variables)) or "无"
             optimization_prompt = (
                 "请基于当前检测提示词、测试指标和用户优化要求，生成下一轮供检测模型直接使用的完整提示词。\n"
                 "用户优化要求：\n"
                 f"{optimization_requirements}\n\n"
                 "必须保留或明确要求检测模型只输出 JSON，且 JSON 至少包含 result、confidence、reason；"
                 "看不清时应返回 UNCERTAIN。不要虚构图片中未提供的信息。\n"
+                "以下变量占位符属于生产接口契约，必须原样保留、不能改名或删除：\n"
+                f"{placeholder_text}\n"
+                "本次评测会自动以如下示例值渲染变量；这些值不是提示词正文的一部分：\n"
+                f"{input_values}\n"
                 f"当前提示词：{best_prompt}\n"
                 f"当前指标：{best.get('metrics', {})}\n"
                 "重点降低把 NG 判为 OK 的风险。"
             )
-            proposal = await vlm_client.judge(
+            proposal, optimizer_attempts = await self._judge_with_retry(
                 optimizer,
+                purpose="优化提示词 VLM",
                 prompt=optimization_prompt,
                 system_prompt=(
                     "你是工业视觉检测提示词优化专家，不执行图片检测。"
@@ -359,6 +554,7 @@ class AutomationWorker:
                     "\"requirements_satisfied\":true,"
                     "\"requirement_reason\":\"说明该提示词如何满足用户优化要求\"}。"
                     "prompt 必须是可直接交给检测 VLM 使用的中文提示词。"
+                    "即使开启了思考模式，也必须在最终输出中返回上述 JSON，不要把提示词放在思考过程里。"
                 ),
             )
             proposed_prompt = str(
@@ -379,7 +575,41 @@ class AutomationWorker:
                 )
                 stop_reason = "优化模型未生成可用的新提示词。"
                 break
-            metrics = await self._evaluate_prompt(detection_model, proposed_prompt, items)
+            missing_variables = preserved_variables - _prompt_variables(proposed_prompt)
+            if missing_variables:
+                history.append(
+                    {
+                        "round": round_number,
+                        "status": "SKIPPED",
+                        "prompt": proposed_prompt,
+                        "optimizer_attempts": optimizer_attempts,
+                        "reason": "候选提示词缺少必须保留的变量："
+                        + "、".join(f"{{{{ {item} }}}}" for item in sorted(missing_variables)),
+                    }
+                )
+                stop_reason = "优化模型修改了生产接口变量，已拒绝该候选提示词。"
+                break
+            metrics = await self._evaluate_prompt(
+                database,
+                job,
+                detection_model,
+                proposed_prompt,
+                items,
+                input_values=input_values,
+            )
+            if metrics.get("canceled"):
+                self._finish_canceled(
+                    database,
+                    job,
+                    partial_result={
+                        "baseline_prompt": candidate_prompt,
+                        "best_prompt": best_prompt,
+                        "best_metrics": best,
+                        "history": history,
+                        "optimization_requirements": optimization_requirements,
+                    },
+                )
+                return
             metric_target_reached = _optimization_target_reached(
                 metrics.get("metrics", {}),
                 target_accuracy,
@@ -393,6 +623,7 @@ class AutomationWorker:
                     "metric_target_reached": metric_target_reached,
                     "target_reached": metric_target_reached and requirements_satisfied,
                     "requirement_reason": requirement_reason,
+                    "optimizer_attempts": optimizer_attempts,
                     **metrics,
                 }
             )
@@ -423,6 +654,20 @@ class AutomationWorker:
                 stop_reason = "优化模型未生成不同的候选提示词。"
                 break
 
+            # Preserve completed rounds even if a later remote VLM call fails.
+            job.result_json = {
+                "baseline_prompt": candidate_prompt,
+                "best_prompt": best_prompt,
+                "best_metrics": best,
+                "optimization_requirements": optimization_requirements,
+                "target_accuracy": target_accuracy,
+                "history": history,
+                "input_values": input_values,
+                "variable_placeholders": sorted(preserved_variables),
+                "message": "任务运行中，已保存当前完成的优化轮次。",
+            }
+            database.commit()
+
         best_metric_target_reached = _optimization_target_reached(
             best.get("metrics", {}),
             target_accuracy,
@@ -445,6 +690,8 @@ class AutomationWorker:
             "detection_vlm_model_id": detection_model.id,
             "optimizer_vlm_model_id": optimizer.id,
             "independent_optimizer": optimizer.id != detection_model.id,
+            "input_values": input_values,
+            "variable_placeholders": sorted(preserved_variables),
         }
         job.status = "COMPLETED"
         job.completed_at = datetime.utcnow()
@@ -452,18 +699,37 @@ class AutomationWorker:
 
     async def _evaluate_prompt(
         self,
+        database: Any,
+        job: AutomationJob,
         model: VlmModelConfig,
         prompt: str,
         items: list[DatasetItem],
+        *,
+        input_values: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         rows: list[tuple[str | None, str | None]] = []
         details: list[dict[str, Any]] = []
+        values = input_values or {}
+        total_retries = 0
         for item in items:
-            output = await vlm_client.judge(
+            if self._cancellation_requested(database, job):
+                metrics = _metrics(rows)
+                return {
+                    "canceled": True,
+                    "metrics": metrics,
+                    "accuracy": metrics.get("accuracy"),
+                    "items": details,
+                    "retry_count": total_retries,
+                }
+            rendered_prompt = _render_prompt_template(prompt, values)
+            output, attempts = await self._judge_with_retry(
                 model,
-                prompt=prompt,
+                purpose="检测 VLM",
+                prompt=rendered_prompt,
                 image_path=item.media_path,
+                context={"optimization_inputs": values},
             )
+            total_retries += int(attempts.get("retry_count", 0))
             result = str(output.get("result", "UNCERTAIN")).upper()
             if result not in {"OK", "NG"}:
                 result = "NG"
@@ -474,10 +740,26 @@ class AutomationWorker:
                     "ground_truth": item.ground_truth,
                     "result": result,
                     "confidence": output.get("confidence"),
+                    "model_attempt_count": attempts.get("attempt_count"),
+                    "model_retry_count": attempts.get("retry_count"),
                 }
             )
+            if self._cancellation_requested(database, job):
+                metrics = _metrics(rows)
+                return {
+                    "canceled": True,
+                    "metrics": metrics,
+                    "accuracy": metrics.get("accuracy"),
+                    "items": details,
+                    "retry_count": total_retries,
+                }
         metrics = _metrics(rows)
-        return {"metrics": metrics, "accuracy": metrics.get("accuracy"), "items": details}
+        return {
+            "metrics": metrics,
+            "accuracy": metrics.get("accuracy"),
+            "items": details,
+            "retry_count": total_retries,
+        }
 
     async def _run_yolo_training(self, database: Any, job: AutomationJob) -> None:
         required = int((job.config_json or {}).get("gpu_memory_required_mb", 4096))
