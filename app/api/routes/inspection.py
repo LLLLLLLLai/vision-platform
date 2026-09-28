@@ -676,6 +676,21 @@ async def execute_filename_routed_inspection(
             "result": "ERROR",
             "image_paths": [],
         }
+    normalized_source_paths = {
+        (
+            path.replace("/", "\\").casefold()
+            if SmbStorage.is_remote_path(path)
+            else path.replace("\\", "/")
+        )
+        for path in active_image_paths
+    }
+    if len(normalized_source_paths) != len(active_image_paths):
+        return {
+            "code": 1001,
+            "message": "image_paths 不能包含重复的图片路径。",
+            "result": "ERROR",
+            "image_paths": [],
+        }
     business_fields = (
         payload.line_code,
         payload.material_code,
@@ -705,7 +720,11 @@ async def execute_filename_routed_inspection(
             "image_paths": [],
         }
 
-    recipe_groups: dict[int, dict[str, Any]] = {}
+    # Each source image is an independent execution unit.  Two cameras can
+    # legitimately use the same recipe; keeping them separate lets their
+    # alignment, ROI scenarios and result publishing run concurrently without
+    # colliding on task IDs or artifact paths.
+    image_groups: list[dict[str, Any]] = []
     parsed_barcodes = {
         barcode
         for image_path in active_image_paths
@@ -727,7 +746,7 @@ async def execute_filename_routed_inspection(
             "image_paths": [],
         }
 
-    for image_path in active_image_paths:
+    for source_index, image_path in enumerate(active_image_paths, start=1):
         recipe: Recipe | None = None
         parsed = parse_camera_picture_from_filename(image_path)
         if has_all_business_fields:
@@ -777,15 +796,21 @@ async def execute_filename_routed_inspection(
                 "result": "ERROR",
                 "image_paths": [],
             }
-        group = recipe_groups.setdefault(
-            recipe.id,
-            {"recipe": recipe, "source_paths": [], "local_paths": []},
+        image_groups.append(
+            {
+                "group_key": f"image-{source_index}",
+                "recipe": recipe,
+                "source_paths": [image_path],
+                "local_paths": [],
+            }
         )
-        group["source_paths"].append(image_path)
 
     storage = storage or SmbStorage()
     batch_request_id = f"detect-{uuid.uuid4().hex}"
     execution_date = datetime.utcnow().strftime("%Y%m%d")
+    smb_transfer_semaphore = asyncio.Semaphore(
+        max(1, int(settings.smb_transfer_parallelism))
+    )
 
     async def stage_group_images(group: dict[str, Any]) -> None:
         recipe: Recipe = group["recipe"]
@@ -795,23 +820,31 @@ async def execute_filename_routed_inspection(
             / execution_date
             / safe_artifact_component(recipe.code)
             / batch_request_id
+            / group["group_key"]
         )
         group["artifact_root"] = artifact_root
 
-        async def stage_one(source_path: str) -> Path:
-            filename = source_path.replace("\\", "/").rsplit("/", 1)[-1]
+        async def stage_one(index: int, source_path: str) -> Path:
+            filename = storage.staging_filename_for_source(
+                source_path,
+                position=index + 1,
+            )
             destination = artifact_root / "raw" / filename
-            return await asyncio.to_thread(storage.stage_input, source_path, destination)
+            async with smb_transfer_semaphore:
+                return await asyncio.to_thread(storage.stage_input, source_path, destination)
 
         group["local_paths"] = [
             str(path)
             for path in await asyncio.gather(
-                *(stage_one(source_path) for source_path in group["source_paths"])
+                *(
+                    stage_one(index, source_path)
+                    for index, source_path in enumerate(group["source_paths"])
+                )
             )
         ]
 
     try:
-        await asyncio.gather(*(stage_group_images(group) for group in recipe_groups.values()))
+        await asyncio.gather(*(stage_group_images(group) for group in image_groups))
     except SmbStorageError as exc:
         return {
             "code": 1003,
@@ -836,7 +869,7 @@ async def execute_filename_routed_inspection(
 
     async def execute_group(group: dict[str, Any]) -> dict[str, Any]:
         recipe_id = int(group["recipe"].id)
-        group_request_id = f"{batch_request_id}-{recipe_id}"
+        group_request_id = f"{batch_request_id}-{group['group_key']}"
         async with image_semaphore:
             if can_parallelize_groups:
                 with execution_session_factory() as execution_database:
@@ -879,7 +912,8 @@ async def execute_filename_routed_inspection(
         async def publish_one(local_path: str, source_path: str) -> str:
             if not Path(local_path).is_file():
                 return local_path
-            return await asyncio.to_thread(storage.publish_result, local_path, source_path)
+            async with smb_transfer_semaphore:
+                return await asyncio.to_thread(storage.publish_result, local_path, source_path)
 
         published_paths = list(
             await asyncio.gather(
@@ -912,7 +946,7 @@ async def execute_filename_routed_inspection(
     aggregate_result = "OK"
     result_image_paths: list[str] = []
     inspection_results: list[dict[str, Any]] = []
-    group_values = list(recipe_groups.values())
+    group_values = image_groups
     if can_parallelize_groups:
         group_outcomes = await asyncio.gather(
             *(execute_group(group) for group in group_values),

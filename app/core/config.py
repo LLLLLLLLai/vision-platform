@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     smb_username: str = ""
     smb_password: str = ""
     smb_connection_timeout_seconds: float = 15.0
+    smb_transfer_parallelism: int = 2
     vlm_secret_key: str = ""
     vlm_request_max_image_pixels: int = 1_003_520
     vlm_request_jpeg_quality: int = 90

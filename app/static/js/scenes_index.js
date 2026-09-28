@@ -251,6 +251,30 @@
     const labels = { CANCEL_REQUESTED: "停止中", WAITING_GPU: "等待 GPU", QUEUED: "排队中" };
     return `<span class="status-pill ${statusClass(job.status)}">${escapeHtml(labels[job.status] || job.status)}</span>`;
   };
+  const taskProgress = (job) => {
+    const progress = job.result_json?.progress || {};
+    const fallback = {
+      QUEUED: [0, "等待调度"],
+      WAITING_GPU: [5, "等待资源"],
+      RUNNING: [10, "正在执行"],
+      CANCEL_REQUESTED: [95, "正在停止"],
+      COMPLETED: [100, "已完成"],
+      FAILED: [100, "执行失败"],
+      CANCELED: [100, "已停止"],
+    }[job.status] || [0, "等待调度"];
+    const rawPercent = Number(progress.percent);
+    const percent = Number.isFinite(rawPercent)
+      ? Math.max(0, Math.min(100, rawPercent))
+      : fallback[0];
+    const label = progress.label || fallback[1];
+    const current = Number(progress.current);
+    const total = Number(progress.total);
+    const count = Number.isFinite(current) && Number.isFinite(total) && total > 0
+      ? ` ${current}/${total}`
+      : "";
+    const state = progress.indeterminate && job.status === "RUNNING" ? " is-indeterminate" : "";
+    return `<div class="task-progress${state}" title="${escapeHtml(label)}${escapeHtml(count)}"><div class="task-progress-track"><span style="width:${percent.toFixed(1)}%"></span></div><small>${escapeHtml(label)}${escapeHtml(count)} · ${percent.toFixed(0)}%</small></div>`;
+  };
   const taskButton = (job) => {
     const stopping = job.status === "CANCEL_REQUESTED";
     const stop = (job.can_stop || stopping)
@@ -266,9 +290,9 @@
     if (!jobs.length) return '<div class="empty-task-state"><strong>还没有场景评测任务</strong><p>点击右上角“创建评测任务”，选择已发布场景和测试数据集。</p></div>';
     const rows = jobs.map((job) => {
       const metrics = taskMetrics(job);
-      return `<tr><td>#${job.id}</td><td>${escapeHtml(compact(sceneVersionLabel(job.scenario_version_id), 32))}</td><td>${escapeHtml(compact(datasetLabel(job.dataset_id), 28))}</td><td>${percentage(metrics.accuracy)}</td><td>${escapeHtml(metrics.total)}</td><td>${escapeHtml(metrics.falseAccept)}</td><td>${escapeHtml(metrics.falseReject)}</td><td>${taskStatus(job)}</td><td>${escapeHtml(formatDateTime(job.completed_at || job.created_at))}</td><td>${taskButton(job)}</td></tr>`;
+      return `<tr><td>#${job.id}</td><td>${escapeHtml(compact(sceneVersionLabel(job.scenario_version_id), 32))}</td><td>${escapeHtml(compact(datasetLabel(job.dataset_id), 28))}</td><td>${percentage(metrics.accuracy)}</td><td>${escapeHtml(metrics.total)}</td><td>${escapeHtml(metrics.falseAccept)}</td><td>${escapeHtml(metrics.falseReject)}</td><td>${taskProgress(job)}</td><td>${taskStatus(job)}</td><td>${escapeHtml(formatDateTime(job.completed_at || job.created_at))}</td><td>${taskButton(job)}</td></tr>`;
     }).join("");
-    return `<div class="task-table-wrap"><table class="task-table"><thead><tr><th>任务</th><th>场景</th><th>测试数据集</th><th>准确率</th><th>样本</th><th>漏判</th><th>误判</th><th>状态</th><th>完成时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="task-table-wrap"><table class="task-table"><thead><tr><th>任务</th><th>场景</th><th>测试数据集</th><th>准确率</th><th>样本</th><th>漏判</th><th>误判</th><th>进度</th><th>状态</th><th>完成时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function renderOptimizationTasks(jobs) {
@@ -280,9 +304,9 @@
       const prompt = result.best_prompt || "未生成优化提示词";
       const outcome = optimizationOutcome(result, config, metrics, job.status);
       const target = outcome.target === null ? "无效" : percentage(outcome.target);
-      return `<tr><td>#${job.id}</td><td>${escapeHtml(compact(sceneVersionLabel(job.scenario_version_id), 28))}</td><td>${escapeHtml(compact(datasetLabel(job.dataset_id), 22))}</td><td>${escapeHtml(compact(config.detection_vlm_model_id ? vlmLabel(config.detection_vlm_model_id) : "场景默认", 20))}</td><td>${percentage(metrics.accuracy)}</td><td>${escapeHtml(target)}</td><td><span class="status-pill ${outcome.className}">${escapeHtml(outcome.label)}</span></td><td class="task-prompt-cell"><div class="task-prompt-cell-content"><span class="task-prompt-preview">${escapeHtml(compact(prompt, 92))}</span>${promptActionButtons(prompt, "prompt-action-group-inline")}</div></td><td>${taskStatus(job)}</td><td>${taskButton(job)}</td></tr>`;
+      return `<tr><td>#${job.id}</td><td>${escapeHtml(compact(sceneVersionLabel(job.scenario_version_id), 28))}</td><td>${escapeHtml(compact(datasetLabel(job.dataset_id), 22))}</td><td>${escapeHtml(compact(config.detection_vlm_model_id ? vlmLabel(config.detection_vlm_model_id) : "场景默认", 20))}</td><td>${percentage(metrics.accuracy)}</td><td>${escapeHtml(target)}</td><td><span class="status-pill ${outcome.className}">${escapeHtml(outcome.label)}</span></td><td class="task-prompt-cell"><div class="task-prompt-cell-content"><span class="task-prompt-preview">${escapeHtml(compact(prompt, 92))}</span>${promptActionButtons(prompt, "prompt-action-group-inline")}</div></td><td>${taskProgress(job)}</td><td>${taskStatus(job)}</td><td>${taskButton(job)}</td></tr>`;
     }).join("");
-    return `<div class="task-table-wrap"><table class="task-table task-table-optimization"><thead><tr><th>任务</th><th>场景</th><th>测试数据集</th><th>检测模型</th><th>最佳准确率</th><th>目标</th><th>结果</th><th>优化后检测提示词</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="task-table-wrap"><table class="task-table task-table-optimization"><thead><tr><th>任务</th><th>场景</th><th>测试数据集</th><th>检测模型</th><th>最佳准确率</th><th>目标</th><th>结果</th><th>优化后检测提示词</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function renderJobs() {

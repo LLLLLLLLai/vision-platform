@@ -118,6 +118,88 @@ class ScenarioCreateValidationTests(unittest.TestCase):
         engine.dispose()
 
 
+class DirectVlmRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_prompt_renders_manual_inputs_for_draft_and_published_versions(self) -> None:
+        """Designer testing must use the same parameter interpolation as production."""
+
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        database = Session(engine)
+        model = VlmModelConfig(
+            code="DIRECT_RUNTIME_VLM",
+            name="Direct runtime VLM",
+            base_url="http://vlm.test/v1",
+            model_name="direct-runtime-vlm",
+        )
+        scene = InspectionScenario(
+            code="DIRECT_RUNTIME_SCENE",
+            name="参数化 VLM 场景",
+            mode="VLM_DIRECT",
+        )
+        database.add_all((model, scene))
+        database.flush()
+        draft = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.0-draft",
+            status="DRAFT",
+            primary_vlm_model_id=model.id,
+            prompt_template="检查线束文字 {{ input.expected_text }}，返回 OK 或 NG。",
+            input_schema_json={
+                "fields": [
+                    {
+                        "name": "expected_text",
+                        "label": "期望文字",
+                        "type": "TEXT",
+                        "required": True,
+                    }
+                ]
+            },
+        )
+        published = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.0",
+            status="PUBLISHED",
+            primary_vlm_model_id=model.id,
+            prompt_template=draft.prompt_template,
+            input_schema_json=draft.input_schema_json,
+        )
+        database.add_all((draft, published))
+        database.commit()
+
+        captured_prompts: list[str] = []
+
+        async def fake_judge(_model, *, prompt: str, **_kwargs):
+            captured_prompts.append(prompt)
+            return {"result": "OK", "confidence": 0.98, "reason": "mock"}
+
+        original_judge = runtime_module.vlm_client.judge
+        runtime_module.vlm_client.judge = fake_judge
+        try:
+            for version, allow_draft in ((draft, True), (published, False)):
+                execution = await ScenarioRuntime().execute(
+                    database,
+                    version,
+                    image_path="C:/test/harness.png",
+                    source="SCENE_DESIGN_TEST",
+                    context={"expected_text": "FU5"},
+                    allow_draft=allow_draft,
+                )
+                self.assertEqual(execution.status, "COMPLETED", execution.error_message)
+                self.assertEqual(execution.result, "OK")
+                self.assertEqual(execution.input_json["expected_text"], "FU5")
+            self.assertEqual(
+                captured_prompts,
+                [
+                    "检查线束文字 FU5，返回 OK 或 NG。",
+                    "检查线束文字 FU5，返回 OK 或 NG。",
+                ],
+            )
+        finally:
+            runtime_module.vlm_client.judge = original_judge
+            database.close()
+            engine.dispose()
+
+
 class WorkflowCanvasTests(unittest.TestCase):
     def test_canvas_nodes_edges_and_publish_flow(self) -> None:
         engine = create_engine("sqlite://")
@@ -573,6 +655,79 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "checked_text": "FUS",
             "score": 0.93,
         })
+
+    async def test_workflow_end_preserves_previous_result_when_only_custom_fields_are_mapped(self) -> None:
+        scene = InspectionScenario(
+            code="WORKFLOW_END_RESULT_FALLBACK",
+            name="结束节点结果继承",
+            mode="WORKFLOW",
+        )
+        self.database.add(scene)
+        self.database.flush()
+        version = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.0",
+            status="PUBLISHED",
+        )
+        self.database.add(version)
+        self.database.flush()
+        self.database.add_all((
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="start",
+                name="开始",
+                node_type="START",
+                sort_order=0,
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="vlm_1",
+                name="VLM 检测",
+                node_type="VLM",
+                sort_order=1,
+                config_json={
+                    "vlm_model_id": self.primary_model.id,
+                    "prompt": "检查图片",
+                },
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="end",
+                name="结束",
+                node_type="END",
+                sort_order=2,
+                config_json={"output": {"custom_reason": "{{ nodes.vlm_1.reason }}"}},
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="start",
+                target_node_key="vlm_1",
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="vlm_1",
+                target_node_key="end",
+            ),
+        ))
+        self.database.commit()
+        version = self.database.query(InspectionScenarioVersion).options(
+            selectinload(InspectionScenarioVersion.scenario),
+            selectinload(InspectionScenarioVersion.nodes),
+            selectinload(InspectionScenarioVersion.edges),
+        ).filter_by(id=version.id).one()
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "roi.jpg"
+            Image.new("RGB", (32, 32), "white").save(image_path)
+            execution = await ScenarioRuntime().execute(
+                self.database,
+                version,
+                image_path=str(image_path),
+                source="TEST",
+            )
+
+        self.assertEqual(execution.result, "OK")
+        self.assertEqual(execution.output_json["result"]["custom_reason"], "锁付可见")
+        self.assertEqual(execution.output_json["result"]["result"], "OK")
 
     async def test_workflow_detector_bbox_can_crop_image_for_downstream_vlm(self) -> None:
         scene = InspectionScenario(

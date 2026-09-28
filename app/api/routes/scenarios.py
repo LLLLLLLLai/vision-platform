@@ -17,6 +17,7 @@ from app.core.config import PROJECT_ROOT, settings
 from app.db.session import get_db
 from app.models.intelligence import (
     AutomationJob,
+    Dataset,
     InspectionScenario,
     InspectionScenarioVersion,
     RoiScenarioBinding,
@@ -708,6 +709,8 @@ def _version_payload(version: InspectionScenarioVersion) -> dict[str, Any]:
         "definition_json": version.definition_json,
         "primary_vlm_model_id": version.primary_vlm_model_id,
         "review_vlm_model_id": version.review_vlm_model_id,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "updated_at": version.updated_at.isoformat() if version.updated_at else None,
         "published_at": version.published_at.isoformat() if version.published_at else None,
         "nodes": [_node_payload(node) for node in sorted(version.nodes, key=lambda item: (item.sort_order, item.id))],
         "edges": [
@@ -1333,6 +1336,13 @@ def publish_scenario_version(
                 _validate_published_vision_model_node(database, node)
             if node.enabled and node.node_type.upper() == "IMAGE_CROP":
                 _validate_image_crop_node(database, version, node)
+    previously_published_version_ids = database.scalars(
+        select(InspectionScenarioVersion.id).where(
+            InspectionScenarioVersion.scenario_id == scene.id,
+            InspectionScenarioVersion.id != version.id,
+            InspectionScenarioVersion.status == "PUBLISHED",
+        )
+    ).all()
     database.query(InspectionScenarioVersion).filter(
         InspectionScenarioVersion.scenario_id == scene.id,
         InspectionScenarioVersion.id != version.id,
@@ -1341,12 +1351,30 @@ def publish_scenario_version(
     version.status = "PUBLISHED"
     version.published_at = datetime.utcnow()
     scene.published_version_id = version.id
+    # ROI and dataset collection associations represent a logical scene, not
+    # an immutable historical release.  Follow the current published release
+    # at publish time so production calls cannot end up referencing an archived
+    # scenario version.  Historical ScenarioExecution rows retain their own
+    # version IDs and remain fully traceable.
+    rebound_roi_count = 0
+    rebound_dataset_count = 0
+    if previously_published_version_ids:
+        rebound_roi_count = database.query(RoiScenarioBinding).filter(
+            RoiScenarioBinding.enabled.is_(True),
+            RoiScenarioBinding.scenario_version_id.in_(previously_published_version_ids),
+        ).update({"scenario_version_id": version.id}, synchronize_session=False)
+        rebound_dataset_count = database.query(Dataset).filter(
+            Dataset.is_deleted.is_(False),
+            Dataset.collection_scenario_version_id.in_(previously_published_version_ids),
+        ).update({"collection_scenario_version_id": version.id}, synchronize_session=False)
     database.commit()
     return {
         "id": version.id,
         "status": version.status,
         "published": True,
         "api_endpoint_path": _scene_api_endpoint_path(scene.code),
+        "rebound_roi_count": rebound_roi_count,
+        "rebound_dataset_count": rebound_dataset_count,
     }
 
 

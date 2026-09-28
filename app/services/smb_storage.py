@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import ntpath
+import re
 import shutil
+import threading
 from pathlib import Path
 
 from app.core.config import settings
@@ -25,6 +28,8 @@ def _normalise_unc_path(value: str) -> str:
 
 class SmbStorage:
     """Stage source files locally and publish result images beside their sources."""
+
+    _session_registration_lock = threading.Lock()
 
     def __init__(
         self,
@@ -49,6 +54,26 @@ class SmbStorage:
     def is_remote_path(value: str) -> bool:
         return _is_unc_path(value)
 
+    @staticmethod
+    def staging_filename_for_source(source_path: str, *, position: int) -> str:
+        """Build an isolated staged filename for one image in a detect request.
+
+        Camera software can place equally named files in different SMB folders.
+        A source-path hash and the input position prevent concurrent downloads
+        from overwriting one another while retaining a readable original stem.
+        """
+
+        filename = ntpath.basename(source_path.strip().replace("/", "\\"))
+        stem, suffix = ntpath.splitext(filename)
+        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "image"
+        source_key = (
+            _normalise_unc_path(source_path).casefold()
+            if _is_unc_path(source_path)
+            else source_path.strip().replace("\\", "/")
+        )
+        digest = hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:12]
+        return f"{max(1, int(position)):02d}_{safe_stem[:96]}_{digest}{suffix or '.jpg'}"
+
     def stage_input(self, source_path: str, destination: Path) -> Path:
         """Copy a source image to its recipe/date workspace when necessary."""
 
@@ -61,7 +86,11 @@ class SmbStorage:
                 # Preserve the downstream FileNotFoundError for non-SMB integrations.
                 return source
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            try:
+                shutil.copy2(source, destination)
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
             return destination
 
         remote_path = self._validated_remote_path(source_path)
@@ -73,6 +102,7 @@ class SmbStorage:
             ) as target:
                 shutil.copyfileobj(source, target, length=1024 * 1024)
         except Exception as exc:
+            destination.unlink(missing_ok=True)
             raise SmbStorageError(f"无法从 SMB 读取图片：{source_path}") from exc
         return destination
 
@@ -135,12 +165,17 @@ class SmbStorage:
             raise SmbStorageError("缺少 smbprotocol 依赖，无法访问 SMB 文件服务器。") from exc
         server = self.server_root.lstrip("\\").split("\\", 1)[0]
         try:
-            smbclient.register_session(
-                server,
-                username=self.username,
-                password=self.password,
-                connection_timeout=self.connection_timeout_seconds,
-            )
+            # smbclient maintains a process-wide connection cache. Session
+            # registration mutates that cache, so protect it while parallel
+            # image transfers are starting. The per-file handles remain
+            # independent and can then transfer concurrently.
+            with self._session_registration_lock:
+                smbclient.register_session(
+                    server,
+                    username=self.username,
+                    password=self.password,
+                    connection_timeout=self.connection_timeout_seconds,
+                )
         except Exception as exc:
             raise SmbStorageError("无法建立 SMB 登录会话。") from exc
         return smbclient

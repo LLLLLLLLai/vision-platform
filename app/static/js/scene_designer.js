@@ -26,6 +26,7 @@
     paletteCollapsed: false,
     inspectorCollapsed: true,
     inspectorTab: "SETTINGS",
+    directTestValues: {},
   };
 
   const escapeHtml = (value) => String(value ?? "")
@@ -411,6 +412,37 @@
       : "请先发布场景后再查看外部调用接口";
   }
 
+  function renderVersionHistory() {
+    const container = byId("sceneVersionList");
+    const versions = state.scene?.versions || [];
+    container.innerHTML = versions.length ? versions.map((version) => {
+      const selected = Number(version.id) === Number(state.versionId);
+      const modeSummary = state.scene?.mode === "WORKFLOW"
+        ? `${(version.nodes || []).filter((node) => node.enabled).length} 个启用节点`
+        : (version.prompt_template ? "已配置检测提示词" : "尚未配置检测提示词");
+      const time = version.published_at || version.updated_at || version.created_at || "";
+      const timeText = time ? new Date(time).toLocaleString("zh-CN", { hour12: false }) : "未发布";
+      return `<article class="scene-version-row${selected ? " current" : ""}"><div><strong>V${escapeHtml(version.version)} · ${escapeHtml(version.status)}</strong><small>${escapeHtml(modeSummary)} · ${escapeHtml(timeText)}</small></div><div class="scene-version-row-meta"><span class="status-pill ${statusClass(version.status)}">${escapeHtml(version.status)}</span><button class="btn btn-sm ${selected ? "btn-primary" : "btn-outline-primary"}" type="button" data-select-scene-version="${version.id}">${selected ? "当前查看" : "查看此版本"}</button></div></article>`;
+    }).join("") : '<div class="empty-state compact-empty"><strong>暂无版本记录</strong></div>';
+  }
+
+  function openVersionHistory() {
+    renderVersionHistory();
+    const modalElement = byId("sceneVersionModal");
+    const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalElement);
+    if (!modal) { notify("页面缺少版本历史弹窗组件，请刷新后重试。", "warning"); return; }
+    modal.show();
+  }
+
+  function selectSceneVersion(versionId, { closeHistory = false } = {}) {
+    if (!state.scene?.versions.some((item) => Number(item.id) === Number(versionId))) return;
+    state.versionId = Number(versionId);
+    state.selectedNodeId = null;
+    clearWorkflowTest();
+    renderAll();
+    if (closeHistory) window.bootstrap?.Modal?.getInstance(byId("sceneVersionModal"))?.hide();
+  }
+
   function sceneApiEndpointUrl(contract) {
     return `${window.location.origin}${contract?.endpoint_path || ""}`;
   }
@@ -528,8 +560,111 @@
     delete extra.thinking_enabled;
     byId("directExtraParams").value = Object.keys(extra).length ? JSON.stringify(extra, null, 2) : "";
     ["directPrimaryVlm", "directReviewVlm", "directPrompt", "directTemperature", "directMaxTokens", "directThinking", "directExtraParams", "directSave", "directInputAdd"].forEach((id) => { byId(id).disabled = !isDraft(); });
-    byId("directDraftTip").textContent = isDraft() ? "草稿可随时测试" : "已发布版本只读；请先创建草稿版本";
+    byId("directDraftTip").textContent = isDraft() ? "草稿可保存、测试与发布" : "已发布版本只读，但可直接测试";
+    renderDirectPromptVariables(version);
+    renderDirectTestInputs(version);
     requestAnimationFrame(fitDirectDesignerToViewport);
+  }
+
+  function renderDirectPromptVariables(version) {
+    const container = byId("directPromptVariables");
+    const fields = schemaFields(version?.input_schema_json || {})
+      .filter((field) => {
+        const name = String(field?.name || "").trim();
+        return name && !imageInputNames.has(name.toLowerCase());
+      });
+    if (!fields.length) {
+      container.innerHTML = '<small>未定义可传入参数；图片由系统自动传入。</small>';
+      return;
+    }
+    const disabled = isDraft() ? "" : "disabled";
+    container.innerHTML = `<small>点击插入参数到提示词：测试时会用右侧填写的值替换。</small><div>${fields.map((field) => {
+      const name = String(field.name).trim();
+      const label = String(field.label || name).trim();
+      return `<button type="button" data-direct-prompt-variable="${escapeHtml(name)}" ${disabled} title="插入 {{ input.${escapeHtml(name)} }}">{{ input.${escapeHtml(name)} }} · ${escapeHtml(label)}</button>`;
+    }).join("")}</div>`;
+  }
+
+  function insertDirectPromptVariable(name) {
+    if (!isDraft()) return;
+    const prompt = byId("directPrompt");
+    const token = `{{ input.${name} }}`;
+    const start = Number.isInteger(prompt.selectionStart) ? prompt.selectionStart : prompt.value.length;
+    const end = Number.isInteger(prompt.selectionEnd) ? prompt.selectionEnd : start;
+    prompt.value = `${prompt.value.slice(0, start)}${token}${prompt.value.slice(end)}`;
+    const cursor = start + token.length;
+    prompt.focus();
+    prompt.setSelectionRange(cursor, cursor);
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function rememberDirectTestValues() {
+    document.querySelectorAll("[data-direct-test-input]").forEach((input) => {
+      const key = String(input.dataset.directTestInput || "").trim();
+      if (key) state.directTestValues[key] = input.value;
+    });
+  }
+
+  function directPromptInputReferences(prompt) {
+    const references = new Set();
+    const pattern = /\{\{\s*input\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+    let match;
+    while ((match = pattern.exec(String(prompt || ""))) !== null) references.add(match[1]);
+    return references;
+  }
+
+  function renderDirectTestInputs(version) {
+    rememberDirectTestValues();
+    const fields = schemaFields(version?.input_schema_json || {})
+      .filter((field) => {
+        const name = String(field?.name || "").trim();
+        return name && !imageInputNames.has(name.toLowerCase());
+      });
+    const section = byId("directTestInputs");
+    const container = byId("directTestInputFields");
+    const hint = byId("directTestInputHint");
+    if (!fields.length) {
+      section.hidden = true;
+      container.innerHTML = "";
+      hint.textContent = "";
+      return;
+    }
+    section.hidden = false;
+    const referenced = directPromptInputReferences(version?.prompt_template || "");
+    const notReferenced = fields
+      .map((field) => String(field.name).trim())
+      .filter((name) => !referenced.has(name));
+    hint.textContent = notReferenced.length
+      ? `提示词尚未引用：${notReferenced.join("、")}；填写后会传入场景，但不会影响 VLM 判断。`
+      : "填写的值会替换提示词中的对应变量。";
+    container.innerHTML = fields.map((field) => {
+      const name = String(field.name).trim();
+      const label = String(field.label || name).trim();
+      const type = String(field.type || "TEXT").toUpperCase();
+      const inputType = ["NUMBER", "INTEGER", "FLOAT"].includes(type) ? "number" : "text";
+      const value = state.directTestValues[name] ?? field.default ?? "";
+      const required = Boolean(field.required);
+      return `<label><span title="${escapeHtml(name)}">${escapeHtml(label)}${required ? " <em>必填</em>" : ""}</span><input class="form-control form-control-sm" type="${inputType}" data-direct-test-input="${escapeHtml(name)}" value="${escapeHtml(value)}" placeholder="输入 ${escapeHtml(label)}"></label>`;
+    }).join("");
+  }
+
+  function directTestContext() {
+    const version = currentVersion();
+    const fields = schemaFields(version?.input_schema_json || {})
+      .filter((field) => {
+        const name = String(field?.name || "").trim();
+        return name && !imageInputNames.has(name.toLowerCase());
+      });
+    const values = {};
+    for (const field of fields) {
+      const name = String(field.name).trim();
+      const input = document.querySelector(`[data-direct-test-input="${CSS.escape(name)}"]`);
+      const value = String(input?.value ?? "").trim();
+      if (field.required && !value) throw new Error(`请填写测试参数：${field.label || name}。`);
+      if (value) values[name] = value;
+      state.directTestValues[name] = value;
+    }
+    return values;
   }
 
   function nodeById(id) { return currentVersion()?.nodes.find((node) => node.id === Number(id)); }
@@ -1443,10 +1578,21 @@
   async function runDirectTest() {
     const file = byId("directTestImage").files?.[0];
     if (!file) { notify("请先上传测试图片。", "warning"); return; }
-    if (!await saveDirect({ quiet: true })) return;
+    let context;
+    try {
+      context = directTestContext();
+    } catch (error) {
+      notify(error.message, "warning");
+      return;
+    }
+    // Testing a published version must be read-only.  A draft is saved first
+    // so the uploaded image always executes exactly what the operator sees.
+    if (isDraft() && !await saveDirect({ quiet: true })) return;
     const form = new FormData(); form.append("image", file);
+    form.append("context_json", JSON.stringify(context));
     startDirectConversation();
-    appendConversation("user", "当前测试", `图片：${file.name}\n提示词已按左侧草稿保存。`);
+    const modeText = isDraft() ? "提示词已按左侧草稿保存。" : "正在测试当前已发布版本，配置不会被修改。";
+    appendConversation("user", "当前测试", `图片：${file.name}\n${modeText}${Object.keys(context).length ? `\n测试参数：${JSON.stringify(context)}` : ""}`);
     appendConversation("assistant pending", "VLM", "正在检测图片…");
     try {
       const result = await request(`${api}/scenarios/versions/${currentVersion().id}/preview-upload`, { method: "POST", body: form });
@@ -1742,7 +1888,12 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    byId("designerVersionSelect").addEventListener("change", (event) => { state.versionId = Number(event.target.value); state.selectedNodeId = null; clearWorkflowTest(); renderAll(); });
+    byId("designerVersionSelect").addEventListener("change", (event) => selectSceneVersion(event.target.value));
+    byId("designerVersionHistory").addEventListener("click", openVersionHistory);
+    byId("sceneVersionList").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-select-scene-version]");
+      if (button) selectSceneVersion(button.dataset.selectSceneVersion, { closeHistory: true });
+    });
     byId("designerSave").addEventListener("click", saveDesigner);
     byId("directSave").addEventListener("click", () => saveDirect());
     byId("designerClone").addEventListener("click", cloneVersion);
@@ -1752,6 +1903,11 @@
     byId("copySceneApiRequest").addEventListener("click", () => copySceneApiValue("request"));
     byId("copySceneApiResponse").addEventListener("click", () => copySceneApiValue("response"));
     byId("directTestImage").addEventListener("change", (event) => previewSelectedImage(event.target.files?.[0]));
+    byId("directTestInputFields").addEventListener("input", rememberDirectTestValues);
+    byId("directPromptVariables").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-direct-prompt-variable]");
+      if (button) insertDirectPromptVariable(button.dataset.directPromptVariable);
+    });
     byId("directRunTest").addEventListener("click", runDirectTest);
     byId("directClearResult").addEventListener("click", clearDirectConversation);
     window.addEventListener("resize", fitDirectDesignerToViewport);

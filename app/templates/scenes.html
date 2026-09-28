@@ -67,6 +67,6 @@
 
   <div class="modal fade" id="sceneCreateModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><div><small class="text-primary">INSPECTION SCENE</small><h2 class="modal-title fs-5">新建检测场景</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div><div class="modal-body"><form id="sceneCreateForm" class="stack-form"><label><span>场景名称</span><input class="form-control" name="name" placeholder="例如：AI 检测线束锁付" required autofocus></label><p class="muted-copy mb-0">场景编码会由系统自动生成；创建完成后进入设计页配置模型、提示词或流程画布。</p><div class="form-row"><label><span>分类</span><input class="form-control" name="category" value="HARNESS"></label><label><span>场景类型</span><select class="form-select" name="mode"><option value="VLM_DIRECT">VLM 检测</option><option value="WORKFLOW">流程检测</option></select></label></div><label><span>说明</span><textarea class="form-control" name="description" rows="3" placeholder="说明该场景检测什么、何时使用"></textarea></label><label><span>初始版本</span><input class="form-control" name="version" value="1.0"></label></form></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="createScene" type="button">创建并进入设计</button></div></div></div></div>
 </div>
-<link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scenes_index.js') }}?v=20260923-04"></script>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260928-02" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scenes_index.js') }}?v=20260928-02"></script>
 {% endblock %}

@@ -12,6 +12,7 @@
     <div class="scene-designer-actions">
       <select class="form-select form-select-sm" id="designerVersionSelect" aria-label="场景版本"></select>
       <span class="status-pill draft" id="designerVersionStatus">DRAFT</span>
+      <button class="btn btn-outline-secondary btn-sm" id="designerVersionHistory" type="button">版本历史</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerApi" type="button">接口调用</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerClone" type="button">新建草稿版本</button>
       <button class="btn btn-outline-primary btn-sm" id="designerSave" type="button">保存草稿</button>
@@ -20,6 +21,15 @@
   </header>
 
   <div id="designerAlert" class="scene-designer-alert"></div>
+
+  <div class="modal fade" id="sceneVersionModal" tabindex="-1" aria-labelledby="sceneVersionModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content scene-version-modal">
+        <div class="modal-header"><div><small>SCENE VERSION HISTORY</small><h2 class="modal-title fs-5" id="sceneVersionModalTitle">场景版本历史</h2></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+        <div class="modal-body"><p class="muted-copy">历史版本只读且可直接测试；选择任意版本查看其提示词或流程。需要修改时，先选择该版本并点击“新建草稿版本”。</p><div class="scene-version-list" id="sceneVersionList"></div></div>
+      </div>
+    </div>
+  </div>
 
   <div class="modal fade" id="sceneApiModal" tabindex="-1" aria-labelledby="sceneApiModalTitle" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -54,7 +64,7 @@
       <div class="stack-form compact-stack-form">
         <label><span>检测 VLM</span><select id="directPrimaryVlm" class="form-select"></select></label>
         <label><span>独立复核 VLM（可选）</span><select id="directReviewVlm" class="form-select"></select></label>
-        <label><span>检测提示词</span><textarea id="directPrompt" class="form-control direct-prompt-editor" rows="16" placeholder="清晰说明检测对象、OK/NG 标准、看不清时的处理方式以及 JSON 输出要求。"></textarea></label>
+        <label><span>检测提示词</span><textarea id="directPrompt" class="form-control direct-prompt-editor" rows="16" placeholder="清晰说明检测对象、OK/NG 标准、看不清时的处理方式以及 JSON 输出要求。"></textarea><div class="direct-prompt-variables" id="directPromptVariables"></div></label>
         <section class="node-parameter-section direct-input-parameter-section">
           <div class="node-parameter-heading"><div><strong>ROI 可传入参数</strong><small>图片由系统自动传入；这里的参数可供配方 ROI 绑定，也可在提示词中引用。</small></div><button class="node-parameter-add" id="directInputAdd" type="button" data-parameter-add="directInputParameters" title="添加参数"><span aria-hidden="true">＋</span>添加参数</button></div>
           <div class="node-parameter-columns"><span>参数键</span><span>参数名称</span><span aria-hidden="true"></span></div>
@@ -77,6 +87,10 @@
         <button class="btn btn-primary" id="directRunTest" type="button" disabled>开始检测</button>
         <button class="btn btn-outline-secondary" id="directClearResult" type="button" disabled>清空结果</button>
       </div>
+      <section class="direct-test-inputs" id="directTestInputs" hidden>
+        <div class="direct-test-inputs-heading"><div><small>TEST INPUTS</small><strong>本次测试参数</strong></div><span id="directTestInputHint"></span></div>
+        <div class="direct-test-input-grid" id="directTestInputFields"></div>
+      </section>
       <div class="direct-test-preview" id="directTestPreview"><div class="empty-state"><span>▧</span><strong>选择测试图片</strong><p>图片不会修改场景或生产数据，只用于当前草稿调试。</p></div></div>
       <div class="direct-conversation" id="directConversation"><div class="empty-state compact-empty"><span>◌</span><strong>等待测试</strong><p>上传图片并开始检测后，这里仅展示本次测试的结果。</p></div></div>
     </section>
@@ -148,8 +162,8 @@
     </aside>
   </section>
 </div>
-<link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20260921-02" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260923-04" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260923-04"></script>
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20260928-03" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20260928-03" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260928-03" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260928-03"></script>
 {% endblock %}

@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import PROJECT_ROOT
-from app.models.intelligence import Dataset, DatasetItem
+from app.models.intelligence import Dataset, DatasetItem, InspectionScenarioVersion
 
 
 logger = logging.getLogger(__name__)
@@ -43,13 +43,27 @@ def collect_roi_for_matching_datasets(
     source_path = Path(roi_image_path)
     if not source_path.is_file():
         return []
+    # A dataset is configured against a scenario's published version in the UI.
+    # Publishing a newer version must not silently stop collection for every
+    # recipe that uses the same logical scenario.  Match by parent scenario as
+    # well as the exact version, while retaining the configured version in the
+    # collection metadata for traceability.
+    executed_version = database.get(InspectionScenarioVersion, scenario_version_id)
+    if executed_version is None:
+        return []
+    bound_version = InspectionScenarioVersion.__table__.alias("collection_bound_version")
     datasets = database.scalars(
-        select(Dataset).where(
+        select(Dataset)
+        .join(
+            bound_version,
+            Dataset.collection_scenario_version_id == bound_version.c.id,
+        )
+        .where(
             Dataset.is_deleted.is_(False),
             Dataset.enabled.is_(True),
             Dataset.auto_collect_enabled.is_(True),
-            Dataset.collection_scenario_version_id == scenario_version_id,
             Dataset.media_type == "IMAGE",
+            bound_version.c.scenario_id == executed_version.scenario_id,
         )
     ).all()
     if not datasets:
@@ -94,6 +108,7 @@ def collect_roi_for_matching_datasets(
             annotation_json={
                 "collection": {
                     "scenario_version_id": scenario_version_id,
+                    "configured_scenario_version_id": dataset.collection_scenario_version_id,
                     "roi_id": roi_id,
                     "execution_id": execution_id,
                 }

@@ -293,7 +293,6 @@ class InspectionEngine:
             .where(
                 RoiScenarioBinding.roi_id.in_(roi_ids),
                 RoiScenarioBinding.enabled.is_(True),
-                InspectionScenarioVersion.status == "PUBLISHED",
             )
             .join(
                 InspectionScenarioVersion,
@@ -301,7 +300,44 @@ class InspectionEngine:
                 == InspectionScenarioVersion.id,
             )
         ).all()
-        return {binding.roi_id: binding for binding in bindings}
+
+        resolved: dict[int, RoiScenarioBinding] = {}
+        healed_binding = False
+        for binding in bindings:
+            version = binding.scenario_version
+            if version.status != "PUBLISHED":
+                # Older releases may still exist in a recipe created before
+                # the automatic rebind was introduced.  Heal the binding on
+                # first use by resolving the scenario's current published
+                # version.  This makes historical data safe without changing
+                # the immutable execution records that were already written.
+                scene = version.scenario
+                published_id = scene.published_version_id if scene else None
+                current = (
+                    database.scalar(
+                        select(InspectionScenarioVersion)
+                        .options(
+                            selectinload(InspectionScenarioVersion.scenario),
+                            selectinload(InspectionScenarioVersion.nodes),
+                            selectinload(InspectionScenarioVersion.edges),
+                        )
+                        .where(
+                            InspectionScenarioVersion.id == published_id,
+                            InspectionScenarioVersion.status == "PUBLISHED",
+                        )
+                    )
+                    if published_id
+                    else None
+                )
+                if current is None:
+                    continue
+                if binding.scenario_version_id != current.id:
+                    binding.scenario_version = current
+                    healed_binding = True
+            resolved[binding.roi_id] = binding
+        if healed_binding:
+            database.flush()
+        return resolved
 
     @staticmethod
     def _result_url_prefix(task_root: Path) -> str:

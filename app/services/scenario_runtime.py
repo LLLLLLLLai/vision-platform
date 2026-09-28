@@ -117,6 +117,22 @@ def _with_output_mapping(
     return result
 
 
+def _complete_workflow_end_output(
+    configured_output: dict[str, Any],
+    previous_output: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep custom end fields without losing the workflow's overall verdict."""
+
+    result = dict(configured_output)
+    previous = previous_output or {}
+    if result.get("result") in (None, ""):
+        for key in ("result", "confidence", "score", "reason"):
+            if key not in result and key in previous:
+                result[key] = previous[key]
+    result.setdefault("result", "UNCERTAIN")
+    return result
+
+
 def _trace_safe(value: Any) -> Any:
     """Preserve useful execution facts without exposing configured credentials."""
 
@@ -368,6 +384,8 @@ class ScenarioRuntime:
         )
         database.add(execution)
         database.flush()
+        if source == "PRODUCTION":
+            database.commit()
 
         started = time.perf_counter()
         runtime_context: dict[str, Any] = {"input": input_payload, "nodes": {}, "traces": []}
@@ -424,6 +442,8 @@ class ScenarioRuntime:
             execution.elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
             execution.completed_at = datetime.utcnow()
             database.flush()
+            if source == "PRODUCTION":
+                database.commit()
         return execution
 
     async def _run_definition(
@@ -666,7 +686,10 @@ class ScenarioRuntime:
                     trace_input = {"output": configured_output}
                     resolved = _render(configured_output, runtime_context) if configured_output else None
                     if isinstance(resolved, dict):
-                        result = resolved
+                        result = _complete_workflow_end_output(
+                            resolved,
+                            final_output if isinstance(final_output, dict) else None,
+                        )
                     else:
                         result = final_output or {"result": "UNCERTAIN"}
                     final_output = result

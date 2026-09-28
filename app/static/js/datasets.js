@@ -246,6 +246,10 @@
   function openDatasetCreate() {
     byId("datasetCreateForm").reset();
     fillCollectionScenarioSelect();
+    // Associating a scene means the operator intends to collect its production
+    // ROI samples.  Keep the switch on by default, while still allowing an
+    // explicit opt-out before creation.
+    byId("datasetAutoCollectEnabled").checked = Boolean(byId("datasetCollectionScenario").value);
     syncDatasetCreateMode();
     openModal("datasetCreateModal");
   }
@@ -900,6 +904,9 @@
     });
     byId("reloadDatasets").addEventListener("click", () => loadData().catch((error) => notify(error.message, "danger")));
     byId("datasetSearch").addEventListener("input", renderList);
+    byId("datasetCollectionScenario").addEventListener("change", (event) => {
+      byId("datasetAutoCollectEnabled").checked = Boolean(event.target.value);
+    });
     byId("datasetList").addEventListener("click", (event) => {
       const button = event.target.closest("[data-dataset-id]");
       if (button) selectDataset(button.dataset.datasetId);

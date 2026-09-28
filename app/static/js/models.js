@@ -31,6 +31,24 @@
     YOLO_SEGMENTATION: "YOLO 目标分割",
     YOLO_CLASSIFICATION: "YOLO 分类",
   }[taskType] || taskType);
+  const trainingProgress = (job) => {
+    const progress = job.result_json?.progress || {};
+    const fallback = {
+      QUEUED: [0, "等待调度"],
+      WAITING_GPU: [5, "等待 GPU"],
+      RUNNING: [20, "正在训练"],
+      COMPLETED: [100, "已完成"],
+      FAILED: [100, "训练失败"],
+      CANCELED: [100, "已停止"],
+    }[job.status] || [0, "等待调度"];
+    const rawPercent = Number(progress.percent);
+    const percent = Number.isFinite(rawPercent)
+      ? Math.max(0, Math.min(100, rawPercent))
+      : fallback[0];
+    const label = progress.label || fallback[1];
+    const state = progress.indeterminate && job.status === "RUNNING" ? " is-indeterminate" : "";
+    return `<div class="task-progress${state}" title="${escapeHtml(label)}"><div class="task-progress-track"><span style="width:${percent.toFixed(1)}%"></span></div><small>${escapeHtml(label)} · ${percent.toFixed(0)}%</small></div>`;
+  };
   const trainingMetricLabel = (key) => ({
     "metrics/mAP50-95(B)": "mAP50-95（检测）",
     "metrics/mAP50(B)": "mAP50（检测）",
@@ -212,12 +230,13 @@
         <td>${escapeHtml(splitText)}</td>
         <td>${mapKey ? escapeHtml(trainingMetricValue(mapKey, metrics[mapKey])) : "—"}</td>
         <td class="training-job-description" title="${escapeHtml(trainingJobDescription(job))}">${escapeHtml(trainingJobDescription(job))}</td>
+        <td>${trainingProgress(job)}</td>
         <td><span class="status-pill ${statusClass(job.status)}">${escapeHtml(job.status === "WAITING_GPU" ? "等待 GPU" : job.status)}</span></td>
         <td>${escapeHtml(formatDateTime(job.completed_at || job.created_at))}</td>
         <td><div class="table-action-group"><button class="btn btn-sm btn-outline-secondary" data-training-job-detail="${job.id}" type="button">详情</button>${canCancel ? `<button class="btn btn-sm btn-outline-danger" data-cancel-job="${job.id}" type="button">取消</button>` : ""}</div></td>
       </tr>`;
     }).join("");
-    byId("automationJobList").innerHTML = `<div class="task-table-wrap"><table class="task-table training-job-table"><thead><tr><th>任务</th><th>类型</th><th>版本</th><th>数据切分</th><th>核心指标</th><th>任务说明</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    byId("automationJobList").innerHTML = `<div class="task-table-wrap"><table class="task-table training-job-table"><thead><tr><th>任务</th><th>类型</th><th>版本</th><th>数据切分</th><th>核心指标</th><th>任务说明</th><th>进度</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function fillTrainingOptions({ preferredModelId = null, preferredDatasetId = null } = {}) {

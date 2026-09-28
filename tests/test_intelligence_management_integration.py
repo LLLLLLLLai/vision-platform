@@ -405,6 +405,7 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.database.expire_all()
         evaluation_job = self.database.get(AutomationJob, evaluation["job_id"])
         self.assertEqual(evaluation_job.result_json["metrics"]["false_accept"], 1)
+        self.assertEqual(evaluation_job.result_json["progress"]["percent"], 100)
 
         optimization = queue_prompt_optimization(
             PromptOptimizationRequest(
@@ -427,6 +428,7 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(optimized_job.result_json["detection_vlm_model_id"], self.primary_vlm_id)
         self.assertEqual(optimized_job.result_json["optimizer_vlm_model_id"], self.review_vlm_id)
         self.assertTrue(optimized_job.result_json["target_reached"])
+        self.assertEqual(optimized_job.result_json["progress"]["percent"], 100)
         self.assertEqual(
             optimized_job.result_json["optimization_requirements"],
             "优先降低漏判，保持 JSON 输出。",

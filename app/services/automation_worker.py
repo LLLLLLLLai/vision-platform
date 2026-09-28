@@ -6,6 +6,7 @@ worker processes are enabled, so they do not claim the same job.
 """
 
 import asyncio
+import json
 import re
 import subprocess
 import time
@@ -104,6 +105,106 @@ def _render_prompt_template(template: str, values: dict[str, Any]) -> str:
         return "" if value is None else str(value)
 
     return _PROMPT_VARIABLE.sub(replace, template)
+
+
+_DETECTION_TERMINAL_RESULTS = {"OK", "NG", "UNCERTAIN", "ERROR"}
+
+
+def _prompt_optimizer_system_prompt() -> str:
+    """Return the non-negotiable response contract for a prompt optimizer.
+
+    The detection prompt can itself require an ``OK``/``NG`` result. That
+    requirement must never be confused with the optimizer's own response: the
+    optimizer always returns a JSON object containing the new prompt.
+    """
+
+    return (
+        "你是工业视觉检测提示词编辑器，不执行图片检测，也不得给出本次检测的 OK、NG "
+        "或其他检测结论。用户的优化要求描述的是【生成后的检测提示词】应该如何约束检测模型，"
+        "不是你自身的最终输出要求。\n"
+        "无论用户要求中是否出现“result 只能返回 OK/NG”，你的最终响应都必须且只能是 JSON 对象："
+        '{"optimized_detection_prompt":"可直接交给检测模型使用的完整提示词",'
+        '"requirements_satisfied":true,"requirement_reason":"说明如何写入并满足用户要求"}。\n'
+        "特别说明：若用户要求检测模型的 result 只能是 OK 或 NG，应把该限制写进 "
+        "optimized_detection_prompt 字符串中；你自己绝不能仅输出 {\"result\":\"OK\"}、"
+        "{\"result\":\"NG\"} 或任何检测结论。即使开启思考模式，最终 content 也必须返回上述 JSON。"
+    )
+
+
+def _build_prompt_optimization_request(
+    *,
+    optimization_requirements: str,
+    current_prompt: str,
+    metrics: dict[str, Any],
+    preserved_variables: set[str],
+    input_values: dict[str, Any],
+) -> str:
+    """Separate the optimizer contract from the generated prompt contract."""
+
+    placeholder_text = ", ".join(
+        f"{{{{ {item} }}}}" for item in sorted(preserved_variables)
+    ) or "无"
+    sample_inputs = json.dumps(input_values, ensure_ascii=False, sort_keys=True)
+    return (
+        "请生成下一轮供【检测模型】直接使用的完整提示词。\n\n"
+        "【优化器自身返回格式】\n"
+        "你必须遵循系统消息中的 optimized_detection_prompt JSON 格式；不要返回任何检测结果。\n\n"
+        "【检测模型需要满足的用户优化要求】\n"
+        "以下内容只需要写入 optimized_detection_prompt，用来约束后续检测模型。"
+        "它不约束优化器自身的 JSON 输出。\n"
+        f"{optimization_requirements}\n\n"
+        "【必须保留的生产接口变量】\n"
+        "以下占位符属于生产接口契约，必须在 optimized_detection_prompt 中原样保留，不能改名或删除：\n"
+        f"{placeholder_text}\n"
+        "本次评测会以如下示例值渲染变量；示例值不是提示词正文的一部分：\n"
+        f"{sample_inputs}\n\n"
+        "【当前检测提示词】\n"
+        "<<<CURRENT_DETECTION_PROMPT\n"
+        f"{current_prompt}\n"
+        "CURRENT_DETECTION_PROMPT\n\n"
+        "【当前评测指标】\n"
+        f"{json.dumps(metrics, ensure_ascii=False, sort_keys=True)}\n\n"
+        "重点降低把 NG 判为 OK 的风险。保留当前检测目标和已有输出结构，"
+        "除非用户优化要求明确要改变检测模型的输出约定。"
+    )
+
+
+def _extract_optimized_detection_prompt(proposal: dict[str, Any]) -> str:
+    """Read the new prompt while accepting earlier field names for compatibility."""
+
+    for key in ("optimized_detection_prompt", "optimized_prompt", "prompt"):
+        value = proposal.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _optimizer_proposal_error(
+    proposal: dict[str, Any],
+    *,
+    preserved_variables: set[str],
+) -> str | None:
+    """Reject a detection verdict mistakenly returned as an optimizer response."""
+
+    prompt = _extract_optimized_detection_prompt(proposal)
+    if not prompt:
+        result = str(proposal.get("result") or "").strip().upper()
+        if result in _DETECTION_TERMINAL_RESULTS:
+            return (
+                "优化模型返回了检测结论，而不是 optimized_detection_prompt。"
+                "用户的 OK/NG 要求必须写入生成的检测提示词。"
+            )
+        return "优化模型未返回 optimized_detection_prompt。"
+    if prompt.upper() in _DETECTION_TERMINAL_RESULTS:
+        return "优化模型把检测结论当成了优化后的提示词。"
+    if len(prompt) < 16:
+        return "优化后的提示词过短，无法作为检测模型的完整指令。"
+    missing_variables = preserved_variables - _prompt_variables(prompt)
+    if missing_variables:
+        return "候选提示词缺少必须保留的变量：" + "、".join(
+            f"{{{{ {item} }}}}" for item in sorted(missing_variables)
+        )
+    return None
 
 
 def _is_transient_vlm_error(error: Exception) -> bool:
@@ -226,11 +327,57 @@ class AutomationWorker:
                 "canceled": True,
                 "canceled_at": datetime.utcnow().isoformat(),
                 "message": "任务已按请求停止；已保留当前已完成的样本和轮次结果。",
+                "progress": {
+                    "percent": 100,
+                    "stage": "CANCELED",
+                    "label": "已停止",
+                    "completed": True,
+                },
             }
         )
         job.result_json = result
         job.status = "CANCELED"
         job.completed_at = datetime.utcnow()
+        database.commit()
+
+    @staticmethod
+    def _set_job_progress(
+        database: Any,
+        job: AutomationJob,
+        *,
+        percent: float,
+        stage: str,
+        label: str,
+        current: int | None = None,
+        total: int | None = None,
+        indeterminate: bool = False,
+        completed: bool = False,
+    ) -> None:
+        """Persist compact, UI-friendly progress without changing job schema.
+
+        The durable JSON field keeps this backwards compatible with existing
+        SQLite/MySQL installations.  Progress is intentionally stage-based for
+        local YOLO training, because Ultralytics runs in a worker thread and
+        does not expose a reliable epoch callback in every supported release.
+        """
+
+        result = dict(job.result_json or {})
+        payload: dict[str, Any] = {
+            "percent": round(max(0.0, min(float(percent), 100.0)), 1),
+            "stage": stage,
+            "label": label,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        if current is not None:
+            payload["current"] = max(0, int(current))
+        if total is not None:
+            payload["total"] = max(0, int(total))
+        if indeterminate:
+            payload["indeterminate"] = True
+        if completed:
+            payload["completed"] = True
+        result["progress"] = payload
+        job.result_json = result
         database.commit()
 
     async def _judge_with_retry(
@@ -271,6 +418,71 @@ class AutomationWorker:
                     raise RuntimeError(f"{purpose}调用失败（{retry_text}）：{exc}") from exc
                 await asyncio.sleep(min(1.0 * attempt, 3.0))
 
+    async def _generate_optimized_prompt(
+        self,
+        optimizer: VlmModelConfig,
+        *,
+        optimization_prompt: str,
+        preserved_variables: set[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+        """Request a prompt proposal and repair one malformed optimizer reply.
+
+        A common ambiguity is a user requirement such as ``result 只能返回
+        OK/NG``. This method makes one explicit correction attempt when the
+        optimizer returns that verdict itself instead of a new detection prompt.
+        """
+
+        proposal, first_attempts = await self._judge_with_retry(
+            optimizer,
+            purpose="优化提示词 VLM",
+            prompt=optimization_prompt,
+            system_prompt=_prompt_optimizer_system_prompt(),
+        )
+        first_error = _optimizer_proposal_error(
+            proposal,
+            preserved_variables=preserved_variables,
+        )
+        if first_error is None:
+            return proposal, first_attempts, None
+
+        visible_response = {
+            key: value
+            for key, value in proposal.items()
+            if not key.startswith("_")
+        }
+        correction_prompt = (
+            f"{optimization_prompt}\n\n"
+            "【上一轮输出格式错误，必须修正】\n"
+            f"错误原因：{first_error}\n"
+            "上一轮响应摘要：\n"
+            f"{json.dumps(visible_response, ensure_ascii=False)[:4000]}\n"
+            "请不要执行检测或只返回 OK/NG。请重新输出完整 JSON，"
+            "并将用户关于检测 result 状态的要求写进 optimized_detection_prompt 字符串。"
+        )
+        repaired, repair_attempts = await self._judge_with_retry(
+            optimizer,
+            purpose="优化提示词 VLM 格式修复",
+            prompt=correction_prompt,
+            system_prompt=_prompt_optimizer_system_prompt(),
+        )
+        final_error = _optimizer_proposal_error(
+            repaired,
+            preserved_variables=preserved_variables,
+        )
+        attempts = dict(repair_attempts)
+        attempts.update(
+            {
+                "format_repair_attempted": True,
+                "format_repair_reason": first_error,
+                "initial_attempt": first_attempts,
+                "total_attempt_count": int(first_attempts.get("attempt_count", 0))
+                + int(repair_attempts.get("attempt_count", 0)),
+                "total_retry_count": int(first_attempts.get("retry_count", 0))
+                + int(repair_attempts.get("retry_count", 0)),
+            }
+        )
+        return repaired, attempts, final_error
+
     async def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -304,6 +516,13 @@ class AutomationWorker:
             job.status = "RUNNING"
             job.started_at = job.started_at or datetime.utcnow()
             database.commit()
+            self._set_job_progress(
+                database,
+                job,
+                percent=1,
+                stage="RUNNING",
+                label="任务已开始执行",
+            )
             try:
                 await self._dispatch(database, job)
             except Exception as exc:
@@ -316,6 +535,13 @@ class AutomationWorker:
                         "message": str(exc),
                         "failed_at": datetime.utcnow().isoformat(),
                         "retry_policy": "VLM 临时超时、网关和连接异常自动重试 1 次；非临时错误不重试。",
+                    }
+                    result["progress"] = {
+                        "percent": 100,
+                        "stage": "FAILED",
+                        "label": "执行失败",
+                        "completed": True,
+                        "updated_at": datetime.utcnow().isoformat(),
                     }
                     job.result_json = result
                     job.status = "FAILED"
@@ -368,12 +594,25 @@ class AutomationWorker:
         ]
         rows: list[tuple[str | None, str | None]] = []
         detail: list[dict[str, Any]] = []
-        for item in items:
+        total_items = len(items)
+        self._set_job_progress(
+            database,
+            job,
+            percent=0,
+            stage="EVALUATING",
+            label="正在准备场景评测",
+            current=0,
+            total=total_items,
+        )
+        for item_index, item in enumerate(items, start=1):
             if self._cancellation_requested(database, job):
                 self._finish_canceled(
                     database,
                     job,
-                    partial_result={"metrics": _metrics(rows), "items": detail},
+                    partial_result={
+                        "metrics": _metrics(rows),
+                        "items": detail,
+                    },
                 )
                 return
             execution = await scenario_runtime.execute(
@@ -394,6 +633,15 @@ class AutomationWorker:
                     "elapsed_ms": execution.elapsed_ms,
                 }
             )
+            self._set_job_progress(
+                database,
+                job,
+                percent=(item_index / total_items * 100) if total_items else 100,
+                stage="EVALUATING",
+                label=f"正在评测第 {item_index}/{total_items} 个样本",
+                current=item_index,
+                total=total_items,
+            )
             if self._cancellation_requested(database, job):
                 self._finish_canceled(
                     database,
@@ -401,7 +649,19 @@ class AutomationWorker:
                     partial_result={"metrics": _metrics(rows), "items": detail},
                 )
                 return
-        job.result_json = {"metrics": _metrics(rows), "items": detail}
+        job.result_json = {
+            "metrics": _metrics(rows),
+            "items": detail,
+            "progress": {
+                "percent": 100,
+                "stage": "COMPLETED",
+                "label": "场景评测完成",
+                "current": total_items,
+                "total": total_items,
+                "completed": True,
+                "updated_at": datetime.utcnow().isoformat(),
+            },
+        }
         job.status = "COMPLETED"
         job.completed_at = datetime.utcnow()
         database.commit()
@@ -471,7 +731,7 @@ class AutomationWorker:
         candidate_prompt = str(config.get("prompt_template") or version.prompt_template or "").strip()
         optimization_requirements = str(
             config.get("optimization_requirements")
-            or "保持当前检测目标和 JSON 输出约定，优先降低漏判风险。"
+            or "保持当前检测目标和输出字段约定，优先降低漏判风险。"
         ).strip()
         input_values = config.get("input_values")
         if not isinstance(input_values, dict):
@@ -481,6 +741,18 @@ class AutomationWorker:
         if not optimization_requirements:
             raise RuntimeError("请填写优化要求。")
         preserved_variables = _prompt_variables(candidate_prompt)
+        # Baseline evaluates every sample once; each following round adds one
+        # prompt-generation step and another full dataset evaluation.
+        planned_progress_units = max(1, len(items) + max_rounds * (len(items) + 1))
+        self._set_job_progress(
+            database,
+            job,
+            percent=0,
+            stage="BASELINE_EVALUATION",
+            label="正在评测基线提示词",
+            current=0,
+            total=planned_progress_units,
+        )
         best = await self._evaluate_prompt(
             database,
             job,
@@ -488,6 +760,9 @@ class AutomationWorker:
             candidate_prompt,
             items,
             input_values=input_values,
+            progress_offset=0,
+            progress_total=planned_progress_units,
+            progress_label="正在评测基线提示词",
         )
         if best.get("canceled"):
             self._finish_canceled(database, job, partial_result={"history": []})
@@ -528,52 +803,44 @@ class AutomationWorker:
                     },
                 )
                 return
-            placeholder_text = ", ".join(f"{{{{ {item} }}}}" for item in sorted(preserved_variables)) or "无"
-            optimization_prompt = (
-                "请基于当前检测提示词、测试指标和用户优化要求，生成下一轮供检测模型直接使用的完整提示词。\n"
-                "用户优化要求：\n"
-                f"{optimization_requirements}\n\n"
-                "必须保留或明确要求检测模型只输出 JSON，且 JSON 至少包含 result、confidence、reason；"
-                "看不清时应返回 UNCERTAIN。不要虚构图片中未提供的信息。\n"
-                "以下变量占位符属于生产接口契约，必须原样保留、不能改名或删除：\n"
-                f"{placeholder_text}\n"
-                "本次评测会自动以如下示例值渲染变量；这些值不是提示词正文的一部分：\n"
-                f"{input_values}\n"
-                f"当前提示词：{best_prompt}\n"
-                f"当前指标：{best.get('metrics', {})}\n"
-                "重点降低把 NG 判为 OK 的风险。"
+            round_offset = len(items) + (round_number - 1) * (len(items) + 1)
+            self._set_job_progress(
+                database,
+                job,
+                percent=round_offset / planned_progress_units * 100,
+                stage="GENERATING_PROMPT",
+                label=f"正在生成第 {round_number}/{max_rounds} 轮候选提示词",
+                current=round_offset,
+                total=planned_progress_units,
             )
-            proposal, optimizer_attempts = await self._judge_with_retry(
+            optimization_prompt = _build_prompt_optimization_request(
+                optimization_requirements=optimization_requirements,
+                current_prompt=best_prompt,
+                metrics=best.get("metrics", {}),
+                preserved_variables=preserved_variables,
+                input_values=input_values,
+            )
+            proposal, optimizer_attempts, proposal_error = await self._generate_optimized_prompt(
                 optimizer,
-                purpose="优化提示词 VLM",
-                prompt=optimization_prompt,
-                system_prompt=(
-                    "你是工业视觉检测提示词优化专家，不执行图片检测。"
-                    "仅输出 JSON 对象，格式为："
-                    "{\"prompt\":\"优化后的完整检测提示词\","
-                    "\"requirements_satisfied\":true,"
-                    "\"requirement_reason\":\"说明该提示词如何满足用户优化要求\"}。"
-                    "prompt 必须是可直接交给检测 VLM 使用的中文提示词。"
-                    "即使开启了思考模式，也必须在最终输出中返回上述 JSON，不要把提示词放在思考过程里。"
-                ),
+                optimization_prompt=optimization_prompt,
+                preserved_variables=preserved_variables,
             )
-            proposed_prompt = str(
-                proposal.get("prompt") or proposal.get("optimized_prompt") or ""
-            ).strip()
+            proposed_prompt = _extract_optimized_detection_prompt(proposal)
             same_as_current_best = proposed_prompt == best_prompt
             requirements_satisfied = bool(proposal.get("requirements_satisfied", False))
             requirement_reason = str(
                 proposal.get("requirement_reason") or proposal.get("reason") or ""
             ).strip()
-            if not proposed_prompt:
+            if proposal_error:
                 history.append(
                     {
                         "round": round_number,
                         "status": "SKIPPED",
-                        "reason": "优化 VLM 未生成可用的新提示词。",
+                        "optimizer_attempts": optimizer_attempts,
+                        "reason": proposal_error,
                     }
                 )
-                stop_reason = "优化模型未生成可用的新提示词。"
+                stop_reason = "优化模型未生成可用的新提示词；已自动进行一次格式修复。"
                 break
             missing_variables = preserved_variables - _prompt_variables(proposed_prompt)
             if missing_variables:
@@ -596,6 +863,9 @@ class AutomationWorker:
                 proposed_prompt,
                 items,
                 input_values=input_values,
+                progress_offset=round_offset + 1,
+                progress_total=planned_progress_units,
+                progress_label=f"正在评测第 {round_number}/{max_rounds} 轮候选提示词",
             )
             if metrics.get("canceled"):
                 self._finish_canceled(
@@ -665,6 +935,7 @@ class AutomationWorker:
                 "input_values": input_values,
                 "variable_placeholders": sorted(preserved_variables),
                 "message": "任务运行中，已保存当前完成的优化轮次。",
+                "progress": dict((job.result_json or {}).get("progress") or {}),
             }
             database.commit()
 
@@ -692,6 +963,15 @@ class AutomationWorker:
             "independent_optimizer": optimizer.id != detection_model.id,
             "input_values": input_values,
             "variable_placeholders": sorted(preserved_variables),
+            "progress": {
+                "percent": 100,
+                "stage": "COMPLETED",
+                "label": "场景优化完成",
+                "current": planned_progress_units,
+                "total": planned_progress_units,
+                "completed": True,
+                "updated_at": datetime.utcnow().isoformat(),
+            },
         }
         job.status = "COMPLETED"
         job.completed_at = datetime.utcnow()
@@ -706,12 +986,15 @@ class AutomationWorker:
         items: list[DatasetItem],
         *,
         input_values: dict[str, Any] | None = None,
+        progress_offset: int | None = None,
+        progress_total: int | None = None,
+        progress_label: str | None = None,
     ) -> dict[str, Any]:
         rows: list[tuple[str | None, str | None]] = []
         details: list[dict[str, Any]] = []
         values = input_values or {}
         total_retries = 0
-        for item in items:
+        for item_index, item in enumerate(items, start=1):
             if self._cancellation_requested(database, job):
                 metrics = _metrics(rows)
                 return {
@@ -744,6 +1027,17 @@ class AutomationWorker:
                     "model_retry_count": attempts.get("retry_count"),
                 }
             )
+            if progress_offset is not None and progress_total:
+                current = progress_offset + item_index
+                self._set_job_progress(
+                    database,
+                    job,
+                    percent=current / progress_total * 100,
+                    stage="EVALUATING_PROMPT",
+                    label=progress_label or "正在评测候选提示词",
+                    current=current,
+                    total=progress_total,
+                )
             if self._cancellation_requested(database, job):
                 metrics = _metrics(rows)
                 return {
@@ -771,6 +1065,12 @@ class AutomationWorker:
                 "required_gpu_memory_mb": required,
                 "reserve_gpu_memory_mb": settings.training_gpu_reserve_mb,
                 "available_gpu_memory_mb": free_memory,
+                "progress": {
+                    "percent": 5,
+                    "stage": "WAITING_GPU",
+                    "label": "等待可用 GPU 显存",
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
             }
             database.commit()
             return
@@ -812,8 +1112,22 @@ class AutomationWorker:
             "dataset_split": snapshot.get("dataset_split"),
             "training_validation": snapshot.get("training_validation"),
             "message": "GPU 资源满足要求，正在导出数据并启动本地 YOLO 训练。",
+            "progress": {
+                "percent": 15,
+                "stage": "PREPARING_TRAINING",
+                "label": "正在导出数据并准备训练",
+                "updated_at": datetime.utcnow().isoformat(),
+            },
         }
         database.commit()
+        self._set_job_progress(
+            database,
+            job,
+            percent=20,
+            stage="TRAINING",
+            label="YOLO 训练执行中，等待训练框架完成当前轮次",
+            indeterminate=True,
+        )
         try:
             training_result = await asyncio.to_thread(run_yolo_training, spec)
         except YoloTrainingError as exc:
@@ -861,6 +1175,13 @@ class AutomationWorker:
                 "artifact_paths_json": version.artifact_paths_json,
             },
             "message": "YOLO 训练完成，已生成草稿模型版本；请检查指标后手动发布。",
+            "progress": {
+                "percent": 100,
+                "stage": "COMPLETED",
+                "label": "模型训练完成",
+                "completed": True,
+                "updated_at": datetime.utcnow().isoformat(),
+            },
         }
         database.commit()
 

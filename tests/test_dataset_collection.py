@@ -111,6 +111,38 @@ class DatasetCollectionTests(unittest.TestCase):
             1,
         )
 
+    def test_collection_follows_the_logical_scene_after_a_new_version_is_published(self) -> None:
+        """Dataset collection must survive normal scene version publication."""
+
+        scene = self.database.get(InspectionScenario, self.scenario_version.scenario_id)
+        self.scenario_version.status = "ARCHIVED"
+        next_version = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.1",
+            status="PUBLISHED",
+        )
+        self.dataset.auto_collect_limit = 3
+        self.database.add(next_version)
+        self.database.commit()
+
+        collected = collection_module.collect_roi_for_matching_datasets(
+            self.database,
+            scenario_version_id=next_version.id,
+            execution_id=201,
+            roi_id=9,
+            source="PRODUCTION",
+            roi_image_path=str(self.roi_path),
+        )
+        self.database.commit()
+
+        self.assertEqual(len(collected), 1)
+        item = self.database.get(DatasetItem, collected[0])
+        self.assertEqual(
+            item.annotation_json["collection"]["configured_scenario_version_id"],
+            self.scenario_version.id,
+        )
+        self.assertEqual(item.annotation_json["collection"]["scenario_version_id"], next_version.id)
+
 
 if __name__ == "__main__":
     unittest.main()

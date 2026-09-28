@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine, select
@@ -284,6 +286,60 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
         first_group_paths = execute_mock.await_args_list[0].kwargs["image_paths"]
         self.assertEqual(len(first_group_paths), 1)
+
+    async def test_executes_two_images_for_one_recipe_as_independent_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            barcode = "CN000798263700002"
+            first_source = root / "camera_a" / f"ASSY-CAMERA1PICTURE1-{barcode}-A.jpg"
+            second_source = root / "camera_b" / f"ASSY-CAMERA1PICTURE1-{barcode}-B.jpg"
+            first_source.parent.mkdir(parents=True)
+            second_source.parent.mkdir(parents=True)
+            first_source.write_bytes(b"camera-a")
+            second_source.write_bytes(b"camera-b")
+            captured_paths: list[list[str]] = []
+
+            async def fake_execute(
+                _database: Session,
+                _recipe: Recipe,
+                sn: str,
+                image_paths: list[str],
+                **_: object,
+            ) -> dict:
+                self.assertEqual(sn, barcode)
+                captured_paths.append(list(image_paths))
+                return {
+                    "code": 0,
+                    "message": "success",
+                    "result": "OK",
+                    "image_paths": ["not-a-local-result-a.jpg", "not-a-local-result-b.jpg"],
+                    "image_results": [],
+                }
+
+            payload = PublicDetectRequest(
+                line="LINE01",
+                materialcode="MAT001",
+                operation="OP20",
+                times=1,
+                image_paths=[first_source.as_posix(), second_source.as_posix()],
+            )
+            with (
+                patch("app.api.routes.inspection.PROJECT_ROOT", root),
+                patch("app.api.routes.inspection.engine.execute", new=AsyncMock(side_effect=fake_execute)),
+            ):
+                response = await execute_filename_routed_inspection(payload, self.database)
+
+            self.assertEqual(response["code"], 0)
+            self.assertEqual(len(captured_paths), 2)
+            self.assertTrue(all(len(paths) == 1 for paths in captured_paths))
+            staged_paths = [Path(paths[0]) for paths in captured_paths]
+            self.assertEqual(len(staged_paths), 2)
+            self.assertNotEqual(staged_paths[0], staged_paths[1])
+            self.assertEqual(
+                {path.read_bytes() for path in staged_paths},
+                {b"camera-a", b"camera-b"},
+            )
+            self.assertTrue(all(path.name.startswith("01_") for path in staged_paths))
 
     async def test_routes_with_business_parameters_and_filename_camera(self) -> None:
         payload = PublicDetectRequest(
