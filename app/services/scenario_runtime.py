@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -211,6 +211,61 @@ def _parse_crop_bbox(raw_bbox: Any) -> tuple[float, float, float, float]:
     if not all(math.isfinite(item) for item in coordinates):
         raise ScenarioRuntimeError("图片裁剪节点的 bbox 坐标必须是有限数字。")
     return coordinates  # type: ignore[return-value]
+
+
+def _as_annotation_objects(raw_objects: Any, raw_bbox: Any) -> list[dict[str, Any]]:
+    """Normalize detector objects or a single bbox for the image-annotation node."""
+
+    objects_value = raw_objects
+    if isinstance(objects_value, dict) and isinstance(objects_value.get("objects"), list):
+        objects_value = objects_value["objects"]
+    if isinstance(objects_value, dict) and objects_value.get("bbox") is not None:
+        objects_value = [objects_value]
+    if isinstance(objects_value, (tuple, list)) and len(objects_value) == 4 and all(
+        isinstance(value, (int, float, str)) for value in objects_value
+    ):
+        objects_value = [{"bbox": objects_value}]
+
+    normalized: list[dict[str, Any]] = []
+    if isinstance(objects_value, (list, tuple)):
+        for index, item in enumerate(objects_value):
+            if isinstance(item, dict):
+                bbox_value = item.get("bbox", item.get("xyxy", item.get("coordinates")))
+                if bbox_value in (None, "", []):
+                    continue
+                try:
+                    bbox = _parse_crop_bbox(bbox_value)
+                except ScenarioRuntimeError:
+                    continue
+                normalized.append(
+                    {
+                        "index": item.get("index", index),
+                        "bbox": bbox,
+                        "label": item.get("label", item.get("class_name", "")),
+                        "confidence": item.get("confidence", item.get("score")),
+                        "mask": item.get("mask", item.get("polygon")),
+                        "mask_format": item.get("mask_format", item.get("polygon_format", "")),
+                    }
+                )
+            else:
+                try:
+                    bbox = _parse_crop_bbox(item)
+                except ScenarioRuntimeError:
+                    continue
+                normalized.append({"index": index, "bbox": bbox, "label": "", "confidence": None})
+
+    if raw_bbox not in (None, "", []):
+        bbox = _parse_crop_bbox(raw_bbox)
+        normalized.append({"index": len(normalized), "bbox": bbox, "label": "", "confidence": None})
+    return normalized
+
+
+def _uploads_asset_url(path: Path) -> str | None:
+    try:
+        relative = path.resolve().relative_to((PROJECT_ROOT / "uploads").resolve())
+    except ValueError:
+        return None
+    return f"/files/{relative.as_posix()}"
 
 
 def _normalize_result(value: Any) -> str:
@@ -669,6 +724,39 @@ class ScenarioRuntime:
                         execution_id=execution_id,
                         node_key=node.node_key,
                     )
+                elif node_type == "IMAGE_ANNOTATE":
+                    config = node.config_json or {}
+                    node_context = _node_input_mapping(config, runtime_context)
+                    node_runtime_context = {**runtime_context, "params": node_context}
+                    source_image_path = _resolve_node_image_path(
+                        node_context=node_context,
+                        config=config,
+                        render_context=node_runtime_context,
+                        fallback_image_path=image_path,
+                    )
+                    raw_objects = node_context.get("objects")
+                    if raw_objects in (None, "", []):
+                        raw_objects = _render(config.get("objects"), node_runtime_context)
+                    raw_bbox = node_context.get("bbox")
+                    if raw_bbox in (None, "", []):
+                        raw_bbox = _render(config.get("bbox"), node_runtime_context)
+                    trace_input = {
+                        "image_path": source_image_path,
+                        "objects": raw_objects,
+                        "bbox": raw_bbox,
+                        "draw_masks": bool(config.get("draw_masks", True)),
+                        "show_label": bool(config.get("show_label", True)),
+                        "show_confidence": bool(config.get("show_confidence", True)),
+                    }
+                    result = await asyncio.to_thread(
+                        self._execute_image_annotate,
+                        source_image_path,
+                        raw_objects,
+                        raw_bbox,
+                        config,
+                        execution_id=execution_id,
+                        node_key=node.node_key,
+                    )
                 elif node_type == "RULE":
                     trace_input = _node_input_mapping(node.config_json or {}, runtime_context)
                     result = self._execute_rule(node, runtime_context)
@@ -785,12 +873,125 @@ class ScenarioRuntime:
         return {
             "result": "OK",
             "image_path": str(output_path),
+            "image_url": _uploads_asset_url(output_path),
             "source_image_path": str(source_path),
             "requested_bbox": [round(value, 2) for value in (x1, y1, x2, y2)],
             "crop_bbox": [crop_left, crop_top, crop_right, crop_bottom],
             "width": crop_right - crop_left,
             "height": crop_bottom - crop_top,
             "padding_ratio": padding_ratio,
+        }
+
+    def _execute_image_annotate(
+        self,
+        image_path: str,
+        raw_objects: Any,
+        raw_bbox: Any,
+        config: dict[str, Any],
+        *,
+        execution_id: int | None,
+        node_key: str,
+    ) -> dict[str, Any]:
+        """Draw detector boxes (and segmentation polygons when available) onto an image."""
+
+        source_path = Path(image_path)
+        if not source_path.is_absolute():
+            source_path = PROJECT_ROOT / source_path
+        if not source_path.is_file():
+            raise ScenarioRuntimeError("图片画框节点无法读取输入图片。")
+        annotations = _as_annotation_objects(raw_objects, raw_bbox)
+        try:
+            line_width = int(config.get("line_width", 3))
+        except (TypeError, ValueError) as exc:
+            raise ScenarioRuntimeError("图片画框节点的线宽必须是整数。") from exc
+        line_width = max(1, min(line_width, 20))
+        draw_masks = bool(config.get("draw_masks", True))
+        show_label = bool(config.get("show_label", True))
+        show_confidence = bool(config.get("show_confidence", True))
+        label_prefix = str(config.get("label_prefix") or "").strip()
+        colors = ((41, 128, 255), (23, 164, 104), (240, 129, 43), (168, 85, 247), (225, 59, 77))
+
+        try:
+            with Image.open(source_path) as original:
+                image = ImageOps.exif_transpose(original).convert("RGB")
+                width, height = image.size
+                draw = ImageDraw.Draw(image, "RGBA")
+                try:
+                    font = ImageFont.load_default()
+                except Exception:
+                    font = None
+                rendered: list[dict[str, Any]] = []
+                for position, annotation in enumerate(annotations):
+                    x1, y1, x2, y2 = annotation["bbox"]
+                    left, right = sorted((max(0, x1), min(width, x2)))
+                    top, bottom = sorted((max(0, y1), min(height, y2)))
+                    if right <= left or bottom <= top:
+                        continue
+                    color = colors[position % len(colors)]
+                    polygon = annotation.get("mask")
+                    if draw_masks and isinstance(polygon, (list, tuple)):
+                        points: list[tuple[float, float]] = []
+                        for point in polygon:
+                            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                                continue
+                            try:
+                                point_x, point_y = float(point[0]), float(point[1])
+                            except (TypeError, ValueError):
+                                continue
+                            if str(annotation.get("mask_format") or "").upper() == "POLYGON_NORMALIZED":
+                                point_x *= width
+                                point_y *= height
+                            points.append((point_x, point_y))
+                        if len(points) >= 3:
+                            draw.polygon(points, fill=(*color, 52), outline=(*color, 230), width=line_width)
+                    draw.rectangle((left, top, right, bottom), outline=(*color, 255), width=line_width)
+                    text_parts: list[str] = []
+                    if label_prefix:
+                        text_parts.append(label_prefix)
+                    if show_label and annotation.get("label") not in (None, ""):
+                        text_parts.append(str(annotation["label"]))
+                    if show_confidence and annotation.get("confidence") not in (None, ""):
+                        try:
+                            text_parts.append(f"{float(annotation['confidence']):.2f}")
+                        except (TypeError, ValueError):
+                            text_parts.append(str(annotation["confidence"]))
+                    label = " ".join(text_parts)
+                    if label:
+                        text_y = max(0, top - 18)
+                        bbox = draw.textbbox((left + 3, text_y + 2), label, font=font)
+                        draw.rectangle((left, text_y, bbox[2] + 4, bbox[3] + 4), fill=(*color, 235))
+                        draw.text((left + 3, text_y + 2), label, fill=(255, 255, 255, 255), font=font)
+                    rendered.append(
+                        {
+                            "index": annotation.get("index", position),
+                            "label": annotation.get("label") or None,
+                            "confidence": annotation.get("confidence"),
+                            "bbox": [round(value, 2) for value in (left, top, right, bottom)],
+                            "has_mask": bool(annotation.get("mask")),
+                        }
+                    )
+        except ScenarioRuntimeError:
+            raise
+        except Exception as exc:
+            raise ScenarioRuntimeError(f"图片画框失败：{exc}") from exc
+
+        directory_name = str(execution_id) if execution_id is not None else "preview"
+        output_directory = PROJECT_ROOT / "uploads" / "scene_annotations" / directory_name
+        output_directory.mkdir(parents=True, exist_ok=True)
+        output_path = output_directory / f"{node_key}_{uuid4().hex[:12]}.jpg"
+        try:
+            image.save(output_path, format="JPEG", quality=95, optimize=True)
+        except Exception as exc:
+            raise ScenarioRuntimeError(f"无法保存图片画框结果：{exc}") from exc
+        return {
+            "result": "OK",
+            "image_path": str(output_path),
+            "image_url": _uploads_asset_url(output_path),
+            "source_image_path": str(source_path),
+            "annotation_count": len(rendered),
+            "annotations": rendered,
+            "width": width,
+            "height": height,
         }
 
     def _execute_rule(

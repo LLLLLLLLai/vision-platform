@@ -172,8 +172,30 @@
       <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="saveDatasetAnnotation" type="button">保存标注</button></div>
     </div></div>
   </div>
+
+  <div class="modal fade" id="datasetItemPreviewModal" tabindex="-1" aria-labelledby="datasetItemPreviewTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+      <div class="modal-content dataset-item-preview-modal">
+        <div class="modal-header">
+          <div>
+            <small class="text-primary">DATASET IMAGE PREVIEW</small>
+            <h2 class="modal-title fs-5" id="datasetItemPreviewTitle">查看素材</h2>
+            <p class="dataset-item-preview-meta mb-0" id="datasetItemPreviewMeta"></p>
+          </div>
+          <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body dataset-item-preview-body">
+          <img id="datasetItemPreviewImage" alt="数据集素材原图">
+        </div>
+        <div class="modal-footer">
+          <a class="btn btn-outline-primary" id="datasetItemPreviewOpenOriginal" href="#" target="_blank" rel="noopener">在新窗口打开原图</a>
+          <button class="btn btn-primary" type="button" data-bs-dismiss="modal">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260923-05" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260928-02"></script>
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260929-01" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260929-01"></script>
 {% endblock %}

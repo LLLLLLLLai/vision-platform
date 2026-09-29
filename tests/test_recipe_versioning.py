@@ -147,6 +147,32 @@ class RecipeVersioningTests(unittest.TestCase):
         self.assertEqual(draft.status, "PUBLISHED")
         self.assertEqual(len(rollback_draft.rois), 1)
 
+    def test_pass_through_recipe_publishes_without_base_image_or_rois(self) -> None:
+        pass_through = Recipe(
+            code="L01_MAT01_OP10_CAMERA2_P01",
+            name="相机 2 原图透传",
+            status="DRAFT",
+            execution_mode="PASS_THROUGH",
+            skip_reason="该视角仅留存图片。",
+            product_id=self.source.product_id,
+            station_id=self.source.station_id,
+            line_code="L01",
+            material_code="MAT01",
+            process_code="OP10",
+            camera_code="CAMERA2",
+            capture_index=1,
+        )
+        self.database.add(pass_through)
+        self.database.commit()
+
+        published = publish_recipe(pass_through.id, database=self.database)
+        self.database.refresh(pass_through)
+
+        self.assertEqual(published["status"], "PUBLISHED")
+        self.assertEqual(pass_through.status, "PUBLISHED")
+        self.assertEqual(pass_through.version, "V1")
+        self.assertEqual(len(pass_through.rois), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

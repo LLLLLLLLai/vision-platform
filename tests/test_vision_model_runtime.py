@@ -59,8 +59,12 @@ class VisionModelRuntimeTests(unittest.TestCase):
 
         self.assertEqual(output["result"], "OK")
         self.assertEqual(output["detection_count"], 1)
+        self.assertEqual(output["object_count"], 1)
+        self.assertEqual(output["image"]["width"], 40)
+        self.assertEqual(output["image"]["coordinate_space"], "PIXEL")
         self.assertEqual(output["objects"][0]["label"], "harness")
         self.assertEqual(output["objects"][0]["bbox"], [1.0, 2.0, 30.0, 34.0])
+        self.assertEqual(output["objects"][0]["bbox_format"], "XYXY_PIXEL")
 
     def test_detection_count_failure_is_reported_without_runtime_error(self) -> None:
         fake_result = SimpleNamespace(
@@ -110,6 +114,7 @@ class VisionModelRuntimeTests(unittest.TestCase):
 
         self.assertEqual(output["result"], "OK")
         self.assertEqual(output["objects"][0]["mask"], [[0.1, 0.2], [0.3, 0.2], [0.3, 0.4]])
+        self.assertEqual(output["objects"][0]["mask_format"], "POLYGON_NORMALIZED")
 
     def test_classification_output_exposes_top1_for_workflow_nodes(self) -> None:
         fake_result = SimpleNamespace(

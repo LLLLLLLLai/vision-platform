@@ -171,6 +171,20 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                     camera_code="CAMERA1",
                     capture_index=1,
                 ),
+                Recipe(
+                    code="LINE01-MAT001-OP20-CAMERA2-P1",
+                    name="Camera 2 passthrough",
+                    status="PUBLISHED",
+                    execution_mode="PASS_THROUGH",
+                    skip_reason="该相机图片只归档，不参与检测。",
+                    line_code="LINE01",
+                    material_code="MAT001",
+                    process_code="OP20",
+                    product_id=product.id,
+                    station_id=station.id,
+                    camera_code="CAMERA2",
+                    capture_index=1,
+                ),
             ]
         )
         self.database.commit()
@@ -396,6 +410,105 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["sn"], "CN000798263700002")
         self.assertEqual(execute_mock.await_count, 1)
 
+    async def test_pass_through_recipe_returns_original_path_without_model_or_smb(self) -> None:
+        source_path = r"\\caxaprdfile.catl.com\prd-file\AS15\ASSY-CAMERA2PICTURE1-CN000798263700002.jpg"
+        payload = PublicDetectRequest(
+            sn="CN000798263700002",
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+            image_paths=[source_path],
+        )
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(),
+        ) as execute_mock:
+            response = await execute_filename_routed_inspection(payload, self.database)
+
+        self.assertEqual(response["code"], 0)
+        self.assertEqual(response["result"], "OK")
+        self.assertEqual(response["image_paths"], [source_path])
+        self.assertEqual(execute_mock.await_count, 0)
+        detail = response["inspection_results"][0]
+        self.assertEqual(detail["result"], "SKIPPED")
+        self.assertTrue(detail["image_results"][0]["pass_through"])
+        self.assertEqual(
+            detail["image_results"][0]["skip_reason"],
+            "该相机图片只归档，不参与检测。",
+        )
+
+    async def test_mixed_inspection_and_pass_through_preserves_input_order(self) -> None:
+        first_path = "ASSY-CAMERA1PICTURE1-CN000798263700002-A.jpg"
+        second_path = "ASSY-CAMERA2PICTURE1-CN000798263700002-B.jpg"
+        payload = PublicDetectRequest(
+            sn="CN000798263700002",
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+            image_paths=[first_path, second_path],
+        )
+
+        async def fake_execute(*_: object, **__: object) -> dict:
+            return {
+                "code": 0,
+                "message": "success",
+                "result": "OK",
+                "image_paths": ["camera1_result.jpg"],
+                "request_id": "camera1-request",
+                "elapsed_ms": 7,
+                "image_results": [{"result": "OK", "inspection_items": []}],
+            }
+
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(side_effect=fake_execute),
+        ) as execute_mock:
+            response = await execute_filename_routed_inspection(payload, self.database)
+
+        self.assertEqual(response["code"], 0)
+        self.assertEqual(response["result"], "OK")
+        self.assertEqual(response["image_paths"], ["camera1_result.jpg", second_path])
+        self.assertEqual(execute_mock.await_count, 1)
+        self.assertEqual(
+            [item["result"] for item in response["inspection_results"]],
+            ["OK", "SKIPPED"],
+        )
+
+    async def test_unmatched_image_returns_error_without_skipping_matched_image(self) -> None:
+        matched_path = "ASSY-CAMERA1PICTURE1-CN000798263700002-A.jpg"
+        unmatched_path = "ASSY-CAMERA9PICTURE1-CN000798263700002-B.jpg"
+        payload = PublicDetectRequest(
+            sn="CN000798263700002",
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+            image_paths=[matched_path, unmatched_path],
+        )
+
+        async def fake_execute(*_: object, **__: object) -> dict:
+            return {
+                "code": 0,
+                "message": "success",
+                "result": "OK",
+                "image_paths": ["camera1_result.jpg"],
+                "image_results": [{"result": "OK", "inspection_items": []}],
+            }
+
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(side_effect=fake_execute),
+        ) as execute_mock:
+            response = await execute_filename_routed_inspection(payload, self.database)
+
+        self.assertEqual(response["code"], 2001)
+        self.assertEqual(response["result"], "ERROR")
+        self.assertIn("未找到已发布工艺配方", response["message"])
+        self.assertEqual(response["image_paths"], ["camera1_result.jpg", unmatched_path])
+        self.assertEqual(execute_mock.await_count, 1)
+
     async def test_public_detect_records_filename_barcode_and_returns_vendor_success_code(
         self,
     ) -> None:
@@ -437,6 +550,44 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.sn, "CN000798263700002")
         self.assertEqual(record.caller_ip, "10.20.30.40")
         self.assertEqual(record.request_payload["operation"], "OP20")
+
+    async def test_public_detect_records_pass_through_without_model_execution(self) -> None:
+        source_path = r"\\caxaprdfile.catl.com\prd-file\AS15\ASSY-CAMERA2PICTURE1-CN000798263700002.jpg"
+        payload = PublicDetectRequest(
+            sn="CN000798263700002",
+            line="LINE01",
+            materialCode="MAT001",
+            operation="OP20",
+            times=1,
+            image_paths=[source_path],
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/detect",
+                "headers": [],
+                "client": ("10.20.30.41", 12345),
+                "scheme": "http",
+                "query_string": b"",
+            }
+        )
+        with patch(
+            "app.api.routes.inspection.engine.execute",
+            new=AsyncMock(),
+        ) as execute_mock:
+            response = await public_detect(payload, request, self.database)
+
+        record = self.database.scalars(
+            select(DetectionApiCall).order_by(DetectionApiCall.id.desc())
+        ).first()
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(response["result"], "OK")
+        self.assertEqual(response["image_paths"], [source_path])
+        self.assertEqual(response["inspection_results"][0]["result"], "SKIPPED")
+        self.assertEqual(execute_mock.await_count, 0)
+        self.assertEqual(record.caller_ip, "10.20.30.41")
+        self.assertEqual(record.response_payload["inspection_results"][0]["result"], "SKIPPED")
 
 
 if __name__ == "__main__":

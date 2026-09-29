@@ -38,6 +38,15 @@ class Recipe(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     version: Mapped[str] = mapped_column(String(50), default="1.0")
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
+    # INSPECT executes configured ROI scenarios. PASS_THROUGH explicitly
+    # accepts a camera view that does not require visual inspection.
+    execution_mode: Mapped[str] = mapped_column(
+        String(30),
+        default="INSPECT",
+        server_default="INSPECT",
+        index=True,
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     project_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     station_id: Mapped[int] = mapped_column(ForeignKey("stations.id"))

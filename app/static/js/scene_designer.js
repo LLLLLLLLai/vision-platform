@@ -53,10 +53,10 @@
   const isDraft = () => currentVersion()?.status === "DRAFT";
   const modeLabel = (mode) => mode === "WORKFLOW" ? "流程检测" : "VLM 检测";
   const nodeTypeLabel = (type) => ({
-    START: "开始", END: "结束", VLM: "VLM 检测", VISION_MODEL: "训练模型", IMAGE_CROP: "图片裁剪", RULE: "规则判断", WEB_API: "Web 接口", IF: "条件分支", LOOP: "循环控制",
+    START: "开始", END: "结束", VLM: "VLM 检测", VISION_MODEL: "训练模型", IMAGE_CROP: "图片裁剪", IMAGE_ANNOTATE: "图片画框", RULE: "规则判断", WEB_API: "Web 接口", IF: "条件分支", LOOP: "循环控制",
   }[String(type || "").toUpperCase()] || type);
   const nodeTypeIcon = (type) => ({
-    START: "▶", END: "■", VLM: "◇", VISION_MODEL: "◉", IMAGE_CROP: "✂", RULE: "✓", WEB_API: "↗", IF: "?", LOOP: "↻",
+    START: "▶", END: "■", VLM: "◇", VISION_MODEL: "◉", IMAGE_CROP: "✂", IMAGE_ANNOTATE: "▣", RULE: "✓", WEB_API: "↗", IF: "?", LOOP: "↻",
   }[String(type || "").toUpperCase()] || "◇");
   const statusClass = (status) => {
     const value = String(status || "DRAFT").toLowerCase();
@@ -676,8 +676,9 @@
   }
   function defaultNodeConfig(type) {
     if (type === "VLM") return { vlm_mode: "CUSTOM", prompt: "请检查图片并严格按 JSON 返回 result、confidence、reason。", context: {}, vlm_parameters: { temperature: 0, max_tokens: 1024 } };
-    if (type === "VISION_MODEL") return { confidence: 0.25, iou: 0.45, expected_min_count: 1, context: {} };
+    if (type === "VISION_MODEL") return { confidence: 0.25, iou: 0.45, context: {} };
     if (type === "IMAGE_CROP") return { image_path: "{{ input.image_path }}", bbox: "", padding_ratio: 0.05, output_mapping: {} };
+    if (type === "IMAGE_ANNOTATE") return { image_path: "{{ input.image_path }}", objects: "", bbox: "", draw_masks: true, show_label: true, show_confidence: true, line_width: 3, output_mapping: {} };
     if (type === "RULE") return { actual: "{{ nodes.previous.result }}", operator: "EQUALS", expected: "OK" };
     if (type === "WEB_API") return { method: "POST", url: "", headers: {}, request_format: "JSON", body: {}, response_format: "JSON", context: {} };
     if (type === "IF") return { actual: "{{ nodes.previous.result }}", operator: "EQUALS", expected: "OK" };
@@ -685,7 +686,7 @@
     return {};
   }
   function nodeKeyFor(type) {
-    const prefix = ({ VLM: "vlm", VISION_MODEL: "model", IMAGE_CROP: "crop", RULE: "rule", WEB_API: "api", IF: "if", LOOP: "loop" }[type] || "node");
+    const prefix = ({ VLM: "vlm", VISION_MODEL: "model", IMAGE_CROP: "crop", IMAGE_ANNOTATE: "annotate", RULE: "rule", WEB_API: "api", IF: "if", LOOP: "loop" }[type] || "node");
     let index = 1;
     const keys = new Set((currentVersion()?.nodes || []).map((node) => node.node_key));
     while (keys.has(`${prefix}_${index}`)) index += 1;
@@ -884,17 +885,17 @@
     YOLO_DETECTION: {
       task_type: "YOLO_DETECTION", display_name: "YOLO 目标检测", summary: "输出目标列表、类别、置信度、数量和 bbox。",
       supports_objects: true, supports_bbox: true, supports_mask: false, supports_classification: false,
-      output_keys: ["result", "confidence", "reason", "task_type", "detection_count", "objects", "objects.0.class_id", "objects.0.label", "objects.0.confidence", "objects.0.bbox"],
+      output_keys: ["result", "confidence", "reason", "task_type", "image", "image.width", "image.height", "detection_count", "object_count", "objects", "objects.0.class_id", "objects.0.label", "objects.0.confidence", "objects.0.bbox", "objects.0.bbox_format"],
     },
     YOLO_SEGMENTATION: {
       task_type: "YOLO_SEGMENTATION", display_name: "YOLO 目标分割", summary: "当前 YOLO 分割适配器输出目标列表、bbox 和 mask。",
       supports_objects: true, supports_bbox: true, supports_mask: true, supports_classification: false,
-      output_keys: ["result", "confidence", "reason", "task_type", "detection_count", "objects", "objects.0.class_id", "objects.0.label", "objects.0.confidence", "objects.0.bbox", "objects.0.mask"],
+      output_keys: ["result", "confidence", "reason", "task_type", "image", "image.width", "image.height", "detection_count", "object_count", "objects", "objects.0.class_id", "objects.0.label", "objects.0.confidence", "objects.0.bbox", "objects.0.bbox_format", "objects.0.mask", "objects.0.mask_format"],
     },
     YOLO_CLASSIFICATION: {
       task_type: "YOLO_CLASSIFICATION", display_name: "YOLO 图像分类", summary: "输出 Top1 / Top5 类别和置信度，不输出 bbox。",
       supports_objects: false, supports_bbox: false, supports_mask: false, supports_classification: true,
-      output_keys: ["result", "confidence", "reason", "task_type", "classification", "classification.top1_class_id", "classification.top1_label", "classification.top1_confidence", "classification.top5"],
+      output_keys: ["result", "confidence", "reason", "task_type", "image", "image.width", "image.height", "classification", "classification.top1_class_id", "classification.top1_label", "classification.top1_confidence", "classification.top5"],
     },
   });
 
@@ -921,7 +922,8 @@
     const defaults = {
       VLM: ["result", "confidence", "reason"],
       VISION_MODEL: visionOutputKeysForNode(node),
-      IMAGE_CROP: ["result", "image_path", "source_image_path", "requested_bbox", "crop_bbox", "width", "height", "padding_ratio"],
+      IMAGE_CROP: ["result", "image_path", "image_url", "source_image_path", "requested_bbox", "crop_bbox", "width", "height", "padding_ratio"],
+      IMAGE_ANNOTATE: ["result", "image_path", "image_url", "source_image_path", "annotation_count", "annotations", "width", "height"],
       RULE: ["result", "actual", "expected", "operator"],
       IF: ["result", "branch", "actual", "expected", "operator"],
       WEB_API: ["result", "confidence", "status_code", "response"],
@@ -1211,6 +1213,29 @@
     return profile.supports_bbox ? null : `“${source.name}”是${profile.display_name}，不输出 bbox，不能作为裁剪框来源。`;
   }
 
+  function annotationSourceHint(node) {
+    const upstream = (currentVersion()?.nodes || []).filter((item) => (
+      item.enabled && item.node_type === "VISION_MODEL" && upstreamNodeKeys(node).has(item.node_key)
+    ));
+    if (!upstream.length) return '<p>可填写固定 bbox，或先连接一个上游目标检测/分割节点。</p>';
+    const geometry = upstream.filter((item) => visionOutputProfile(selectedVisionModelVersion(item.config_json?.model_version_id)).supports_bbox);
+    const classification = upstream.filter((item) => !visionOutputProfile(selectedVisionModelVersion(item.config_json?.model_version_id)).supports_bbox);
+    return `<p>${geometry.length ? `可画框模型：${geometry.map((item) => `<code>${escapeHtml(item.name)}</code>`).join("、")}。推荐把“目标列表”设为 <code>{{ nodes.模型节点.objects }}</code>。` : "当前上游没有可画框模型，请填写固定 bbox 或接入目标检测/分割模型。"}${classification.length ? `<br><span class="node-model-compatibility-warning">${classification.map((item) => escapeHtml(item.name)).join("、")}为分类模型，不输出坐标，不能用于画框。</span>` : ""}</p>`;
+  }
+
+  function annotationGeometryCompatibilityError(objects, bbox) {
+    const objectMatch = String(objects || "").trim().match(/^\{\{\s*nodes\.([A-Za-z0-9_-]+)\.objects\s*\}\}$/);
+    const bboxMatch = String(bbox || "").trim().match(/^\{\{\s*nodes\.([A-Za-z0-9_-]+)\.objects(?:\.\d+)?\.bbox\s*\}\}$/);
+    const match = objectMatch || bboxMatch;
+    if (!match) return null;
+    const source = nodeByKey(match[1]);
+    if (!source || source.node_type !== "VISION_MODEL") return null;
+    const profile = visionOutputProfile(selectedVisionModelVersion(source.config_json?.model_version_id));
+    if (objectMatch && !profile.supports_objects) return `“${source.name}”是${profile.display_name}，不输出目标列表，不能用于画框。`;
+    if (bboxMatch && !profile.supports_bbox) return `“${source.name}”是${profile.display_name}，不输出 bbox，不能用于画框。`;
+    return null;
+  }
+
   function workflowVlmMode(config) {
     const configured = String(config?.vlm_mode || "").toUpperCase();
     if (configured === "SCENE" || configured === "CUSTOM") return configured;
@@ -1373,13 +1398,15 @@
       const profile = visionOutputProfile(selectedModel);
       const classification = profile.supports_classification;
       const taskFields = classification
-        ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>分类模型输出 <code>classification.top1_label</code>。如需对检测框内的局部图片分类，请先接入“图片裁剪”节点，再在下方输入参数中将 <code>image_path</code> 映射为裁剪节点输出。</p></div><div class="form-row"><label><span>期望类别</span><input id="nodeExpectedLabel" class="form-control" value="${escapeHtml(config.expected_label || config.expected_class || "")}" placeholder="例如 locked" ${readonly ? "readonly" : ""}></label><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label></div>`
+        ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>分类模型只输出 <code>classification.top1_label</code> 和 Top5，不产生坐标。期望类别留空时，节点只返回原始预测；需要 OK/NG 时请在后面接“规则判断”节点。</p></div><div class="form-row"><label><span>期望类别（可选）</span><input id="nodeExpectedLabel" class="form-control" value="${escapeHtml(config.expected_label || config.expected_class || "")}" placeholder="例如 locked" ${readonly ? "readonly" : ""}></label><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label></div>`
         : profile.supports_objects
-          ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>${profile.supports_bbox ? '可把 <code>objects.0.bbox</code> 传给“图片裁剪”节点，再把裁剪图片交给下游 VLM 或分类模型。' : '该模型输出目标结果但未声明 bbox；不能直接连接图片裁剪节点。'}</p></div><div class="form-row"><label><span>期望类别（可选）</span><input id="nodeExpectedClass" class="form-control" value="${escapeHtml(config.expected_class || "")}" placeholder="例如 harness" ${readonly ? "readonly" : ""}></label><label><span>最小数量</span><input id="nodeExpectedMinCount" class="form-control" type="number" min="0" value="${escapeHtml(config.expected_min_count ?? 1)}" ${readonly ? "readonly" : ""}></label></div><div class="form-row"><label><span>最大数量（可选）</span><input id="nodeExpectedMaxCount" class="form-control" type="number" min="0" value="${escapeHtml(config.expected_max_count ?? "")}" ${readonly ? "readonly" : ""}></label><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label></div><label><span>IoU 阈值</span><input id="nodeIou" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.iou ?? 0.45)}" ${readonly ? "readonly" : ""}></label>`
+          ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>${profile.supports_bbox ? '模型输出 <code>objects</code>、<code>objects.0.bbox</code>；可接“图片画框”显示全部目标，或接“图片裁剪”处理一个局部。未填写数量规则时，只返回原始模型输出。' : '该模型未声明 bbox；不能连接图片裁剪或图片画框节点。'}</p></div><div class="form-row"><label><span>期望类别（可选）</span><input id="nodeExpectedClass" class="form-control" value="${escapeHtml(config.expected_class || "")}" placeholder="例如 harness" ${readonly ? "readonly" : ""}></label><label><span>最小数量（可选）</span><input id="nodeExpectedMinCount" class="form-control" type="number" min="0" value="${escapeHtml(config.expected_min_count ?? "")}" placeholder="不填则仅输出结果" ${readonly ? "readonly" : ""}></label></div><div class="form-row"><label><span>最大数量（可选）</span><input id="nodeExpectedMaxCount" class="form-control" type="number" min="0" value="${escapeHtml(config.expected_max_count ?? "")}" ${readonly ? "readonly" : ""}></label><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label></div><label><span>IoU 阈值</span><input id="nodeIou" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.iou ?? 0.45)}" ${readonly ? "readonly" : ""}></label>`
           : `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>请先由该模型适配器声明实际输出字段后，再把特定字段映射给后续节点。</p></div><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label>`;
       fields = `<label><span>已发布训练模型版本</span><select id="nodeVisionModelVersion" class="form-select" ${readonly ? "disabled" : ""}>${modelVersionOptions(config.model_version_id)}</select></label>${taskFields}${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_CROP") {
       fields = `<div class="node-model-task-note"><strong>将定位框转换为局部图片</strong><p>bbox 使用像素坐标 <code>[x1, y1, x2, y2]</code>。点击字段右侧 <code>{ }</code>，从可用上游节点中选择图片或 bbox；固定坐标也可以直接填写。</p>${cropBboxSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeCropImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", ariaLabel: "输入图片", readonly })}${variableFieldMarkup({ label: "裁剪框（bbox）", id: "nodeCropBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", ariaLabel: "裁剪框", readonly })}<label><span>边缘扩展比例</span><input id="nodeCropPadding" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.padding_ratio ?? 0.05)}" ${readonly ? "readonly" : ""}></label>${outputMappingMarkup(config, readonly)}`;
+    } else if (node.node_type === "IMAGE_ANNOTATE") {
+      fields = `<div class="node-model-task-note"><strong>在检测结果图上画框</strong><p>目标检测可传入全部 <code>objects</code>；分割模型会额外显示轮廓。分类模型没有坐标，不适合本节点。输出的 <code>image_path</code> 可返回给接口或继续交给下游 VLM。</p>${annotationSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeAnnotateImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", ariaLabel: "画框输入图片", readonly })}${variableFieldMarkup({ label: "目标列表（推荐）", id: "nodeAnnotateObjects", value: config.objects || "", placeholder: "{{ nodes.model_1.objects }}", scope: "INPUT", ariaLabel: "画框目标列表", readonly })}${variableFieldMarkup({ label: "单个框（可选）", id: "nodeAnnotateBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", ariaLabel: "画框单个框", readonly })}<div class="form-row"><label><span>线宽</span><input id="nodeAnnotateLineWidth" class="form-control" type="number" min="1" max="20" step="1" value="${escapeHtml(config.line_width ?? 3)}" ${readonly ? "readonly" : ""}></label><label><span>标签前缀（可选）</span><input id="nodeAnnotateLabelPrefix" class="form-control" value="${escapeHtml(config.label_prefix || "")}" placeholder="例如 检测结果" ${readonly ? "readonly" : ""}></label></div><div class="node-annotate-options"><label><input id="nodeAnnotateShowLabel" type="checkbox" ${config.show_label !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示类别标签</label><label><input id="nodeAnnotateShowConfidence" type="checkbox" ${config.show_confidence !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示置信度</label><label><input id="nodeAnnotateDrawMasks" type="checkbox" ${config.draw_masks !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 分割模型显示轮廓</label></div>${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "RULE" || node.node_type === "IF") {
       const isIf = node.node_type === "IF";
       fields = `${variableFieldMarkup({ label: isIf ? "判断值" : "实际值", id: "nodeActual", value: config.actual || "", placeholder: "{{ nodes.vlm_1.result }}", scope: "INPUT", ariaLabel: isIf ? "判断值" : "实际值", readonly })}<div class="form-row"><label><span>运算符</span><select id="nodeOperator" class="form-select" ${readonly ? "disabled" : ""}>${["EQUALS", "CONTAINS", "EXISTS", "NUMBER_EQUALS", "NUMBER_GT", "NUMBER_GTE", "NUMBER_LT", "NUMBER_LTE"].map((operator) => `<option value="${operator}" ${config.operator === operator ? "selected" : ""}>${operator}</option>`).join("")}</select></label>${variableFieldMarkup({ label: "期望值", id: "nodeExpected", value: config.expected ?? "", scope: "INPUT", ariaLabel: "期望值", readonly })}</div>${inputMappingMarkup(config, node, readonly)}${isIf ? '<p class="muted-copy">条件分支会输出 <code>branch=true/false</code>。选中该节点后，可在下方设置每条连线对应的分支。</p>' : ""}${outputMappingMarkup(config, readonly)}`;
@@ -1657,6 +1684,12 @@
     return `<div class="workflow-final-result-summary ${workflowResultBadgeClass(label)}"><span>${escapeHtml(label)}</span><p>${escapeHtml(reason)}</p></div><pre>${escapeHtml(formatWorkflowTraceValue(finalOutput))}</pre>`;
   }
 
+  function workflowTraceArtifactMarkup(output) {
+    const imageUrl = String(output?.image_url || "").trim();
+    if (!imageUrl) return "";
+    return `<a class="workflow-trace-artifact" href="${escapeHtml(imageUrl)}" target="_blank" rel="noopener"><img src="${escapeHtml(imageUrl)}?v=${Date.now()}" alt="节点图片输出"><span>查看节点图片输出 ↗</span></a>`;
+  }
+
   function renderWorkflowTestResult(execution) {
     const panel = byId("workflowTestPanel");
     const stage = document.querySelector(".workflow-stage-panel");
@@ -1669,7 +1702,7 @@
     setWorkflowTestRunMeta({ result, elapsed: execution.elapsed_ms, traceCount: traces.length });
     byId("workflowTestFinalOutput").innerHTML = workflowFinalOutputMarkup(result, finalOutput, execution.error_message || "");
     byId("workflowTestTraceList").innerHTML = traces.length
-      ? traces.map((trace, index) => `<details class="workflow-trace-card" ${index === traces.length - 1 ? "open" : ""}><summary><div><span class="workflow-trace-index">${index + 1}</span><div><strong>${escapeHtml(trace.node_name || trace.node_key || "节点")}</strong><small>${escapeHtml(nodeTypeLabel(trace.node_type || ""))} · ${escapeHtml(trace.node_key || "")}</small></div></div><div class="workflow-trace-summary-meta"><span class="workflow-trace-status ${workflowTraceStatus(trace.status)}">${escapeHtml(trace.status || "UNCERTAIN")}</span><b>${escapeHtml(trace.elapsed_ms ?? 0)} ms</b><i>⌄</i></div></summary><div class="workflow-trace-detail"><section><header><small>节点输入</small><span>完整参数</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.input))}</pre></section><section><header><small>节点输出</small><span>完整结果</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.output))}</pre></section></div></details>`).join("")
+      ? traces.map((trace, index) => `<details class="workflow-trace-card" ${index === traces.length - 1 ? "open" : ""}><summary><div><span class="workflow-trace-index">${index + 1}</span><div><strong>${escapeHtml(trace.node_name || trace.node_key || "节点")}</strong><small>${escapeHtml(nodeTypeLabel(trace.node_type || ""))} · ${escapeHtml(trace.node_key || "")}</small></div></div><div class="workflow-trace-summary-meta"><span class="workflow-trace-status ${workflowTraceStatus(trace.status)}">${escapeHtml(trace.status || "UNCERTAIN")}</span><b>${escapeHtml(trace.elapsed_ms ?? 0)} ms</b><i>⌄</i></div></summary><div class="workflow-trace-detail">${workflowTraceArtifactMarkup(trace.output)}<section><header><small>节点输入</small><span>完整参数</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.input))}</pre></section><section><header><small>节点输出</small><span>完整结果</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.output))}</pre></section></div></details>`).join("")
       : `<div class="empty-state compact-empty"><span>!</span><strong>流程未产生节点追踪</strong><p>${escapeHtml(execution.error_message || "请检查节点配置和连接关系。")}</p><pre>${escapeHtml(formatWorkflowTraceValue(finalOutput))}</pre></div>`;
   }
 
@@ -1779,15 +1812,17 @@
         config.confidence = Number(byId("nodeConfidence").value);
         if (profile.supports_classification) {
           const expectedLabel = byId("nodeExpectedLabel").value.trim();
-          if (!expectedLabel) throw new Error("分类模型需要填写期望类别。");
-          config.expected_label = expectedLabel;
+          if (expectedLabel) config.expected_label = expectedLabel;
+          else delete config.expected_label;
           delete config.expected_class;
           delete config.expected_min_count;
           delete config.expected_max_count;
           delete config.iou;
         } else if (profile.supports_objects) {
           config.expected_class = byId("nodeExpectedClass").value.trim() || null;
-          config.expected_min_count = Number(byId("nodeExpectedMinCount").value);
+          const expectedMinText = byId("nodeExpectedMinCount").value.trim();
+          if (expectedMinText) config.expected_min_count = Number(expectedMinText);
+          else delete config.expected_min_count;
           const expectedMaxText = byId("nodeExpectedMaxCount").value.trim();
           if (expectedMaxText) config.expected_max_count = Number(expectedMaxText);
           else delete config.expected_max_count;
@@ -1812,6 +1847,24 @@
         config.bbox = bbox;
         config.padding_ratio = Number(byId("nodeCropPadding").value);
         if (!Number.isFinite(config.padding_ratio) || config.padding_ratio < 0 || config.padding_ratio > 1) throw new Error("边缘扩展比例必须在 0 到 1 之间。");
+        config.output_mapping = readParameterRows("nodeOutputParameters", "节点输出参数");
+      } else if (node.node_type === "IMAGE_ANNOTATE") {
+        const objects = byId("nodeAnnotateObjects").value.trim();
+        const bbox = byId("nodeAnnotateBbox").value.trim();
+        if (!objects && !bbox) throw new Error("请配置目标列表或单个 bbox；通常引用上游模型的 objects。");
+        const compatibilityError = annotationGeometryCompatibilityError(objects, bbox);
+        if (compatibilityError) throw new Error(compatibilityError);
+        config.image_path = byId("nodeAnnotateImagePath").value.trim() || "{{ input.image_path }}";
+        config.objects = objects;
+        config.bbox = bbox;
+        config.line_width = Number(byId("nodeAnnotateLineWidth").value);
+        if (!Number.isFinite(config.line_width) || config.line_width < 1 || config.line_width > 20) throw new Error("画框线宽必须在 1 到 20 之间。");
+        config.label_prefix = byId("nodeAnnotateLabelPrefix").value.trim();
+        config.show_label = Boolean(byId("nodeAnnotateShowLabel").checked);
+        config.show_confidence = Boolean(byId("nodeAnnotateShowConfidence").checked);
+        config.draw_masks = Boolean(byId("nodeAnnotateDrawMasks").checked);
+        config.input_mapping = readParameterRows("nodeInputParameters", "节点输入参数");
+        config.context = config.input_mapping;
         config.output_mapping = readParameterRows("nodeOutputParameters", "节点输出参数");
       } else if (node.node_type === "RULE" || node.node_type === "IF") {
         config.actual = byId("nodeActual").value.trim(); config.operator = byId("nodeOperator").value; config.expected = byId("nodeExpected").value.trim();

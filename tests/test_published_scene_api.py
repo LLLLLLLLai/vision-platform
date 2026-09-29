@@ -1,8 +1,12 @@
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import unittest
 
 import httpx
+from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -14,9 +18,11 @@ from app.main import app
 from app.models.intelligence import (
     InspectionScenario,
     InspectionScenarioVersion,
+    ScenarioEdge,
     ScenarioExecution,
     ScenarioNode,
 )
+from app.services import scenario_runtime as runtime_module
 
 
 class PublishedSceneApiTests(unittest.IsolatedAsyncioTestCase):
@@ -212,6 +218,139 @@ class PublishedSceneApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("期望文字", missing.json()["detail"])
         self.assertEqual(unknown.status_code, 422)
         self.assertIn("unexpected", unknown.json()["detail"])
+
+    async def test_published_workflow_api_runs_detector_then_annotation_node(self) -> None:
+        scene = InspectionScenario(
+            code="API_ANNOTATE",
+            name="外部画框流程场景",
+            category="TEST",
+            mode="WORKFLOW",
+        )
+        self.database.add(scene)
+        self.database.flush()
+        version = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.0",
+            status="PUBLISHED",
+        )
+        self.database.add(version)
+        self.database.flush()
+        self.database.add_all((
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="start",
+                name="开始",
+                node_type="START",
+                sort_order=0,
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="detector",
+                name="线束检测",
+                node_type="VISION_MODEL",
+                sort_order=1,
+                config_json={"model_version_id": 999},
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="annotate",
+                name="绘制检测结果",
+                node_type="IMAGE_ANNOTATE",
+                sort_order=2,
+                config_json={
+                    "image_path": "{{ input.image_path }}",
+                    "objects": "{{ nodes.detector.objects }}",
+                },
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
+                node_key="end",
+                name="结束",
+                node_type="END",
+                sort_order=3,
+                config_json={
+                    "output": {
+                        "result": "{{ nodes.detector.result }}",
+                        "result_image_path": "{{ nodes.annotate.image_path }}",
+                        "object_count": "{{ nodes.detector.object_count }}",
+                    }
+                },
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="start",
+                target_node_key="detector",
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="detector",
+                target_node_key="annotate",
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="annotate",
+                target_node_key="end",
+            ),
+        ))
+        scene.published_version_id = version.id
+        self.database.commit()
+
+        original_selector = runtime_module._select_published_vision_model
+        original_inference = runtime_module.run_yolo_inference
+        artifact_path: Path | None = None
+
+        def fake_inference(_spec, _image_path, *, config):
+            self.assertNotIn("expected_min_count", config)
+            return {
+                "result": "OK",
+                "confidence": 0.97,
+                "reason": "检测到线束端子",
+                "task_type": "YOLO_DETECTION",
+                "objects": [{
+                    "index": 0,
+                    "label": "harness_terminal",
+                    "confidence": 0.97,
+                    "bbox": [8, 10, 46, 34],
+                    "bbox_format": "XYXY_PIXEL",
+                }],
+                "detection_count": 1,
+                "object_count": 1,
+            }
+
+        runtime_module._select_published_vision_model = lambda _database, _node: SimpleNamespace(
+            version_id=999,
+            model_code="AI_HARNESS",
+            task_type="YOLO_DETECTION",
+        )
+        runtime_module.run_yolo_inference = fake_inference
+        try:
+            with TemporaryDirectory() as directory:
+                input_image = Path(directory) / "input.jpg"
+                Image.new("RGB", (64, 48), "white").save(input_image)
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                    response = await client.post(
+                        "/api/v1/scenarios/invoke/API_ANNOTATE",
+                        json={"request_id": "annotate-001", "image_path": str(input_image), "inputs": {}},
+                    )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["code"], 0, payload)
+            self.assertEqual(payload["result"], "OK")
+            self.assertEqual(payload["output"]["object_count"], 1)
+            artifact_path = Path(payload["output"]["result_image_path"])
+            self.assertTrue(artifact_path.is_file())
+            with Image.open(artifact_path) as annotated:
+                self.assertEqual(annotated.size, (64, 48))
+        finally:
+            runtime_module._select_published_vision_model = original_selector
+            runtime_module.run_yolo_inference = original_inference
+            if artifact_path and artifact_path.exists():
+                artifact_path.unlink()
+                try:
+                    artifact_path.parent.rmdir()
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":

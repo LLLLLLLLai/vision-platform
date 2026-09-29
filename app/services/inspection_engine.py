@@ -20,6 +20,7 @@ from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import (
+    alignment_roi_offset_for_source,
     align_image_with_anchor,
     align_image_to_reference,
     annotate_image,
@@ -123,22 +124,26 @@ class InspectionEngine:
                 if not image_file.is_file():
                     raise FileNotFoundError(f"Image does not exist: {image_file}")
                 inspection_image = image_file
+                alignment_image_path: Path | None = None
+                roi_offset_x = 0.0
+                roi_offset_y = 0.0
                 alignment: dict[str, Any] = {
                     "status": "DISABLED" if not settings.image_alignment_enabled else "NOT_CONFIGURED"
                 }
+                feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
+                legacy_anchor = next(
+                    (
+                        roi
+                        for roi in recipe.rois
+                        if roi.enabled and roi.alignment_anchor
+                    ),
+                    None,
+                )
+                anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
+                anchor_configured = anchor_roi is not None
                 if settings.image_alignment_enabled and recipe.base_image_path:
                     base_image = Path(recipe.base_image_path).expanduser()
                     if base_image.is_file():
-                        feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
-                        legacy_anchor = next(
-                            (
-                                roi
-                                for roi in recipe.rois
-                                if roi.enabled and roi.alignment_anchor
-                            ),
-                            None,
-                        )
-                        anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
                         if anchor_roi is not None:
                             aligned_path, alignment = align_image_with_anchor(
                                 str(image_file),
@@ -150,18 +155,9 @@ class InspectionEngine:
                                 minimum_inliers=settings.image_alignment_anchor_min_inliers,
                                 minimum_inlier_ratio=settings.image_alignment_anchor_min_inlier_ratio,
                                 maximum_rotation_degrees=settings.image_alignment_anchor_max_rotation_degrees,
+                                minimum_template_score=settings.image_alignment_anchor_min_template_score,
+                                minimum_template_margin=settings.image_alignment_anchor_min_template_margin,
                             )
-                            if aligned_path is None:
-                                fallback_path, fallback_alignment = align_image_to_reference(
-                                    str(image_file),
-                                    str(base_image),
-                                    task_root / f"image_{image_index}" / "aligned_source.jpg",
-                                    max_shift_ratio=settings.image_alignment_max_shift_ratio,
-                                    minimum_response=settings.image_alignment_min_response,
-                                    max_dimension=settings.image_alignment_max_dimension,
-                                )
-                                alignment["fallback"] = fallback_alignment
-                                aligned_path = fallback_path
                         else:
                             aligned_path, alignment = align_image_to_reference(
                                 str(image_file),
@@ -172,12 +168,73 @@ class InspectionEngine:
                                 max_dimension=settings.image_alignment_max_dimension,
                             )
                         if aligned_path is not None:
-                            inspection_image = aligned_path
+                            alignment_image_path = aligned_path
+                            roi_offset_x, roi_offset_y = alignment_roi_offset_for_source(alignment)
+                            alignment["roi_correction"] = {
+                                "mode": "SOURCE_ROI_OFFSET",
+                                "offset_x": round(roi_offset_x, 3),
+                                "offset_y": round(roi_offset_y, 3),
+                                "description": "已根据定位特征点偏移在原图上移动 ROI 后裁剪",
+                            }
                     else:
                         alignment = {
                             "status": "SKIPPED",
                             "reason": "配方基准图不存在，保留原图检测",
                         }
+                elif settings.image_alignment_enabled and anchor_configured:
+                    alignment = {
+                        "status": "SKIPPED",
+                        "reason": "已配置定位特征点但未配置可用的配方基准图",
+                    }
+
+                # A configured anchor is an explicit promise that every ROI
+                # must be registered before inference.  Continuing with the
+                # original coordinates after a failed registration turns a
+                # camera-position issue into a misleading product NG.
+                if (
+                    settings.image_alignment_enabled
+                    and anchor_configured
+                    and alignment.get("status") != "APPLIED"
+                ):
+                    alignment["status"] = "FAILED"
+                    alignment["crop_mode"] = "BLOCKED"
+                    alignment["reason"] = (
+                        f"{alignment.get('reason') or '定位特征点未能可靠匹配'}；"
+                        "已停止 ROI 裁剪，避免使用错误区域进行场景检测。"
+                    )
+                    result_path = task_root / f"result_{image_index}.jpg"
+                    annotate_image(str(image_file), [], result_path)
+                    result_image_paths.append(str(result_path))
+                    image_results.append(
+                        {
+                            "image_path": str(image_file),
+                            "inspection_image_path": str(image_file),
+                            "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                            "alignment": alignment,
+                            "result_image_path": str(result_path),
+                            "result": "ERROR",
+                            "inspection_items": [
+                                {
+                                    "roi_code": "IMAGE_ALIGNMENT",
+                                    "roi_name": "图像定位特征点",
+                                    "item_code": "IMAGE_ALIGNMENT_REQUIRED",
+                                    "item_name": "图像定位失败",
+                                    "inspection_type": "IMAGE_ALIGNMENT",
+                                    "capability": "FEATURE_ANCHOR",
+                                    "primary_model": "OpenCV 特征点定位",
+                                    "vlm_review_enabled": False,
+                                    "status": "ERROR",
+                                    "raw_status": "ERROR",
+                                    "actual": alignment,
+                                    "score": None,
+                                    "message": alignment["reason"],
+                                    "elapsed_ms": 0,
+                                }
+                            ],
+                        }
+                    )
+                    overall_status = "ERROR"
+                    continue
                 item_results: list[dict[str, Any]] = []
                 annotations: list[dict[str, Any]] = []
                 image_status = "OK"
@@ -189,7 +246,13 @@ class InspectionEngine:
                     if roi_ids is not None and roi.id not in roi_ids:
                         continue
                     roi_file = task_root / f"image_{image_index}" / f"{roi.code}.jpg"
-                    _, box = crop_roi(str(inspection_image), roi, roi_file)
+                    _, box = crop_roi(
+                        str(inspection_image),
+                        roi,
+                        roi_file,
+                        offset_x=roi_offset_x,
+                        offset_y=roi_offset_y,
+                    )
                     roi_jobs.append((roi, roi_file, box))
 
                 roi_semaphore = asyncio.Semaphore(configured_roi_parallelism)
@@ -213,6 +276,7 @@ class InspectionEngine:
                             sn=sn,
                             force_vlm_review=force_vlm_review,
                             box=box,
+                            alignment=alignment,
                         )
 
                 roi_runs = await asyncio.gather(
@@ -236,6 +300,7 @@ class InspectionEngine:
                     {
                         "image_path": str(image_file),
                         "inspection_image_path": str(inspection_image),
+                        "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
                         "alignment": alignment,
                         "result_image_path": str(result_path),
                         "result": image_status,
@@ -363,10 +428,16 @@ class InspectionEngine:
         sn: str,
         force_vlm_review: bool,
         box: tuple[int, int, int, int],
+        alignment: dict[str, Any],
     ) -> dict[str, Any]:
         roi_status = "OK"
         item_results: list[dict[str, Any]] = []
         roi_image_url = f"{result_url_prefix}/image_{image_index}/{roi.code}.jpg"
+        crop_metadata = {
+            "actual_box": list(box),
+            "coordinate_space": "SOURCE_IMAGE",
+            "alignment": alignment.get("roi_correction"),
+        }
         scenario_binding = scenario_bindings.get(roi.id)
         if scenario_binding is not None:
             scenario_version = scenario_binding.scenario_version
@@ -413,6 +484,8 @@ class InspectionEngine:
                         },
                     )
                 )
+            actual = dict(execution.output_json or {})
+            actual["roi_crop"] = crop_metadata
             item_results.append(
                 {
                     "roi_code": roi.code,
@@ -430,7 +503,7 @@ class InspectionEngine:
                     "vlm_review_enabled": bool(scenario_version.review_vlm_model_id),
                     "status": "NG" if result_status == "UNCERTAIN" else result_status,
                     "raw_status": result_status,
-                    "actual": execution.output_json,
+                    "actual": actual,
                     "score": execution.score,
                     "message": execution.error_message,
                     "elapsed_ms": execution.elapsed_ms,
@@ -459,7 +532,7 @@ class InspectionEngine:
                 "vlm_review_enabled": False,
                 "status": "ERROR",
                 "raw_status": "ERROR",
-                "actual": {},
+                "actual": {"roi_crop": crop_metadata},
                 "score": None,
                 "message": message,
                 "elapsed_ms": 0,
@@ -555,8 +628,111 @@ class InspectionEngine:
         started = time.perf_counter()
         request_id = f"draft-{uuid.uuid4().hex}"
         task_root = Path(PROJECT_ROOT / "detection_results" / request_id)
+        inspection_image = Path(image_path).expanduser().resolve()
+        alignment_image_path: Path | None = None
+        roi_offset_x = 0.0
+        roi_offset_y = 0.0
+        alignment: dict[str, Any] = {
+            "status": "DISABLED" if not settings.image_alignment_enabled else "NOT_CONFIGURED"
+        }
+        feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
+        legacy_anchor = next(
+            (
+                candidate
+                for candidate in recipe.rois
+                if candidate.enabled and candidate.alignment_anchor
+            ),
+            None,
+        )
+        anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
+        if (
+            settings.image_alignment_enabled
+            and anchor_roi is not None
+            and recipe.base_image_path
+        ):
+            base_image = Path(recipe.base_image_path).expanduser()
+            if base_image.is_file():
+                alignment_image_path, alignment = align_image_with_anchor(
+                    str(inspection_image),
+                    str(base_image),
+                    anchor_roi,
+                    task_root / "aligned_source.jpg",
+                    max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                    search_margin_ratio=settings.image_alignment_anchor_search_margin_ratio,
+                    minimum_inliers=settings.image_alignment_anchor_min_inliers,
+                    minimum_inlier_ratio=settings.image_alignment_anchor_min_inlier_ratio,
+                    maximum_rotation_degrees=settings.image_alignment_anchor_max_rotation_degrees,
+                    minimum_template_score=settings.image_alignment_anchor_min_template_score,
+                    minimum_template_margin=settings.image_alignment_anchor_min_template_margin,
+                )
+                if alignment_image_path is not None:
+                    roi_offset_x, roi_offset_y = alignment_roi_offset_for_source(alignment)
+                    alignment["roi_correction"] = {
+                        "mode": "SOURCE_ROI_OFFSET",
+                        "offset_x": round(roi_offset_x, 3),
+                        "offset_y": round(roi_offset_y, 3),
+                        "description": "已根据定位特征点偏移在原图上移动 ROI 后裁剪",
+                    }
+            else:
+                alignment = {"status": "SKIPPED", "reason": "配方基准图不存在"}
+
+        if (
+            settings.image_alignment_enabled
+            and anchor_roi is not None
+            and alignment.get("status") != "APPLIED"
+        ):
+            alignment["status"] = "FAILED"
+            alignment["crop_mode"] = "BLOCKED"
+            alignment["reason"] = (
+                f"{alignment.get('reason') or '定位特征点未能可靠匹配'}；"
+                "已停止 ROI 裁剪，避免使用错误区域进行测试。"
+            )
+            result_path = task_root / "result_1.jpg"
+            annotate_image(str(inspection_image), [], result_path)
+            return {
+                "code": 0,
+                "message": "图像定位失败，未执行场景检测",
+                "request_id": request_id,
+                "sn": "DRAFT_TEST",
+                "result": "ERROR",
+                "recipe_code": recipe.code,
+                "recipe_version": recipe.version,
+                "image_paths": [str(result_path)],
+                "image_results": [
+                    {
+                        "image_path": str(inspection_image),
+                        "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                        "alignment": alignment,
+                        "result_image_path": str(result_path),
+                        "roi_image_path": None,
+                        "result": "ERROR",
+                        "inspection_items": [
+                            {
+                                "roi_code": "IMAGE_ALIGNMENT",
+                                "item_code": "IMAGE_ALIGNMENT_REQUIRED",
+                                "item_name": "图像定位失败",
+                                "inspection_type": "IMAGE_ALIGNMENT",
+                                "capability": "FEATURE_ANCHOR",
+                                "status": "ERROR",
+                                "raw_status": "ERROR",
+                                "actual": alignment,
+                                "score": None,
+                                "message": alignment["reason"],
+                                "elapsed_ms": 0,
+                            }
+                        ],
+                    }
+                ],
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
         roi_path = task_root / f"{roi.code}.jpg"
-        _, box = crop_roi(image_path, roi, roi_path)
+        _, box = crop_roi(
+            str(inspection_image),
+            roi,
+            roi_path,
+            offset_x=roi_offset_x,
+            offset_y=roi_offset_y,
+        )
         item_results: list[dict[str, Any]] = []
         roi_status = "OK"
 
@@ -656,7 +832,7 @@ class InspectionEngine:
 
         result_path = task_root / "result_1.jpg"
         annotate_image(
-            image_path,
+            str(inspection_image),
             [{"box": box, "code": roi.code, "status": roi_status}],
             result_path,
         )
@@ -672,7 +848,9 @@ class InspectionEngine:
             "image_paths": [str(result_path)],
             "image_results": [
                 {
-                    "image_path": image_path,
+                    "image_path": str(inspection_image),
+                    "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                    "alignment": alignment,
                     "result_image_path": str(result_path),
                     "roi_image_path": str(roi_path),
                     "roi_image_url": f"/results/{request_id}/{roi_path.name}",

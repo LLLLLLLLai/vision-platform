@@ -36,6 +36,8 @@ def _upgrade_sqlite_schema() -> None:
         "recipe_family_code": "VARCHAR(100) NOT NULL DEFAULT ''",
         "version_no": "INTEGER NOT NULL DEFAULT 0",
         "source_recipe_id": "INTEGER",
+        "execution_mode": "VARCHAR(30) NOT NULL DEFAULT 'INSPECT'",
+        "skip_reason": "VARCHAR(500)",
     }
     with engine.begin() as connection:
         for column_name, column_type in additions.items():
@@ -83,6 +85,17 @@ def _upgrade_sqlite_schema() -> None:
                     WHEN version_no IS NULL OR version_no = 0
                     THEN CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END
                     ELSE version_no
+                END
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE recipes
+                SET execution_mode = CASE
+                    WHEN execution_mode IS NULL OR execution_mode = '' THEN 'INSPECT'
+                    ELSE UPPER(execution_mode)
                 END
                 """
             )

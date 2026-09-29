@@ -39,6 +39,7 @@ class SceneDesignerAssetTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{element_id}"', template)
         self.assertIn("scene_designer_dify.css", template)
+        self.assertIn('data-node-type="IMAGE_ANNOTATE"', template)
 
     def test_workflow_designer_has_search_and_layout_handlers(self) -> None:
         script = (PROJECT_ROOT / "app" / "static" / "js" / "scene_designer.js").read_text(encoding="utf-8")
@@ -84,9 +85,12 @@ class SceneDesignerAssetTests(unittest.TestCase):
         self.assertIn("保存当前节点", script)
         self.assertIn('id: "nodeEndOutputParameters"', script)
         self.assertIn("IMAGE_CROP", script)
+        self.assertIn("IMAGE_ANNOTATE", script)
+        self.assertIn("function annotationGeometryCompatibilityError(", script)
         self.assertIn("function runWorkflowTest()", script)
         self.assertIn("function startWorkflowTestRun()", script)
         self.assertIn("function renderWorkflowTestResult(", script)
+        self.assertIn("function workflowTraceArtifactMarkup(", script)
         self.assertIn('byId("workflowRunTest").addEventListener', script)
         self.assertIn('byId("workflowTestRunPanel").addEventListener', script)
         self.assertIn("提示词参数映射", script)

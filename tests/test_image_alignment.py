@@ -1,11 +1,24 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
+from PIL import Image
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from app.services.image_processing import align_image_to_reference, align_image_with_anchor
+from app.models.base import Base
+from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
+from app.models.system import Product, Station
+from app.services.image_processing import (
+    alignment_roi_offset_for_source,
+    align_image_to_reference,
+    align_image_with_anchor,
+    crop_roi,
+)
+from app.services.inspection_engine import InspectionEngine
 
 
 class ImageAlignmentTests(unittest.TestCase):
@@ -100,6 +113,159 @@ class ImageAlignmentTests(unittest.TestCase):
                 float(np.mean(np.abs(aligned[central].astype(np.int16) - reference[central].astype(np.int16)))),
                 18.0,
             )
+
+    def test_anchor_offset_moves_roi_crop_on_original_source(self) -> None:
+        """Production ROI pixels must move with the located anchor offset."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference_path = root / "reference.png"
+            source_path = root / "source.png"
+            aligned_path = root / "aligned.png"
+            reference_roi_path = root / "reference_roi.png"
+            source_roi_path = root / "source_roi.png"
+            generator = np.random.default_rng(23)
+            reference = generator.integers(20, 90, size=(260, 360, 3), dtype=np.uint8)
+            cv2.rectangle(reference, (72, 62), (172, 162), (228, 228, 228), -1)
+            cv2.circle(reference, (112, 102), 24, (35, 35, 35), -1)
+            cv2.line(reference, (88, 136), (156, 82), (0, 120, 255), 5)
+            cv2.rectangle(reference, (240, 150), (305, 215), (40, 180, 60), -1)
+            source = cv2.warpAffine(
+                reference,
+                np.float32([[1, 0, 14], [0, 1, -9]]),
+                (360, 260),
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+            cv2.imwrite(str(reference_path), reference)
+            cv2.imwrite(str(source_path), source)
+            anchor = type(
+                "Anchor",
+                (),
+                {
+                    "code": "ANCHOR_TRANSLATION",
+                    "x_ratio": 72 / 360,
+                    "y_ratio": 62 / 260,
+                    "width_ratio": 100 / 360,
+                    "height_ratio": 100 / 260,
+                    "padding": 0,
+                },
+            )()
+            roi = type(
+                "Roi",
+                (),
+                {
+                    "x_ratio": 240 / 360,
+                    "y_ratio": 150 / 260,
+                    "width_ratio": 65 / 360,
+                    "height_ratio": 65 / 260,
+                    "padding": 0,
+                },
+            )()
+
+            _, metadata = align_image_with_anchor(
+                str(source_path),
+                str(reference_path),
+                anchor,
+                aligned_path,
+                max_shift_ratio=0.12,
+                search_margin_ratio=0.20,
+                minimum_inliers=6,
+                minimum_inlier_ratio=0.25,
+                maximum_rotation_degrees=8.0,
+            )
+
+            self.assertEqual(metadata["status"], "APPLIED")
+            offset_x, offset_y = alignment_roi_offset_for_source(metadata)
+            self.assertAlmostEqual(offset_x, 14, delta=2.5)
+            self.assertAlmostEqual(offset_y, -9, delta=2.5)
+            crop_roi(str(reference_path), roi, reference_roi_path)
+            crop_roi(
+                str(source_path),
+                roi,
+                source_roi_path,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+            reference_roi = cv2.imread(str(reference_roi_path))
+            source_roi = cv2.imread(str(source_roi_path))
+            self.assertEqual(reference_roi.shape, source_roi.shape)
+            self.assertLess(
+                float(np.mean(np.abs(reference_roi.astype(np.int16) - source_roi.astype(np.int16)))),
+                8.0,
+            )
+
+
+class InspectionAlignmentSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_anchor_failure_blocks_roi_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.jpg"
+            reference_path = root / "reference.jpg"
+            Image.new("RGB", (320, 240), "white").save(source_path)
+            Image.new("RGB", (320, 240), "white").save(reference_path)
+            database_engine = create_engine("sqlite://")
+            database = Session(database_engine)
+            try:
+                Base.metadata.create_all(database_engine)
+                product = Product(code="MAT-ANCHOR", name="Alignment Material")
+                station = Station(code="ST-ANCHOR", name="Alignment Station")
+                database.add_all([product, station])
+                database.flush()
+                recipe = Recipe(
+                    code="ANCHOR-RECIPE",
+                    name="Anchor Recipe",
+                    status="PUBLISHED",
+                    product_id=product.id,
+                    station_id=station.id,
+                    base_image_path=str(reference_path),
+                )
+                database.add(recipe)
+                database.flush()
+                database.add_all(
+                    [
+                        RecipeFeatureAnchor(
+                            recipe_id=recipe.id,
+                            x_ratio=0.10,
+                            y_ratio=0.10,
+                            width_ratio=0.20,
+                            height_ratio=0.20,
+                        ),
+                        RegionOfInterest(
+                            recipe_id=recipe.id,
+                            code="ROI_BLOCKED",
+                            name="Blocked ROI",
+                            x_ratio=0.50,
+                            y_ratio=0.50,
+                            width_ratio=0.20,
+                            height_ratio=0.20,
+                        ),
+                    ]
+                )
+                database.commit()
+
+                with patch(
+                    "app.services.inspection_engine.align_image_with_anchor",
+                    return_value=(
+                        None,
+                        {"status": "SKIPPED", "reason": "定位特征点模板匹配置信度不足"},
+                    ),
+                ):
+                    result = await InspectionEngine().execute(
+                        database,
+                        recipe,
+                        sn="SN-ANCHOR",
+                        image_paths=[str(source_path)],
+                        artifact_root=root / "artifacts",
+                    )
+
+                self.assertEqual(result["result"], "ERROR")
+                image_result = result["image_results"][0]
+                self.assertEqual(image_result["alignment"]["crop_mode"], "BLOCKED")
+                self.assertEqual(image_result["inspection_items"][0]["roi_code"], "IMAGE_ALIGNMENT")
+                self.assertFalse((root / "artifacts" / "image_1" / "ROI_BLOCKED.jpg").exists())
+            finally:
+                database.close()
+                database_engine.dispose()
 
 
 if __name__ == "__main__":

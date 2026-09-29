@@ -251,6 +251,8 @@ CREATE TABLE recipes (
 	name VARCHAR(200) NOT NULL,
 	version VARCHAR(50) NOT NULL,
 	status VARCHAR(30) NOT NULL,
+	execution_mode VARCHAR(30) NOT NULL DEFAULT 'INSPECT',
+	skip_reason VARCHAR(500),
 	project_name VARCHAR(200),
 	product_id INTEGER NOT NULL,
 	station_id INTEGER NOT NULL,
@@ -272,6 +274,7 @@ CREATE TABLE recipes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE INDEX ix_recipe_business_key ON recipes (line_code, material_code, process_code, camera_code, capture_index, status);
 CREATE INDEX ix_recipes_code ON recipes (code);
+CREATE INDEX ix_recipes_execution_mode ON recipes (execution_mode);
 CREATE INDEX ix_recipes_recipe_family_code ON recipes (recipe_family_code);
 CREATE INDEX ix_recipes_source_recipe_id ON recipes (source_recipe_id);
 CREATE INDEX ix_recipes_status ON recipes (status);

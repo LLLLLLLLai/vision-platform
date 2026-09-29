@@ -765,10 +765,24 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ),
             ScenarioNode(
                 scenario_version_id=version.id,
+                node_key="annotate_1",
+                name="绘制检测框",
+                node_type="IMAGE_ANNOTATE",
+                sort_order=2,
+                config_json={
+                    "image_path": "{{ input.image_path }}",
+                    "objects": "{{ nodes.model_1.objects }}",
+                    "draw_masks": True,
+                    "show_label": True,
+                    "show_confidence": True,
+                },
+            ),
+            ScenarioNode(
+                scenario_version_id=version.id,
                 node_key="crop_1",
                 name="裁剪目标",
                 node_type="IMAGE_CROP",
-                sort_order=2,
+                sort_order=3,
                 config_json={
                     "image_path": "{{ input.image_path }}",
                     "bbox": "{{ nodes.model_1.objects.0.bbox }}",
@@ -780,7 +794,7 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 node_key="vlm_1",
                 name="VLM 复核",
                 node_type="VLM",
-                sort_order=3,
+                sort_order=4,
                 config_json={
                     "vlm_model_id": self.primary_model.id,
                     "prompt": "检查 {{ params.detected_label }}",
@@ -795,11 +809,12 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 node_key="end",
                 name="结束",
                 node_type="END",
-                sort_order=4,
+                sort_order=5,
                 config_json={
                     "output": {
                         "result": "{{ nodes.vlm_1.result }}",
                         "crop_image_path": "{{ nodes.crop_1.image_path }}",
+                        "annotated_image_path": "{{ nodes.annotate_1.image_path }}",
                     },
                 },
             ),
@@ -811,6 +826,11 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ScenarioEdge(
                 scenario_version_id=version.id,
                 source_node_key="model_1",
+                target_node_key="annotate_1",
+            ),
+            ScenarioEdge(
+                scenario_version_id=version.id,
+                source_node_key="annotate_1",
                 target_node_key="crop_1",
             ),
             ScenarioEdge(
@@ -867,6 +887,7 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
         runtime_module.run_yolo_inference = fake_inference
         runtime_module.vlm_client.judge = fake_judge
         crop_path: Path | None = None
+        annotation_path: Path | None = None
         try:
             with TemporaryDirectory() as directory:
                 image_path = Path(directory) / "input.jpg"
@@ -880,6 +901,7 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(execution.status, "COMPLETED", execution.error_message)
                 self.assertIn("crop_1", execution.output_json["nodes"], execution.output_json)
                 crop_path = Path(execution.output_json["nodes"]["crop_1"]["image_path"])
+                annotation_path = Path(execution.output_json["nodes"]["annotate_1"]["image_path"])
 
             self.assertEqual(execution.result, "OK")
             self.assertEqual(captured["detector_image_path"], str(image_path))
@@ -887,12 +909,17 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(captured["crop_size"], (60, 40))
             self.assertEqual(captured["vlm_image_path"], str(crop_path))
             self.assertTrue(crop_path.is_file())
+            self.assertTrue(annotation_path.is_file())
+            self.assertEqual(execution.output_json["nodes"]["annotate_1"]["annotation_count"], 1)
+            self.assertEqual(execution.output_json["result"]["annotated_image_path"], str(annotation_path))
+            with Image.open(annotation_path) as annotated:
+                self.assertEqual(annotated.size, (120, 80))
             traces = execution.output_json["traces"]
             self.assertEqual([trace["node_key"] for trace in traces], [
-                "start", "model_1", "crop_1", "vlm_1", "end",
+                "start", "model_1", "annotate_1", "crop_1", "vlm_1", "end",
             ])
             self.assertTrue(all("elapsed_ms" in trace for trace in traces))
-            self.assertEqual(traces[2]["output"]["crop_bbox"], [10, 20, 70, 60])
+            self.assertEqual(traces[3]["output"]["crop_bbox"], [10, 20, 70, 60])
         finally:
             runtime_module._select_published_vision_model = original_selector
             runtime_module.run_yolo_inference = original_inference
@@ -901,6 +928,47 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 crop_path.unlink()
                 try:
                     crop_path.parent.rmdir()
+                except OSError:
+                    pass
+            if annotation_path and annotation_path.exists():
+                annotation_path.unlink()
+                try:
+                    annotation_path.parent.rmdir()
+                except OSError:
+                    pass
+
+    async def test_image_annotation_node_draws_segmentation_polygon_and_bbox(self) -> None:
+        annotation_path: Path | None = None
+        try:
+            with TemporaryDirectory() as directory:
+                image_path = Path(directory) / "segment-input.jpg"
+                Image.new("RGB", (80, 60), "white").save(image_path)
+                output = ScenarioRuntime()._execute_image_annotate(
+                    str(image_path),
+                    [{
+                        "label": "harness",
+                        "confidence": 0.93,
+                        "bbox": [12, 10, 66, 48],
+                        "mask": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]],
+                        "mask_format": "POLYGON_NORMALIZED",
+                    }],
+                    None,
+                    {"draw_masks": True, "show_label": True, "show_confidence": True},
+                    execution_id=None,
+                    node_key="annotation_mask",
+                )
+                annotation_path = Path(output["image_path"])
+                self.assertEqual(output["annotation_count"], 1)
+                self.assertEqual(output["image_url"], "/files/scene_annotations/preview/" + annotation_path.name)
+                self.assertTrue(annotation_path.is_file())
+                with Image.open(annotation_path) as annotated:
+                    self.assertEqual(annotated.size, (80, 60))
+                    self.assertNotEqual(annotated.getpixel((40, 30)), (255, 255, 255))
+        finally:
+            if annotation_path and annotation_path.exists():
+                annotation_path.unlink()
+                try:
+                    annotation_path.parent.rmdir()
                 except OSError:
                     pass
 

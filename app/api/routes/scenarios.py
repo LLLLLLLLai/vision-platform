@@ -43,6 +43,7 @@ NODE_TYPES = {
     "VLM",
     "VISION_MODEL",
     "IMAGE_CROP",
+    "IMAGE_ANNOTATE",
     "RULE",
     "WEB_API",
     "IF",
@@ -53,6 +54,9 @@ REVIEW_VERDICTS = {"OK", "NG", "UNCERTAIN"}
 IMAGE_INPUT_NAMES = {"image", "image_path", "image_paths", "image_file"}
 _DYNAMIC_BBOX_REFERENCE = re.compile(
     r"^\s*\{\{\s*nodes\.([A-Za-z0-9_-]+)\.objects(?:\.\d+)?\.bbox\s*\}\}\s*$"
+)
+_DYNAMIC_OBJECTS_REFERENCE = re.compile(
+    r"^\s*\{\{\s*nodes\.([A-Za-z0-9_-]+)\.objects\s*\}\}\s*$"
 )
 
 
@@ -390,6 +394,82 @@ def _validate_image_crop_node(
                 ),
             )
 
+
+def _validate_image_annotate_node(
+    database: Session,
+    scenario_version: InspectionScenarioVersion,
+    node: ScenarioNode,
+) -> None:
+    """Reject impossible geometry mappings before a workflow is published."""
+
+    config = node.config_json or {}
+    input_mapping = config.get("input_mapping") or config.get("context") or {}
+    mapped_objects = input_mapping.get("objects") if isinstance(input_mapping, dict) else None
+    mapped_bbox = input_mapping.get("bbox") if isinstance(input_mapping, dict) else None
+    configured_objects = config.get("objects")
+    configured_bbox = config.get("bbox")
+    if all(value in (None, "", []) for value in (mapped_objects, mapped_bbox, configured_objects, configured_bbox)):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"图片画框节点“{node.name}”必须配置目标列表或 bbox，"
+                "例如引用上游训练模型的 {{ nodes.model_1.objects }}。"
+            ),
+        )
+
+    source_values = (
+        (mapped_objects, "objects"),
+        (configured_objects, "objects"),
+        (mapped_bbox, "bbox"),
+        (configured_bbox, "bbox"),
+    )
+    for value, expected_capability in source_values:
+        if not isinstance(value, str):
+            continue
+        object_match = _DYNAMIC_OBJECTS_REFERENCE.fullmatch(value)
+        bbox_match = _DYNAMIC_BBOX_REFERENCE.fullmatch(value)
+        source_key = (object_match or bbox_match).group(1) if (object_match or bbox_match) else None
+        if not source_key:
+            continue
+        source_node = next(
+            (item for item in scenario_version.nodes if item.enabled and item.node_key == source_key),
+            None,
+        )
+        if source_node is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"图片画框节点“{node.name}”引用了不存在的上游节点“{source_key}”。",
+            )
+        if source_node.node_type.upper() != "VISION_MODEL":
+            continue
+        raw_version_id = (source_node.config_json or {}).get("model_version_id")
+        try:
+            model_version_id = int(raw_version_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上游模型节点“{source_node.name}”尚未选择已发布模型版本。",
+            ) from exc
+        model_version = database.scalar(
+            select(VisionModelVersion)
+            .options(selectinload(VisionModelVersion.vision_model))
+            .where(VisionModelVersion.id == model_version_id)
+        )
+        model = model_version.vision_model if model_version is not None else None
+        if model is None:
+            continue
+        profile = task_output_profile(model.task_type)
+        capability = "supports_objects" if expected_capability == "objects" else "supports_bbox"
+        if not profile[capability]:
+            noun = "目标列表" if expected_capability == "objects" else "定位框"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"图片画框节点“{node.name}”不能引用“{source_node.name}”的{noun}："
+                    f"{profile['display_name']}不输出该信息。"
+                    "请改用目标检测/分割模型，或填写固定 bbox。"
+                ),
+            )
 
 def _validate_vlm_node(database: Session, node: ScenarioNode) -> None:
     config = node.config_json or {}
@@ -805,6 +885,7 @@ def _published_scene_for_invoke(
         select(InspectionScenarioVersion)
         .options(
             selectinload(InspectionScenarioVersion.nodes),
+            selectinload(InspectionScenarioVersion.edges),
             selectinload(InspectionScenarioVersion.scenario),
         )
         .where(InspectionScenarioVersion.id == scene.published_version_id)
@@ -1336,6 +1417,8 @@ def publish_scenario_version(
                 _validate_published_vision_model_node(database, node)
             if node.enabled and node.node_type.upper() == "IMAGE_CROP":
                 _validate_image_crop_node(database, version, node)
+            if node.enabled and node.node_type.upper() == "IMAGE_ANNOTATE":
+                _validate_image_annotate_node(database, version, node)
     previously_published_version_ids = database.scalars(
         select(InspectionScenarioVersion.id).where(
             InspectionScenarioVersion.scenario_id == scene.id,

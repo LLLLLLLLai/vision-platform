@@ -41,6 +41,8 @@
         <label><span>工序</span><input class="form-control recipe-name-source" name="process_code" placeholder="OP20" required></label>
         <label><span>相机</span><input class="form-control recipe-name-source" name="camera_code" placeholder="CAM01" required></label>
         <label><span>第几次拍照</span><input class="form-control recipe-name-source" name="capture_index" type="number" value="1" min="1" required></label>
+        <label><span>执行方式</span><select class="form-select" name="execution_mode" id="recipeExecutionMode"><option value="INSPECT">ROI 检测</option><option value="PASS_THROUGH">无需检测，原图透传</option></select></label>
+        <label id="recipeSkipReasonField" hidden><span>透传原因</span><input class="form-control" name="skip_reason" placeholder="例如：该相机仅留存图片，不参与质检"></label>
         <label><span>版本</span><input class="form-control" name="version" value="草稿（首次发布 V1）" readonly></label>
       </form>
 
@@ -53,12 +55,18 @@
       </div>
     </section>
 
+    <section class="alert alert-info mt-3" id="passThroughRecipeNotice" hidden>
+      <strong>当前为无需检测配方。</strong>
+      <span id="passThroughRecipeReason"></span>
+      该相机图片会按配方匹配后直接原图返回，不会下载 SMB 文件、裁剪 ROI 或调用模型服务。
+    </section>
+
     <section class="configuration-workbench">
       <div class="image-config-column">
         <div class="workbench-heading">
           <div>
             <span class="step-number">02</span>
-            <div><strong>上传图片并配置检测区域</strong><small>选择绘制模式后，按住 Ctrl 并拖动鼠标绘制 ROI 或图像定位特征点</small></div>
+            <div><strong>上传图片并配置检测区域</strong><small>选择绘制模式后，按住 Ctrl 并拖动鼠标绘制 ROI 或图像定位特征点；特征点须来自与生产图片同一相机、同一完整视野的基准图</small></div>
           </div>
           <div class="canvas-actions">
             <div class="btn-group" role="group" aria-label="绘制模式">
@@ -220,7 +228,7 @@
     <div class="library-results-meta" id="libraryResultsMeta"></div>
     <div class="recipe-library-table-wrap">
       <table class="recipe-library-table">
-        <thead><tr><th>项目</th><th>配方名称 / 编码</th><th>拉线</th><th>物料</th><th>工序</th><th>相机 / 拍照</th><th>ROI</th><th>状态</th><th>操作</th></tr></thead>
+        <thead><tr><th>项目</th><th>配方名称 / 编码</th><th>拉线</th><th>物料</th><th>工序</th><th>相机 / 拍照</th><th>执行方式</th><th>ROI</th><th>状态</th><th>操作</th></tr></thead>
         <tbody id="configurationLibrary"></tbody>
       </table>
     </div>
@@ -238,6 +246,8 @@
           <label><span>工序</span><input class="form-control" name="process_code" placeholder="AS15" required></label>
           <label><span>相机</span><input class="form-control" name="camera_code" placeholder="CAMERA1" required></label>
           <label><span>第几次拍照</span><input class="form-control" name="capture_index" type="number" min="1" value="1" required></label>
+          <label><span>执行方式</span><select class="form-select" name="execution_mode" id="createRecipeExecutionMode"><option value="INSPECT">ROI 检测</option><option value="PASS_THROUGH">无需检测，原图透传</option></select></label>
+          <label id="createRecipeSkipReasonField" hidden><span>透传原因</span><input class="form-control" name="skip_reason" placeholder="例如：该相机仅留存图片，不参与质检"></label>
           <div class="dataset-create-code"><span>版本</span><strong>发布时自动递增</strong><small>保存仅保留草稿，生产检测始终使用已发布版本。</small></div>
         </div>
         <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit">创建并进入配置</button></div>
@@ -380,5 +390,5 @@
   </section>
 </div>
 
-<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20260922-10"></script>
+<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20260929-03"></script>
 {% endblock %}

@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.api.routes.scenarios import _validate_image_crop_node
+from app.api.routes.scenarios import _validate_image_annotate_node, _validate_image_crop_node
 from app.db.base import Base
 from app.models.intelligence import (
     InspectionScenario,
@@ -82,6 +82,58 @@ class SceneModelOutputContractTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("不输出定位框", str(context.exception.detail))
+
+    def test_annotation_node_cannot_consume_objects_from_classification_model(self) -> None:
+        model = VisionModel(
+            code="AI_HARNESS_LOCK_ANNOTATE",
+            name="AI 检测线束锁付画框",
+            task_type="YOLO_CLASSIFICATION",
+        )
+        self.database.add(model)
+        self.database.flush()
+        model_version = VisionModelVersion(
+            vision_model_id=model.id,
+            version="V1",
+            status="PUBLISHED",
+            weights_path="weights/harness-classification.pt",
+        )
+        scene = InspectionScenario(
+            code="SCENE_HARNESS_ANNOTATE",
+            name="线束画框流程",
+            mode="WORKFLOW",
+        )
+        self.database.add_all((model_version, scene))
+        self.database.flush()
+        scenario_version = InspectionScenarioVersion(
+            scenario_id=scene.id,
+            version="1.0",
+            status="DRAFT",
+        )
+        self.database.add(scenario_version)
+        self.database.flush()
+        classifier = ScenarioNode(
+            scenario_version_id=scenario_version.id,
+            node_key="classifier",
+            name="锁付分类",
+            node_type="VISION_MODEL",
+            config_json={"model_version_id": model_version.id},
+        )
+        annotate = ScenarioNode(
+            scenario_version_id=scenario_version.id,
+            node_key="annotate",
+            name="绘制检测框",
+            node_type="IMAGE_ANNOTATE",
+            config_json={"objects": "{{ nodes.classifier.objects }}"},
+        )
+        self.database.add_all((classifier, annotate))
+        self.database.commit()
+        self.database.refresh(scenario_version)
+
+        with self.assertRaises(HTTPException) as context:
+            _validate_image_annotate_node(self.database, scenario_version, annotate)
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("不输出该信息", str(context.exception.detail))
 
 
 if __name__ == "__main__":

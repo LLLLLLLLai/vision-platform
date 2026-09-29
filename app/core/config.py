@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     image_alignment_anchor_min_inliers: int = 8
     image_alignment_anchor_min_inlier_ratio: float = 0.35
     image_alignment_anchor_max_rotation_degrees: float = 8.0
+    image_alignment_anchor_min_template_score: float = 0.55
+    image_alignment_anchor_min_template_margin: float = 0.03
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

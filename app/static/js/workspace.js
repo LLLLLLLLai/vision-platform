@@ -105,7 +105,40 @@ function recipeFields() {
     cameraCode: normalizeCode(values.camera_code),
     captureIndex: Math.max(1, Number(values.capture_index || 1)),
     version: String(values.version || "").trim() || "1.0",
+    executionMode: String(values.execution_mode || "INSPECT").trim().toUpperCase(),
+    skipReason: String(values.skip_reason || "").trim(),
   };
+}
+
+function isPassThroughRecipe(recipe = state.recipe) {
+  return String(recipe?.execution_mode || "INSPECT").toUpperCase() === "PASS_THROUGH";
+}
+
+function updateRecipeExecutionModeUI() {
+  const fields = recipeFields();
+  const passThrough = fields.executionMode === "PASS_THROUGH";
+  const reasonField = byId("recipeSkipReasonField");
+  const notice = byId("passThroughRecipeNotice");
+  const workbench = document.querySelector("#editorView .configuration-workbench");
+  if (reasonField) reasonField.hidden = !passThrough;
+  if (notice) notice.hidden = !passThrough;
+  if (workbench) workbench.hidden = passThrough;
+  if (passThrough) {
+    byId("passThroughRecipeReason").textContent = fields.skipReason
+      ? `原因：${fields.skipReason}。`
+      : "请填写透传原因后保存或发布。";
+  }
+}
+
+function updateCreateRecipeExecutionModeUI() {
+  const form = byId("createRecipeForm");
+  if (!form) return;
+  const passThrough = String(form.elements.execution_mode?.value || "INSPECT").toUpperCase() === "PASS_THROUGH";
+  byId("createRecipeSkipReasonField").hidden = !passThrough;
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit && !submit.disabled) {
+    submit.textContent = passThrough ? "创建并发布透传配方" : "创建并进入配置";
+  }
 }
 
 function generatedRecipe(fields = recipeFields()) {
@@ -510,8 +543,11 @@ function populateRecipeForm(recipe) {
   form.elements.process_code.value = recipe?.process_code || "";
   form.elements.camera_code.value = recipe?.camera_code || "";
   form.elements.capture_index.value = recipe?.capture_index || 1;
+  form.elements.execution_mode.value = recipe?.execution_mode || "INSPECT";
+  form.elements.skip_reason.value = recipe?.skip_reason || "";
   form.elements.version.value = recipe?.display_version || "草稿（首次发布 V1）";
   updateGeneratedName();
+  updateRecipeExecutionModeUI();
 }
 
 function setRecipeStatus(status, recipe = null) {
@@ -526,6 +562,7 @@ function setRecipeStatus(status, recipe = null) {
 
 function applyEditorAccessMode() {
   const readOnly = Boolean(state.editorReadOnly);
+  const passThrough = isPassThroughRecipe();
   byId("editorView")?.classList.toggle("recipe-detail-readonly", readOnly);
   byId("recipeEditorModeHint").hidden = !readOnly;
   byId("recipeForm")?.querySelectorAll("input, select, textarea").forEach((field) => {
@@ -533,14 +570,14 @@ function applyEditorAccessMode() {
   });
   ["saveRecipe", "publishRecipe", "baseImageInput", "emptyImageInput"].forEach((id) => {
     const control = byId(id);
-    if (control) control.disabled = readOnly;
+    if (control) control.disabled = readOnly || (passThrough && ["baseImageInput", "emptyImageInput"].includes(id));
   });
   ["selectRoiDrawMode", "selectFeatureAnchorDrawMode"].forEach((id) => {
     const control = byId(id);
     if (control) control.disabled = readOnly || !state.recipe?.base_image_url;
   });
   ["baseImageUploadLabel", "emptyImageUploadLabel"].forEach((id) => {
-    byId(id)?.classList.toggle("disabled", readOnly);
+    byId(id)?.classList.toggle("disabled", readOnly || passThrough);
   });
 }
 
@@ -576,8 +613,9 @@ function resetEditor() {
 async function loadRecipe(recipeId) {
   const recipeUrl = `${api}/configuration/recipes/${recipeId}`;
   state.recipe = await request(recipeUrl);
-  state.worldScene = await request(`${api}/world/recipes/${recipeId}/scene`);
-  state.recipe = await request(recipeUrl);
+  state.worldScene = isPassThroughRecipe(state.recipe)
+    ? null
+    : await request(`${api}/world/recipes/${recipeId}/scene`);
   state.details.set(state.recipe.id, state.recipe);
   state.selectedRoiId = null;
   state.pendingRect = null;
@@ -667,6 +705,8 @@ async function ensureWorkingRecipe() {
     process_code: fields.processCode,
     camera_code: fields.cameraCode,
     capture_index: fields.captureIndex,
+    execution_mode: fields.executionMode,
+    skip_reason: fields.skipReason || null,
   };
   let recipeId = state.recipe?.id;
   if (recipeId) {
@@ -1225,7 +1265,7 @@ async function saveFeatureAnchorRect(rect) {
     });
     state.pendingRect = null;
     await loadRecipe(state.recipe.id);
-    notify("图像定位特征点已保存。生产检测会先对齐实图，再按配方 ROI 计算裁剪区域。", "success", false);
+    notify("图像定位特征点已保存。生产检测会先计算特征点偏移，再在实图中移动各 ROI 后裁剪。", "success", false);
   } catch (error) {
     state.pendingRect = null;
     drawCanvas();
@@ -1992,8 +2032,19 @@ function reviewResultValues(review) {
 }
 
 function renderInlineRoiTestResult(result, roi, rules, reviewConfig) {
-  const items = result.image_results?.[0]?.inspection_items || [];
+  const imageResult = result.image_results?.[0] || {};
+  const items = imageResult.inspection_items || [];
   const passed = items.filter((item) => item.status === "OK").length;
+  const alignment = imageResult.alignment || {};
+  const correction = alignment.roi_correction || {};
+  let alignmentText = "未配置特征点";
+  if (alignment.status === "APPLIED") {
+    alignmentText = `已矫正 X ${Number(correction.offset_x || 0).toFixed(1)} px，Y ${Number(correction.offset_y || 0).toFixed(1)} px`;
+  } else if (alignment.status === "FAILED") {
+    alignmentText = "定位失败，已停止 ROI 裁剪";
+  } else if (alignment.status && alignment.status !== "NOT_CONFIGURED") {
+    alignmentText = alignment.reason || "未应用定位矫正";
+  }
   const badge = byId("roiInlineTestBadge");
   byId("roiInlineTestPanel").hidden = false;
   byId("roiInlineTestTitle").textContent = `${roi.code} 测试完成`;
@@ -2004,9 +2055,15 @@ function renderInlineRoiTestResult(result, roi, rules, reviewConfig) {
     <div><small>最终结论</small><strong>${result.result === "OK" ? "当前 ROI 通过" : "当前 ROI 未通过"}</strong></div>
     <div><small>规则通过</small><strong>${passed} / ${items.length}</strong></div>
     <div><small>总耗时</small><strong>${Number(result.elapsed_ms || 0).toFixed(2)} ms</strong></div>
-    <div><small>VLM 复核</small><strong>${reviewConfig.enabled ? "已执行" : "未启用"}</strong></div>`;
-  const roiImageUrl = result.image_results?.[0]?.roi_image_url;
-  byId("roiInlineTestImage").src = `${roiImageUrl || `/results/${result.request_id}/${encodeURIComponent(roi.code)}.jpg`}?v=${Date.now()}`;
+    <div><small>VLM 复核</small><strong>${reviewConfig.enabled ? "已执行" : "未启用"}</strong></div>
+    <div><small>图像定位</small><strong>${escapeHtml(alignmentText)}</strong></div>`;
+  const roiImageUrl = imageResult.roi_image_url;
+  const testImage = byId("roiInlineTestImage");
+  if (roiImageUrl) {
+    testImage.src = `${roiImageUrl}?v=${Date.now()}`;
+  } else {
+    testImage.removeAttribute("src");
+  }
   byId("roiInlineRuleResults").innerHTML = items.map((item, index) => {
     const rule = rules[index] || {};
     const actual = item.actual || {};
@@ -2073,8 +2130,8 @@ function renderConfiguredObjects() {
   const anchorStatus = byId("featureAnchorStatus");
   if (anchorStatus) {
     anchorStatus.innerHTML = anchor?.enabled
-      ? `<div class="feature-anchor-card"><div><small>图像定位</small><strong>${escapeHtml(anchor.name || "定位特征点")}</strong><span>生产检测先以此区域对齐实图</span></div>${readOnly ? "" : '<button class="btn btn-sm btn-outline-danger" type="button" id="deleteFeatureAnchor">删除</button>'}</div>`
-      : '<div class="feature-anchor-card empty"><div><small>图像定位</small><strong>尚未配置特征点</strong><span>可选择固定螺钉、孔位或 PCB 特征后，切换到“绘制特征点”框选。</span></div></div>';
+      ? `<div class="feature-anchor-card"><div><small>图像定位</small><strong>${escapeHtml(anchor.name || "定位特征点")}</strong><span>检测时会计算偏移，并在实图中移动各 ROI 后裁剪；定位失败会停止检测，避免误判。</span></div>${readOnly ? "" : '<button class="btn btn-sm btn-outline-danger" type="button" id="deleteFeatureAnchor">删除</button>'}</div>`
+      : '<div class="feature-anchor-card empty"><div><small>图像定位</small><strong>尚未配置特征点</strong><span>请选择同一相机完整视野中的唯一固定结构，例如 PCB 特征、孔位或非重复的螺钉组合，再切换到“绘制特征点”框选。</span></div></div>';
   }
   byId("configuredObjectList").innerHTML = rois.length
     ? rois.map((roi, index) => {
@@ -2431,6 +2488,10 @@ function renderLibrary() {
       const draftStatus = family.draft
         ? `<small>${escapeHtml(family.draft.display_version || "草稿编辑中")}</small>`
         : '<small>无待发布草稿</small>';
+      const passThrough = String(recipe.execution_mode || "INSPECT").toUpperCase() === "PASS_THROUGH";
+      const executionMode = passThrough
+        ? `<strong>无需检测</strong><small>${escapeHtml(recipe.skip_reason || "原图透传")}</small>`
+        : "<strong>ROI 检测</strong><small>执行关联场景与规则</small>";
       return `
         <tr data-recipe-id="${recipe.id}" data-production-recipe-id="${family.published?.id || ""}" data-draft-recipe-id="${family.draft?.id || ""}">
           <td>${escapeHtml(recipe.project_name || "-")}</td>
@@ -2439,12 +2500,13 @@ function renderLibrary() {
           <td>${escapeHtml(recipe.material_code || "-")}</td>
           <td>${escapeHtml(recipe.process_code || "-")}</td>
           <td>${escapeHtml(recipe.camera_code || "-")} / ${recipe.capture_index}</td>
+          <td><div class="recipe-version-status">${executionMode}</div></td>
           <td>${recipe.roi_count}</td>
           <td><div class="recipe-version-status">${productionStatus}${draftStatus}</div></td>
-          <td class="recipe-table-actions"><button class="btn btn-sm btn-outline-secondary detail-recipe" type="button">详情</button><button class="btn btn-sm btn-outline-primary edit-recipe" type="button" title="编辑会打开同一配方的唯一草稿，不会影响生产版本">编辑</button><button class="btn btn-sm btn-outline-secondary history-recipe" type="button">历史 / 回滚</button><button class="btn btn-sm btn-outline-secondary copy-recipe" type="button">复制</button><button class="btn btn-sm btn-primary test-recipe" type="button">测试</button><button class="btn btn-sm btn-outline-danger delete-recipe" type="button">删除草稿</button></td>
+          <td class="recipe-table-actions"><button class="btn btn-sm btn-outline-secondary detail-recipe" type="button">详情</button><button class="btn btn-sm btn-outline-primary edit-recipe" type="button" title="编辑会打开同一配方的唯一草稿，不会影响生产版本">编辑</button><button class="btn btn-sm btn-outline-secondary history-recipe" type="button">历史 / 回滚</button><button class="btn btn-sm btn-outline-secondary copy-recipe" type="button">复制</button>${passThrough ? "" : '<button class="btn btn-sm btn-primary test-recipe" type="button">测试</button>'}<button class="btn btn-sm btn-outline-danger delete-recipe" type="button">删除草稿</button></td>
         </tr>`;
     }).join("")
-    : '<tr><td colspan="9"><div class="library-no-results">没有找到匹配的工艺配方，请清除筛选或创建新配方。</div></td></tr>';
+    : '<tr><td colspan="10"><div class="library-no-results">没有找到匹配的工艺配方，请清除筛选或创建新配方。</div></td></tr>';
   renderLibraryPagination(totalPages);
 }
 
@@ -2564,6 +2626,49 @@ function recordImageCard(title, imageUrl, emptyText) {
     : `<div class="record-detail-image empty"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(emptyText)}</span></div>`;
 }
 
+function formatElapsedMs(value) {
+  return value == null || Number.isNaN(Number(value)) ? "-" : `${Number(value).toFixed(2)} ms`;
+}
+
+function sceneNodeTypeLabel(value) {
+  const labels = {
+    START: "开始",
+    END: "结束",
+    VLM: "VLM 检测",
+    VISION_MODEL: "训练模型",
+    IMAGE_CROP: "图片裁剪",
+    IMAGE_ANNOTATE: "图片画框",
+    RULE: "规则判断",
+    WEB_API: "Web 接口",
+    IF: "条件分支",
+    LOOP: "循环控制",
+  };
+  return labels[String(value || "").toUpperCase()] || value || "节点";
+}
+
+function timingStatusClass(value) {
+  const status = String(value || "uncertain").toLowerCase();
+  return /^[a-z0-9_-]+$/.test(status) ? status : "uncertain";
+}
+
+function renderScenarioTiming(timing) {
+  if (!timing) return "";
+  if (timing.display_type === "VLM") {
+    return `<section class="record-scene-timing record-vlm-timing">
+      <header><span>场景执行耗时</span><small>${escapeHtml(timing.scenario_name || "VLM 场景")}${timing.scenario_version ? ` · v${escapeHtml(timing.scenario_version)}` : ""}</small></header>
+      <div class="record-vlm-timing-value"><span>VLM 单次调用</span><strong>${formatElapsedMs(timing.vlm_elapsed_ms)}</strong></div>
+      <p>场景总耗时：${formatElapsedMs(timing.total_elapsed_ms)}</p>
+    </section>`;
+  }
+  const nodes = Array.isArray(timing.nodes) ? timing.nodes : [];
+  return `<details class="record-scene-timing record-workflow-timing" open>
+    <summary><span>流程节点耗时</span><b>总计 ${formatElapsedMs(timing.total_elapsed_ms)}</b></summary>
+    ${nodes.length
+      ? `<div class="record-timing-table-wrap"><table class="record-timing-table"><thead><tr><th>节点</th><th>类型</th><th>状态</th><th>耗时</th></tr></thead><tbody>${nodes.map((node) => `<tr><td>${escapeHtml(node.node_name || node.node_key || "节点")}</td><td>${escapeHtml(sceneNodeTypeLabel(node.node_type))}</td><td><span class="record-timing-status ${timingStatusClass(node.status)}">${escapeHtml(node.status || "UNCERTAIN")}</span></td><td>${formatElapsedMs(node.elapsed_ms)}</td></tr>`).join("")}</tbody></table></div>`
+      : '<p class="record-timing-empty">历史记录未保存节点追踪，仅保留场景总耗时。</p>'}
+  </details>`;
+}
+
 function renderDetectionRecordDetail(detail) {
   const recipeCards = (detail.recipes || []).map((recipe) => `
     <section class="record-recipe-detail">
@@ -2571,16 +2676,15 @@ function renderDetectionRecordDetail(detail) {
         <div><small>工艺配方</small><h3>${escapeHtml(recipe.recipe_code)} · ${escapeHtml(recipe.recipe_name)}</h3></div>
         <span class="result-badge ${(recipe.result || "error").toLowerCase()}">${escapeHtml(recipe.result || "ERROR")}</span>
       </header>
-      <div class="record-recipe-image-row">
-        ${recordImageCard("配方标准图", recipe.standard_image_url, "该配方尚未保存标准图")}
-      </div>
+      ${String(recipe.execution_mode || "INSPECT").toUpperCase() === "PASS_THROUGH"
+        ? `<div class="records-empty">该配方配置为无需检测，图片未下载、裁剪或调用模型，已按原路径透传。原因：${escapeHtml(recipe.skip_reason || "未填写")}</div>`
+        : `<div class="record-recipe-image-row">${recordImageCard("配方标准图", recipe.standard_image_url, "该配方尚未保存标准图")}</div>`}
       ${(recipe.images || []).map((image) => `
         <article class="record-image-detail">
           <header><strong>${escapeHtml(image.source_image_path || "实测图片")}</strong><span class="result-badge ${(image.status || "error").toLowerCase()}">${escapeHtml(image.status || "ERROR")}</span></header>
-          <div class="record-recipe-image-row">
-            ${recordImageCard("本地实测图", image.actual_image_url, "本地缓存图不存在")}
-            ${recordImageCard("处理结果图", image.result_image_url, "结果图不存在")}
-          </div>
+          ${image.pass_through
+            ? `<div class="records-empty">此图片原图透传，未生成标注结果图。${escapeHtml(image.skip_reason || recipe.skip_reason || "")}</div>`
+            : `<div class="record-recipe-image-row">${recordImageCard("本地实测图", image.actual_image_url, "本地缓存图不存在")}${recordImageCard("处理结果图", image.result_image_url, "结果图不存在")}</div>`}
           <div class="record-roi-detail-grid">
             ${(image.rois || []).map((roi) => `
               <article class="record-roi-detail ${String(roi.status || "ERROR").toLowerCase()}">
@@ -2594,6 +2698,7 @@ function renderDetectionRecordDetail(detail) {
                   <div><dt>模型分数</dt><dd>${roi.score == null ? "-" : escapeHtml(Number(roi.score).toFixed(4))}</dd></div>
                   <div><dt>处理说明</dt><dd>${escapeHtml(roi.message || "-")}</dd></div>
                 </dl>
+                 ${renderScenarioTiming(roi.scenario_timing)}
                 <details><summary>查看模型处理结果</summary><pre>${escapeHtml(JSON.stringify(roi.processing || {}, null, 2))}</pre></details>
               </article>`).join("") || '<div class="records-empty">该图片没有 ROI 处理明细</div>'}
           </div>
@@ -3226,8 +3331,17 @@ byId("recipeHistoryList").addEventListener("click", async (event) => {
 });
 
 byId("newRecipeFromLibrary").addEventListener("click", () => {
+  byId("createRecipeForm").reset();
+  byId("createRecipeForm").elements.capture_index.value = "1";
+  byId("createRecipeForm").elements.execution_mode.value = "INSPECT";
+  updateCreateRecipeExecutionModeUI();
   const modal = new bootstrap.Modal(byId("createRecipeModal"));
   modal.show();
+});
+byId("createRecipeExecutionMode").addEventListener("change", updateCreateRecipeExecutionModeUI);
+byId("recipeExecutionMode").addEventListener("change", () => {
+  updateRecipeExecutionModeUI();
+  applyEditorAccessMode();
 });
 byId("createRecipeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -3240,9 +3354,15 @@ byId("createRecipeForm").addEventListener("submit", async (event) => {
     cameraCode: normalizeCode(values.camera_code),
     captureIndex: Math.max(1, Number(values.capture_index || 1)),
     version: String(values.version || "1.0").trim() || "1.0",
+    executionMode: String(values.execution_mode || "INSPECT").trim().toUpperCase(),
+    skipReason: String(values.skip_reason || "").trim(),
   };
   if (!fields.lineCode || !fields.materialCode || !fields.processCode || !fields.cameraCode) {
     notify("请填写拉线、物料号、工序和相机。", "warning", false);
+    return;
+  }
+  if (fields.executionMode === "PASS_THROUGH" && !fields.skipReason) {
+    notify("请选择“无需检测”时，请填写该图片透传的原因。", "warning", false);
     return;
   }
   const submit = event.currentTarget.querySelector('button[type="submit"]');
@@ -3267,14 +3387,24 @@ byId("createRecipeForm").addEventListener("submit", async (event) => {
         process_code: fields.processCode,
         camera_code: fields.cameraCode,
         capture_index: fields.captureIndex,
+        execution_mode: fields.executionMode,
+        skip_reason: fields.skipReason || null,
       }),
     });
+    if (fields.executionMode === "PASS_THROUGH") {
+      await request(`${api}/configuration/recipes/${created.id}/publish`, { method: "POST" });
+      bootstrap.Modal.getOrCreateInstance(byId("createRecipeModal")).hide();
+      await loadData();
+      switchView("libraryView");
+      notify("无需检测配方已发布。detect 匹配后会直接返回原图路径，不会调用 SMB 或模型服务。", "success", false);
+      return;
+    }
     window.location.href = `/recipes/editor?recipe_id=${created.id}`;
   } catch (error) {
     notify(error.message, "danger", false);
   } finally {
     submit.disabled = false;
-    submit.textContent = "创建并进入配置";
+    updateCreateRecipeExecutionModeUI();
   }
 });
 

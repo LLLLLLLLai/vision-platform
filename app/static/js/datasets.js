@@ -79,6 +79,30 @@
     return "已标注";
   }
 
+  function itemStatus(item, dataset) {
+    return isTraining(dataset)
+      ? annotationSummary(item, dataset)
+      : (item.ground_truth || "未标注");
+  }
+
+  function openItemPreview(itemId) {
+    const dataset = selected();
+    const item = dataset?.items?.find((candidate) => Number(candidate.id) === Number(itemId));
+    if (!item || item.media_type === "VIDEO" || !item.file_url) return;
+    byId("datasetItemPreviewTitle").textContent = item.original_name || "查看素材";
+    byId("datasetItemPreviewMeta").textContent = [
+      sourceLabel(item.source),
+      itemStatus(item, dataset),
+      dataset?.name || "数据集素材",
+    ].filter(Boolean).join(" · ");
+    const image = byId("datasetItemPreviewImage");
+    image.src = item.file_url;
+    image.alt = item.original_name || "数据集素材原图";
+    const originalLink = byId("datasetItemPreviewOpenOriginal");
+    originalLink.href = item.file_url;
+    openModal("datasetItemPreviewModal");
+  }
+
   function renderList() {
     const keyword = byId("datasetSearch").value.trim().toLowerCase();
     const datasets = state.datasets.filter((item) => !keyword || [item.code, item.name, item.purpose].join(" ").toLowerCase().includes(keyword));
@@ -94,7 +118,7 @@
       ? items.map((item) => {
         const media = item.media_type === "VIDEO"
           ? `<video controls src="${escapeHtml(item.file_url || "")}"></video>`
-          : `<img src="${escapeHtml(item.file_url || "")}" alt="${escapeHtml(item.original_name)}">`;
+          : `<button class="dataset-item-preview" data-item-preview="${item.id}" type="button" title="点击查看原图"><img src="${escapeHtml(item.file_url || "")}" alt="${escapeHtml(item.original_name)}"><span>点击查看原图</span></button>`;
         const split = item.split ? ` · ${escapeHtml(item.split)}` : "";
         const source = ` · ${escapeHtml(sourceLabel(item.source))}`;
         const truthActions = !isTraining(dataset)
@@ -103,7 +127,7 @@
         const annotationAction = isTraining(dataset)
           ? `<button class="btn btn-sm ${item.annotation_status === "LABELED" ? "btn-outline-success" : "btn-primary"}" data-item-annotate="${item.id}" type="button">${annotationType(dataset) === "DETECTION" ? (item.annotation_status === "LABELED" ? "编辑检测框" : "框选标注") : (item.annotation_status === "LABELED" ? "编辑标注" : "添加标注")}</button>`
           : "";
-        const status = isTraining(dataset) ? annotationSummary(item, dataset) : (item.ground_truth || "未标注");
+        const status = itemStatus(item, dataset);
         return `<article class="dataset-item-card"><div>${media}</div><div class="dataset-item-content"><strong title="${escapeHtml(item.original_name)}">${escapeHtml(item.original_name)}</strong><small>${escapeHtml(status)}${split}${source}</small><div class="dataset-item-actions">${truthActions}${annotationAction}<button class="btn btn-sm btn-outline-danger" data-item-remove="${item.id}" type="button">删除</button></div></div></article>`;
       }).join("")
       : '<div class="muted-copy">还没有素材。评测数据集请标记 OK 或 NG；YOLO 训练数据集上传后可直接框选目标。</div>';
@@ -1048,10 +1072,12 @@
       if (event.code === "Space") state.annotation.viewport.spacePressed = false;
     });
     byId("datasetItems").addEventListener("click", (event) => {
+      const previewButton = event.target.closest("[data-item-preview]");
       const truthButton = event.target.closest("[data-item-truth]");
       const annotateButton = event.target.closest("[data-item-annotate]");
       const removeButton = event.target.closest("[data-item-remove]");
-      if (truthButton) updateTruth(truthButton.dataset.itemId, truthButton.dataset.itemTruth);
+      if (previewButton) openItemPreview(previewButton.dataset.itemPreview);
+      else if (truthButton) updateTruth(truthButton.dataset.itemId, truthButton.dataset.itemTruth);
       else if (annotateButton) openAnnotation(annotateButton.dataset.itemAnnotate);
       else if (removeButton) removeItem(removeButton.dataset.itemRemove);
     });

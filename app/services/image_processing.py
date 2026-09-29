@@ -35,11 +35,22 @@ def roi_pixel_box(
     roi: RegionOfInterest,
     image_width: int,
     image_height: int,
+    *,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
 ) -> tuple[int, int, int, int]:
-    x1 = round(roi.x_ratio * image_width) - roi.padding
-    y1 = round(roi.y_ratio * image_height) - roi.padding
-    x2 = round((roi.x_ratio + roi.width_ratio) * image_width) + roi.padding
-    y2 = round((roi.y_ratio + roi.height_ratio) * image_height) + roi.padding
+    """Return a bounded ROI box after applying a measured image offset.
+
+    ``offset_x`` and ``offset_y`` describe how far the production image moved
+    relative to the reference image.  Positive values move the crop to the
+    right/bottom in the production image.  This keeps ROI pixels on the
+    original capture instead of relying on a resampled, warped full image.
+    """
+
+    x1 = round((roi.x_ratio * image_width) + offset_x) - roi.padding
+    y1 = round((roi.y_ratio * image_height) + offset_y) - roi.padding
+    x2 = round(((roi.x_ratio + roi.width_ratio) * image_width) + offset_x) + roi.padding
+    y2 = round(((roi.y_ratio + roi.height_ratio) * image_height) + offset_y) + roi.padding
     return (
         max(0, x1),
         max(0, y1),
@@ -52,10 +63,19 @@ def crop_roi(
     source_path: str,
     roi: RegionOfInterest,
     destination_path: Path,
+    *,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
 ) -> tuple[Path, tuple[int, int, int, int]]:
     with Image.open(source_path) as opened:
         image = opened.convert("RGB")
-        box = roi_pixel_box(roi, image.width, image.height)
+        box = roi_pixel_box(
+            roi,
+            image.width,
+            image.height,
+            offset_x=offset_x,
+            offset_y=offset_y,
+        )
         cropped = image.crop(box)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         cropped.save(destination_path, quality=95)
@@ -77,6 +97,7 @@ def align_image_to_reference(
         return None, {"status": "SKIPPED", "reason": "图像或基准图无法读取"}
 
     reference_height, reference_width = reference.shape[:2]
+    source_height, source_width = source.shape[:2]
     source = cv2.resize(source, (reference_width, reference_height), interpolation=cv2.INTER_AREA)
     scale = min(1.0, float(max(1, max_dimension)) / max(reference_width, reference_height))
     working_size = (
@@ -108,6 +129,16 @@ def align_image_to_reference(
         "method": "PHASE_CORRELATION_TRANSLATION",
         "shift_x": round(shift_x, 3),
         "shift_y": round(shift_y, 3),
+        # The phase-correlation shift is the production-image movement.
+        # The ROI crop therefore needs to move by this same amount.
+        "roi_offset_x": round(shift_x, 3),
+        "roi_offset_y": round(shift_y, 3),
+        "correction_x": round(-shift_x, 3),
+        "correction_y": round(-shift_y, 3),
+        "reference_width": reference_width,
+        "reference_height": reference_height,
+        "source_width": source_width,
+        "source_height": source_height,
         "response": round(float(response), 6),
         "max_shift_x": round(max_shift_x, 3),
         "max_shift_y": round(max_shift_y, 3),
@@ -150,6 +181,161 @@ def _expand_box(
     )
 
 
+def _anchor_search_box(
+    box: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    margin_ratio: float,
+    max_shift_ratio: float,
+) -> tuple[int, int, int, int]:
+    """Build an anchor search area that can cover the configured shift.
+
+    The previous implementation only expanded by a percentage of the anchor
+    itself.  A small screw or hole could move beyond that narrow region even
+    when the configured overall image shift was still allowed.
+    """
+
+    x1, y1, x2, y2 = box
+    anchor_width = max(1, x2 - x1)
+    anchor_height = max(1, y2 - y1)
+    margin_x = max(
+        12,
+        round(anchor_width * max(0.0, margin_ratio)),
+        round(image_width * max(0.0, max_shift_ratio)),
+    )
+    margin_y = max(
+        12,
+        round(anchor_height * max(0.0, margin_ratio)),
+        round(image_height * max(0.0, max_shift_ratio)),
+    )
+    return (
+        max(0, x1 - margin_x),
+        max(0, y1 - margin_y),
+        min(image_width, x2 + margin_x),
+        min(image_height, y2 + margin_y),
+    )
+
+
+def _second_best_template_score(
+    scores: np.ndarray,
+    location: tuple[int, int],
+    template_width: int,
+    template_height: int,
+) -> float:
+    """Return the best distinct candidate, excluding the winning template."""
+
+    masked = scores.copy()
+    x, y = location
+    exclusion_x = max(1, template_width // 2)
+    exclusion_y = max(1, template_height // 2)
+    masked[
+        max(0, y - exclusion_y): min(masked.shape[0], y + exclusion_y + 1),
+        max(0, x - exclusion_x): min(masked.shape[1], x + exclusion_x + 1),
+    ] = -1.0
+    return float(np.max(masked)) if masked.size else -1.0
+
+
+def _template_anchor_transform(
+    reference: np.ndarray,
+    source: np.ndarray,
+    anchor_box: tuple[int, int, int, int],
+    search_box: tuple[int, int, int, int],
+    *,
+    minimum_score: float,
+    minimum_margin: float,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Locate a fixed anchor by template matching when ORB has too few points."""
+
+    anchor_x1, anchor_y1, anchor_x2, anchor_y2 = anchor_box
+    search_x1, search_y1, search_x2, search_y2 = search_box
+    template = reference[anchor_y1:anchor_y2, anchor_x1:anchor_x2]
+    search = source[search_y1:search_y2, search_x1:search_x2]
+    metadata: dict[str, Any] = {
+        "method": "ANCHOR_TEMPLATE_TRANSLATION",
+        "anchor_box": list(anchor_box),
+        "search_box": list(search_box),
+    }
+    if min(template.shape[:2]) < 24 or min(search.shape[:2]) < 24:
+        metadata["reason"] = "定位特征点区域过小，无法进行模板定位"
+        return None, metadata
+    if search.shape[0] < template.shape[0] or search.shape[1] < template.shape[1]:
+        metadata["reason"] = "定位特征点搜索区域不足"
+        return None, metadata
+
+    # Contrast equalisation makes a metal fastener or PCB feature less
+    # sensitive to exposure changes while preserving the local shape.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    template_gray = clahe.apply(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY))
+    search_gray = clahe.apply(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY))
+    template_gray = cv2.GaussianBlur(template_gray, (3, 3), 0)
+    search_gray = cv2.GaussianBlur(search_gray, (3, 3), 0)
+    scores = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+    _, best_score, _, best_location = cv2.minMaxLoc(scores)
+    second_score = _second_best_template_score(
+        scores,
+        best_location,
+        template_gray.shape[1],
+        template_gray.shape[0],
+    )
+    uniqueness_margin = float(best_score - second_score)
+    metadata.update(
+        {
+            "template_score": round(float(best_score), 6),
+            "template_second_score": round(second_score, 6),
+            "template_uniqueness_margin": round(uniqueness_margin, 6),
+            "template_minimum_score": round(float(minimum_score), 6),
+            "template_minimum_margin": round(float(minimum_margin), 6),
+        }
+    )
+    if best_score < minimum_score:
+        metadata["reason"] = "定位特征点模板匹配置信度不足"
+        return None, metadata
+    if uniqueness_margin < minimum_margin:
+        metadata["reason"] = "定位特征点存在多个相似位置，请扩大特征点范围或选择更唯一的结构"
+        return None, metadata
+
+    source_anchor_x = search_x1 + best_location[0]
+    source_anchor_y = search_y1 + best_location[1]
+    roi_offset_x = float(source_anchor_x - anchor_x1)
+    roi_offset_y = float(source_anchor_y - anchor_y1)
+    metadata.update(
+        {
+            "matched_anchor_box": [
+                source_anchor_x,
+                source_anchor_y,
+                source_anchor_x + template_gray.shape[1],
+                source_anchor_y + template_gray.shape[0],
+            ],
+            "roi_offset_x": round(roi_offset_x, 3),
+            "roi_offset_y": round(roi_offset_y, 3),
+            "correction_x": round(-roi_offset_x, 3),
+            "correction_y": round(-roi_offset_y, 3),
+        }
+    )
+    transform = np.float32([[1, 0, -roi_offset_x], [0, 1, -roi_offset_y]])
+    return transform, metadata
+
+
+def alignment_roi_offset_for_source(alignment: dict[str, Any]) -> tuple[float, float]:
+    """Scale an alignment offset from reference pixels to source pixels."""
+
+    try:
+        reference_width = float(alignment.get("reference_width") or 0)
+        reference_height = float(alignment.get("reference_height") or 0)
+        source_width = float(alignment.get("source_width") or 0)
+        source_height = float(alignment.get("source_height") or 0)
+        offset_x = float(alignment.get("roi_offset_x") or 0)
+        offset_y = float(alignment.get("roi_offset_y") or 0)
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+    if reference_width <= 0 or reference_height <= 0 or source_width <= 0 or source_height <= 0:
+        return 0.0, 0.0
+    return (
+        offset_x * (source_width / reference_width),
+        offset_y * (source_height / reference_height),
+    )
+
+
 def align_image_with_anchor(
     source_path: str,
     reference_path: str,
@@ -161,6 +347,8 @@ def align_image_with_anchor(
     minimum_inliers: int,
     minimum_inlier_ratio: float,
     maximum_rotation_degrees: float,
+    minimum_template_score: float = 0.55,
+    minimum_template_margin: float = 0.03,
 ) -> tuple[Path | None, dict[str, Any]]:
     reference = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
     source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
@@ -168,13 +356,15 @@ def align_image_with_anchor(
         return None, {"status": "SKIPPED", "reason": "图像或基准图无法读取"}
 
     reference_height, reference_width = reference.shape[:2]
+    source_height, source_width = source.shape[:2]
     source = cv2.resize(source, (reference_width, reference_height), interpolation=cv2.INTER_AREA)
     anchor_box = roi_pixel_box(anchor_roi, reference_width, reference_height)
-    search_box = _expand_box(
+    search_box = _anchor_search_box(
         anchor_box,
         reference_width,
         reference_height,
         search_margin_ratio,
+        max_shift_ratio,
     )
     x1, y1, x2, y2 = search_box
     reference_crop = reference[y1:y2, x1:x2]
@@ -193,12 +383,43 @@ def align_image_with_anchor(
         "anchor_roi_code": anchor_roi.code,
         "anchor_box": list(anchor_box),
         "search_box": list(search_box),
+        "reference_width": reference_width,
+        "reference_height": reference_height,
+        "source_width": source_width,
+        "source_height": source_height,
         "reference_keypoints": len(reference_keypoints),
         "source_keypoints": len(source_keypoints),
     }
+    def try_template_alignment(failure_reason: str) -> tuple[Path | None, dict[str, Any]]:
+        transform, template_metadata = _template_anchor_transform(
+            reference,
+            source,
+            anchor_box,
+            search_box,
+            minimum_score=minimum_template_score,
+            minimum_margin=minimum_template_margin,
+        )
+        metadata["template"] = template_metadata
+        if transform is None:
+            metadata["reason"] = f"{failure_reason}；{template_metadata.get('reason', '模板定位失败')}"
+            return None, metadata
+        aligned = cv2.warpAffine(
+            source,
+            transform,
+            (reference_width, reference_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(destination_path), aligned):
+            raise ValueError(f"无法写入对齐图片: {destination_path}")
+        metadata.update(template_metadata)
+        metadata["status"] = "APPLIED"
+        metadata["method"] = "ANCHOR_TEMPLATE_TRANSLATION"
+        return destination_path, metadata
+
     if reference_descriptors is None or source_descriptors is None:
-        metadata["reason"] = "对齐基准缺少可用特征点"
-        return None, metadata
+        return try_template_alignment("对齐基准缺少可用特征点")
 
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     raw_matches = matcher.knnMatch(source_descriptors, reference_descriptors, k=2)
@@ -209,8 +430,7 @@ def align_image_with_anchor(
     ]
     metadata["match_count"] = len(good_matches)
     if len(good_matches) < max(3, minimum_inliers):
-        metadata["reason"] = "对齐基准匹配点不足"
-        return None, metadata
+        return try_template_alignment("对齐基准匹配点不足")
 
     source_points = np.float32(
         [
@@ -240,8 +460,7 @@ def align_image_with_anchor(
         refineIters=10,
     )
     if transform is None or inlier_mask is None:
-        metadata["reason"] = "无法根据特征点计算对齐变换"
-        return None, metadata
+        return try_template_alignment("无法根据特征点计算对齐变换")
     inliers = int(np.count_nonzero(inlier_mask))
     inlier_ratio = inliers / len(good_matches)
     scale = float(np.sqrt(transform[0, 0] ** 2 + transform[1, 0] ** 2))
@@ -258,11 +477,16 @@ def align_image_with_anchor(
             "rotation_degrees": round(rotation, 4),
             "shift_x": round(translation_x, 3),
             "shift_y": round(translation_y, 3),
+            # The affine translation maps source -> reference.  ROI crops on
+            # the source image therefore move in the opposite direction.
+            "roi_offset_x": round(-translation_x, 3),
+            "roi_offset_y": round(-translation_y, 3),
+            "correction_x": round(translation_x, 3),
+            "correction_y": round(translation_y, 3),
         }
     )
     if inliers < minimum_inliers or inlier_ratio < minimum_inlier_ratio:
-        metadata["reason"] = "对齐基准内点不足，回退整图平移对齐"
-        return None, metadata
+        return try_template_alignment("对齐基准内点不足")
     if abs(rotation) > maximum_rotation_degrees or not 0.90 <= scale <= 1.10:
         metadata["reason"] = "对齐变换超出允许的旋转或缩放范围"
         return None, metadata

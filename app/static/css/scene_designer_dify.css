@@ -1121,6 +1121,69 @@
   background: #d2902f;
 }
 
+.scene-designer-page .palette-annotate b,
+.scene-designer-page .workflow-canvas-node.workflow-node-image_annotate .workflow-node-icon {
+  color: #0b7667;
+  background: #e0f6f1;
+}
+
+.scene-designer-page .workflow-canvas-node.workflow-node-image_annotate::before {
+  background: #159a86;
+}
+
+.node-annotate-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 11px;
+  border: 1px solid #dfe9e7;
+  border-radius: 10px;
+  background: #f8fcfb;
+}
+
+.node-annotate-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #4c6470;
+  font-size: .75rem;
+  font-weight: 650;
+}
+
+.workflow-trace-artifact {
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 9px;
+  border: 1px solid #dcebe8;
+  border-radius: 10px;
+  color: #167466;
+  background: #f7fcfb;
+  text-decoration: none;
+}
+
+.workflow-trace-artifact:hover {
+  border-color: #91d3c7;
+  color: #0d5e52;
+}
+
+.workflow-trace-artifact img {
+  display: block;
+  width: 100%;
+  max-height: 144px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #edf1f3;
+}
+
+.workflow-trace-artifact span {
+  font-size: .78rem;
+  font-weight: 750;
+}
+
 .workflow-stage-controls,
 .workflow-run-controls,
 .workflow-view-controls {

@@ -56,6 +56,8 @@ class RecipeCreate(BaseModel):
     process_code: str | None = None
     camera_code: str | None = None
     capture_index: int = Field(default=1, ge=1)
+    execution_mode: str = Field(default="INSPECT", max_length=30)
+    skip_reason: str | None = Field(default=None, max_length=500)
 
 
 class RecipeUpdate(BaseModel):
@@ -70,6 +72,8 @@ class RecipeUpdate(BaseModel):
     process_code: str | None = None
     camera_code: str | None = None
     capture_index: int = Field(default=1, ge=1)
+    execution_mode: str | None = Field(default=None, max_length=30)
+    skip_reason: str | None = Field(default=None, max_length=500)
 
 
 class RoiCreate(BaseModel):
@@ -170,6 +174,20 @@ def _recipe_values(
     values["line_code"] = payload.line_code or station.line_code
     values["material_code"] = payload.material_code or product.code
     values["process_code"] = payload.process_code or station.process_code
+    execution_mode = str(values.get("execution_mode") or "INSPECT").strip().upper()
+    if execution_mode not in {"INSPECT", "PASS_THROUGH"}:
+        raise HTTPException(
+            status_code=422,
+            detail="execution_mode 仅支持 INSPECT 或 PASS_THROUGH。",
+        )
+    skip_reason = (values.get("skip_reason") or "").strip() or None
+    if execution_mode == "PASS_THROUGH" and skip_reason is None:
+        raise HTTPException(
+            status_code=400,
+            detail="无需检测配方必须填写透传原因。",
+        )
+    values["execution_mode"] = execution_mode
+    values["skip_reason"] = skip_reason if execution_mode == "PASS_THROUGH" else None
     required_parts = (
         values["line_code"],
         values["material_code"],
@@ -201,6 +219,14 @@ def _ensure_recipe_editable(recipe: Recipe) -> None:
         raise HTTPException(
             status_code=409,
             detail="已发布或已归档配方不能直接修改，请先创建新的编辑草稿。",
+        )
+
+
+def _ensure_recipe_supports_inspection_configuration(recipe: Recipe) -> None:
+    if recipe.execution_mode == "PASS_THROUGH":
+        raise HTTPException(
+            status_code=409,
+            detail="无需检测配方仅用于原图透传，不能配置基准图、ROI、特征点或检测规则。",
         )
 
 
@@ -342,6 +368,8 @@ def _clone_recipe_content(
         name=name,
         version=source.version,
         status="DRAFT",
+        execution_mode=source.execution_mode,
+        skip_reason=source.skip_reason,
         project_name=source.project_name,
         product_id=source.product_id,
         station_id=source.station_id,
@@ -681,6 +709,8 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "name": item.name,
             "version": item.version,
             "status": item.status,
+            "execution_mode": item.execution_mode,
+            "skip_reason": item.skip_reason,
             "project_name": item.project_name,
             "product_id": item.product_id,
             "station_id": item.station_id,
@@ -732,7 +762,19 @@ def update_recipe(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
-    for field, value in _recipe_values(database, payload).items():
+    values = _recipe_values(database, payload)
+    if payload.execution_mode is None:
+        values["execution_mode"] = recipe.execution_mode
+        values["skip_reason"] = recipe.skip_reason
+    if (
+        values["execution_mode"] != recipe.execution_mode
+        and (recipe.base_image_path or recipe.rois)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="已有基准图或 ROI 的配方不能切换执行方式；请新建对应类型的配方。",
+        )
+    for field, value in values.items():
         setattr(recipe, field, value)
     _mark_recipe_changed(recipe)
     database.commit()
@@ -781,6 +823,8 @@ def recipe_detail(
         "name": recipe.name,
         "version": recipe.version,
         "status": recipe.status,
+        "execution_mode": recipe.execution_mode,
+        "skip_reason": recipe.skip_reason,
         "project_name": recipe.project_name,
         "product_id": recipe.product_id,
         "station_id": recipe.station_id,
@@ -816,6 +860,7 @@ def upload_recipe_image(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     path = _save_upload(file, Path(PROJECT_ROOT / "uploads" / "recipes" / str(recipe_id)))
     old_image_path = recipe.base_image_path
     old_rois = list(recipe.rois)
@@ -876,6 +921,7 @@ def save_recipe_feature_anchor(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     if recipe.base_image_path is None:
         raise HTTPException(status_code=400, detail="请先上传配方基准图片。")
     anchor = database.scalar(
@@ -903,6 +949,7 @@ def delete_recipe_feature_anchor(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     anchor = database.scalar(
         select(RecipeFeatureAnchor).where(RecipeFeatureAnchor.recipe_id == recipe.id)
     )
@@ -923,6 +970,7 @@ def create_roi(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     values = payload.model_dump()
     values["object_type"] = _validated_reference_object_type(
         database,
@@ -960,6 +1008,7 @@ def update_roi(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     values = payload.model_dump()
     values["object_type"] = _validated_reference_object_type(
         database,
@@ -991,6 +1040,7 @@ async def capture_roi_reference(
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None or not recipe.base_image_path:
         raise HTTPException(status_code=400, detail="Recipe image is required.")
+    _ensure_recipe_supports_inspection_configuration(recipe)
 
     group_code = f"{recipe.code}_{roi.code}_AUTO"[:100]
     group = database.scalar(
@@ -1106,6 +1156,7 @@ def analyze_color(
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None or not recipe.base_image_path:
         raise HTTPException(status_code=400, detail="Recipe image is required.")
+    _ensure_recipe_supports_inspection_configuration(recipe)
     try:
         return {
             "code": 0,
@@ -1125,6 +1176,7 @@ def delete_roi(roi_id: int, database: Session = Depends(get_db)) -> dict[str, bo
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     database.delete(roi)
     _mark_recipe_changed(recipe)
     database.commit()
@@ -1144,6 +1196,7 @@ def create_inspection_item(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
+    _ensure_recipe_supports_inspection_configuration(recipe)
     item = InspectionItem(roi_id=roi_id, **payload.model_dump())
     database.add(item)
     database.flush()
@@ -1166,6 +1219,7 @@ def delete_inspection_item(
     recipe = database.get(Recipe, roi.recipe_id) if roi is not None else None
     if recipe is not None:
         _ensure_recipe_editable(recipe)
+        _ensure_recipe_supports_inspection_configuration(recipe)
     database.delete(item)
     database.flush()
     if roi is not None:
@@ -1211,6 +1265,8 @@ def copy_recipe(
         name=f"{source.name}（副本）"[:200],
         version=source.version,
         status="DRAFT",
+        execution_mode=source.execution_mode,
+        skip_reason=source.skip_reason,
         project_name=source.project_name,
         product_id=source.product_id,
         station_id=source.station_id,
@@ -1403,6 +1459,8 @@ def list_recipe_versions(
                 "code": item.code,
                 "status": item.status,
                 "version": item.version,
+                "execution_mode": item.execution_mode,
+                "skip_reason": item.skip_reason,
                 "created_at": item.created_at.isoformat() if item.created_at else None,
                 "updated_at": item.updated_at.isoformat() if item.updated_at else None,
                 **_recipe_version_metadata(database, item),
@@ -1464,33 +1522,37 @@ def publish_recipe(
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
-    if not recipe.base_image_path:
-        raise HTTPException(status_code=400, detail="Base image is required.")
-    if not recipe.rois:
-        raise HTTPException(status_code=400, detail="At least one ROI is required.")
-    bindings = database.scalars(
-        select(RoiScenarioBinding).join(InspectionScenarioVersion).where(
-            RoiScenarioBinding.roi_id.in_([roi.id for roi in recipe.rois]),
-            RoiScenarioBinding.enabled.is_(True),
-            InspectionScenarioVersion.status == "PUBLISHED",
-        )
-    ).all()
-    bound_roi_ids = {binding.roi_id for binding in bindings}
-    unconfigured = [
-        roi.code
-        for roi in recipe.rois
-        if roi.enabled and not roi.inspection_items and roi.id not in bound_roi_ids
-    ]
-    if unconfigured:
-        raise HTTPException(
-            status_code=400,
-            detail=f"以下 ROI 尚未关联已发布场景或旧规则：{'、'.join(unconfigured)}。",
-        )
-    if not any(roi.inspection_items or roi.id in bound_roi_ids for roi in recipe.rois):
-        raise HTTPException(
-            status_code=400,
-            detail="至少需要一个已发布场景关联或检测规则。",
-        )
+    if recipe.execution_mode == "PASS_THROUGH":
+        if not (recipe.skip_reason or "").strip():
+            raise HTTPException(status_code=400, detail="无需检测配方必须填写透传原因。")
+    else:
+        if not recipe.base_image_path:
+            raise HTTPException(status_code=400, detail="Base image is required.")
+        if not recipe.rois:
+            raise HTTPException(status_code=400, detail="At least one ROI is required.")
+        bindings = database.scalars(
+            select(RoiScenarioBinding).join(InspectionScenarioVersion).where(
+                RoiScenarioBinding.roi_id.in_([roi.id for roi in recipe.rois]),
+                RoiScenarioBinding.enabled.is_(True),
+                InspectionScenarioVersion.status == "PUBLISHED",
+            )
+        ).all()
+        bound_roi_ids = {binding.roi_id for binding in bindings}
+        unconfigured = [
+            roi.code
+            for roi in recipe.rois
+            if roi.enabled and not roi.inspection_items and roi.id not in bound_roi_ids
+        ]
+        if unconfigured:
+            raise HTTPException(
+                status_code=400,
+                detail=f"以下 ROI 尚未关联已发布场景或旧规则：{'、'.join(unconfigured)}。",
+            )
+        if not any(roi.inspection_items or roi.id in bound_roi_ids for roi in recipe.rois):
+            raise HTTPException(
+                status_code=400,
+                detail="至少需要一个已发布场景关联或检测规则。",
+            )
     family_code = _normalize_recipe_family(recipe)
     other_recipes = database.scalars(
         select(Recipe).where(
@@ -1517,7 +1579,8 @@ def publish_recipe(
     ) + 1
     recipe.version_no = next_version_no
     recipe.version = f"V{next_version_no}"
-    sync_recipe_world_model(database, recipe)
+    if recipe.execution_mode != "PASS_THROUGH":
+        sync_recipe_world_model(database, recipe)
     recipe.status = "PUBLISHED"
     database.commit()
     return {

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageOps
+
 from app.core.config import PROJECT_ROOT
 
 
@@ -42,12 +44,17 @@ _TASK_OUTPUT_PROFILES: dict[str, dict[str, Any]] = {
             "confidence",
             "reason",
             "task_type",
+            "image",
+            "image.width",
+            "image.height",
             "detection_count",
+            "object_count",
             "objects",
             "objects.0.class_id",
             "objects.0.label",
             "objects.0.confidence",
             "objects.0.bbox",
+            "objects.0.bbox_format",
         ),
     },
     "YOLO_SEGMENTATION": {
@@ -63,13 +70,19 @@ _TASK_OUTPUT_PROFILES: dict[str, dict[str, Any]] = {
             "confidence",
             "reason",
             "task_type",
+            "image",
+            "image.width",
+            "image.height",
             "detection_count",
+            "object_count",
             "objects",
             "objects.0.class_id",
             "objects.0.label",
             "objects.0.confidence",
             "objects.0.bbox",
+            "objects.0.bbox_format",
             "objects.0.mask",
+            "objects.0.mask_format",
         ),
     },
     "YOLO_CLASSIFICATION": {
@@ -85,6 +98,9 @@ _TASK_OUTPUT_PROFILES: dict[str, dict[str, Any]] = {
             "confidence",
             "reason",
             "task_type",
+            "image",
+            "image.width",
+            "image.height",
             "classification",
             "classification.top1_class_id",
             "classification.top1_label",
@@ -250,6 +266,23 @@ def _inspection_decision(
     return "OK", f"目标数量为 {actual_count}，符合节点期望。"
 
 
+def _image_metadata(source: Path) -> dict[str, Any]:
+    """Read image dimensions once so geometry outputs have an explicit space."""
+
+    try:
+        with Image.open(source) as original:
+            image = ImageOps.exif_transpose(original)
+            width, height = image.size
+    except Exception as exc:
+        raise VisionModelRuntimeError(f"无法读取待检测图片尺寸：{exc}") from exc
+    return {
+        "path": str(source),
+        "width": int(width),
+        "height": int(height),
+        "coordinate_space": "PIXEL",
+    }
+
+
 def run_yolo_inference(
     spec: PublishedVisionModelSpec,
     image_path: str,
@@ -263,6 +296,7 @@ def run_yolo_inference(
         source = PROJECT_ROOT / source
     if not source.is_file():
         raise VisionModelRuntimeError("待检测图片不存在或当前服务无法读取。")
+    image_metadata = _image_metadata(source)
     parameters = dict(config or {})
     confidence_threshold = float(parameters.get("confidence", parameters.get("conf", 0.25)))
     iou_threshold = float(parameters.get("iou", 0.45))
@@ -299,14 +333,17 @@ def run_yolo_inference(
             class_id = int(float(classes[index])) if index < len(classes) else -1
             score = float(confidences[index]) if index < len(confidences) else 0.0
             entry: dict[str, Any] = {
+                "index": index,
                 "class_id": class_id,
                 "label": _label_for(class_id, getattr(result, "names", None), spec.labels),
                 "confidence": round(score, 6),
                 "bbox": [round(float(value), 2) for value in bbox[:4]],
+                "bbox_format": "XYXY_PIXEL",
             }
             mask = _mask_points(getattr(result, "masks", None), index, point_limit)
             if mask:
                 entry["mask"] = mask
+                entry["mask_format"] = "POLYGON_NORMALIZED"
             objects.append(entry)
 
     classification: dict[str, Any] | None = None
@@ -353,8 +390,10 @@ def run_yolo_inference(
         "model_code": spec.model_code,
         "task_type": spec.task_type,
         "output_profile": task_output_profile(spec.task_type),
+        "image": image_metadata,
         "objects": objects,
         "detection_count": len(objects),
+        "object_count": len(objects),
         "classification": classification,
         "parameters": {
             "confidence": confidence_threshold,

@@ -1186,6 +1186,118 @@ button, input, select { font: inherit; }
   word-break: break-all;
 }
 
+.record-scene-timing {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #d9e7f6;
+  border-radius: 9px;
+  background: #f7fbff;
+}
+
+.record-scene-timing > header,
+.record-scene-timing > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  color: #315271;
+  background: #edf5ff;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.record-scene-timing > header small {
+  min-width: 0;
+  overflow: hidden;
+  color: #6a819b;
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-workflow-timing > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.record-workflow-timing > summary::-webkit-details-marker {
+  display: none;
+}
+
+.record-workflow-timing > summary::after {
+  margin-left: 3px;
+  color: #6b86a5;
+  content: "⌄";
+}
+
+.record-workflow-timing:not([open]) > summary::after {
+  transform: rotate(-90deg);
+}
+
+.record-vlm-timing-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 10px 4px;
+}
+
+.record-vlm-timing-value span,
+.record-vlm-timing > p,
+.record-timing-empty {
+  color: #71849a;
+  font-size: 10px;
+}
+
+.record-vlm-timing-value strong {
+  color: #0d6b4d;
+  font-size: 15px;
+}
+
+.record-vlm-timing > p,
+.record-timing-empty {
+  margin: 0;
+  padding: 4px 10px 10px;
+}
+
+.record-timing-table-wrap {
+  overflow-x: auto;
+}
+
+.record-timing-table {
+  width: 100%;
+  min-width: 310px;
+  border-collapse: collapse;
+  font-size: 9px;
+}
+
+.record-timing-table th,
+.record-timing-table td {
+  padding: 7px 9px;
+  border-top: 1px solid #e1ebf5;
+  color: #475f79;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.record-timing-table th {
+  color: #71849a;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.record-timing-status {
+  font-weight: 800;
+}
+
+.record-timing-status.ok { color: #0a7650; }
+.record-timing-status.ng,
+.record-timing-status.error { color: #c23b48; }
+.record-timing-status.skipped,
+.record-timing-status.uncertain { color: #907020; }
+
 .configuration-bar, .canvas-panel, .inspector-panel, .rule-workbench,
 .library-toolbar, .configuration-library, .library-detail {
   border: 1px solid var(--vp-line);
@@ -3658,7 +3770,7 @@ button, input, select { font: inherit; }
 
 .roi-inline-test-overview {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 8px;
   margin-top: 12px;
 }

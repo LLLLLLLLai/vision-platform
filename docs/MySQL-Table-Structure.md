@@ -313,6 +313,8 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `name` | `VARCHAR(200)` | 否 | - | - |
 | `version` | `VARCHAR(50)` | 否 | - | 应用默认值 |
 | `status` | `VARCHAR(30)` | 否 | INDEX | 应用默认值 |
+| `execution_mode` | `VARCHAR(30)` | 否 | INDEX | `'INSPECT'` |
+| `skip_reason` | `VARCHAR(500)` | 是 | - | - |
 | `project_name` | `VARCHAR(200)` | 是 | - | - |
 | `product_id` | `INTEGER` | 否 | FK → products.id | - |
 | `station_id` | `INTEGER` | 否 | FK → stations.id | - |
@@ -328,7 +330,7 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `updated_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `is_deleted` | `BOOL` | 否 | - | 应用默认值 |
 
-索引：`ix_recipe_business_key` (line_code, material_code, process_code, camera_code, capture_index, status)；`ix_recipes_code` (code)；`ix_recipes_recipe_family_code` (recipe_family_code)；`ix_recipes_source_recipe_id` (source_recipe_id)；`ix_recipes_status` (status)
+索引：`ix_recipe_business_key` (line_code, material_code, process_code, camera_code, capture_index, status)；`ix_recipes_code` (code)；`ix_recipes_execution_mode` (execution_mode)；`ix_recipes_recipe_family_code` (recipe_family_code)；`ix_recipes_source_recipe_id` (source_recipe_id)；`ix_recipes_status` (status)
 
 ## `reference_images`
 

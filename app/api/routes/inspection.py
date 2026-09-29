@@ -725,6 +725,8 @@ async def execute_filename_routed_inspection(
     # alignment, ROI scenarios and result publishing run concurrently without
     # colliding on task IDs or artifact paths.
     image_groups: list[dict[str, Any]] = []
+    pass_through_results: list[dict[str, Any]] = []
+    routing_errors: list[dict[str, Any]] = []
     parsed_barcodes = {
         barcode
         for image_path in active_image_paths
@@ -745,6 +747,8 @@ async def execute_filename_routed_inspection(
             "result": "ERROR",
             "image_paths": [],
         }
+
+    batch_request_id = f"detect-{uuid.uuid4().hex}"
 
     for source_index, image_path in enumerate(active_image_paths, start=1):
         recipe: Recipe | None = None
@@ -787,18 +791,49 @@ async def execute_filename_routed_inspection(
         if recipe is None and not has_all_business_fields:
             recipe = match_published_recipe_by_filename(database, image_path)
         if recipe is None:
-            return {
-                "code": 2001,
-                "message": (
-                    "未找到已发布工艺配方："
-                    f"{image_path.replace('\\', '/').rsplit('/', 1)[-1]}"
-                ),
-                "result": "ERROR",
-                "image_paths": [],
-            }
+            routing_errors.append(
+                {
+                    "source_index": source_index,
+                    "source_path": image_path,
+                    "message": (
+                        "未找到已发布工艺配方："
+                        f"{image_path.replace('\\', '/').rsplit('/', 1)[-1]}"
+                    ),
+                }
+            )
+            continue
+        if recipe.execution_mode == "PASS_THROUGH":
+            pass_through_results.append(
+                {
+                    "source_index": source_index,
+                    "request_id": f"{batch_request_id}-image-{source_index}",
+                    "recipe_code": recipe.code,
+                    "recipe_version": recipe.version,
+                    "result": "SKIPPED",
+                    "elapsed_ms": 0,
+                    "image_results": [
+                        {
+                            "image_path": image_path,
+                            "source_image_path": image_path,
+                            "result_image_path": image_path,
+                            "local_image_path": None,
+                            "local_result_image_path": None,
+                            "result": "SKIPPED",
+                            "inspection_items": [],
+                            "pass_through": True,
+                            "skip_reason": (
+                                recipe.skip_reason
+                                or "该相机拍照已配置为无需检测，原图直接透传。"
+                            ),
+                        }
+                    ],
+                }
+            )
+            continue
         image_groups.append(
             {
                 "group_key": f"image-{source_index}",
+                "source_index": source_index,
                 "recipe": recipe,
                 "source_paths": [image_path],
                 "local_paths": [],
@@ -806,7 +841,6 @@ async def execute_filename_routed_inspection(
         )
 
     storage = storage or SmbStorage()
-    batch_request_id = f"detect-{uuid.uuid4().hex}"
     execution_date = datetime.utcnow().strftime("%Y%m%d")
     smb_transfer_semaphore = asyncio.Semaphore(
         max(1, int(settings.smb_transfer_parallelism))
@@ -846,12 +880,20 @@ async def execute_filename_routed_inspection(
     try:
         await asyncio.gather(*(stage_group_images(group) for group in image_groups))
     except SmbStorageError as exc:
+        pass_through_paths = [
+            item["image_results"][0]["source_image_path"]
+            for item in sorted(pass_through_results, key=lambda item: item["source_index"])
+        ]
         return {
             "code": 1003,
             "message": str(exc),
             "sn": resolved_sn,
             "result": "ERROR",
-            "image_paths": [],
+            "image_paths": pass_through_paths,
+            "inspection_results": [
+                {key: value for key, value in item.items() if key != "source_index"}
+                for item in sorted(pass_through_results, key=lambda item: item["source_index"])
+            ],
         }
 
     bind = database.get_bind()
@@ -941,11 +983,46 @@ async def execute_filename_routed_inspection(
             image_result["local_result_image_path"] = image_result.get("result_image_path")
             if index < len(published_paths):
                 image_result["result_image_path"] = published_paths[index]
-        return {"recipe_code": recipe.code, "result": result}
+        return {
+            "source_index": group["source_index"],
+            "recipe_code": recipe.code,
+            "result": result,
+        }
 
     aggregate_result = "OK"
-    result_image_paths: list[str] = []
-    inspection_results: list[dict[str, Any]] = []
+    result_paths_by_source_index: dict[int, str] = {}
+    inspection_results_by_source_index: dict[int, dict[str, Any]] = {}
+    for pass_through in pass_through_results:
+        source_index = int(pass_through["source_index"])
+        result_paths_by_source_index[source_index] = str(
+            pass_through["image_results"][0]["source_image_path"]
+        )
+        inspection_results_by_source_index[source_index] = {
+            key: value
+            for key, value in pass_through.items()
+            if key != "source_index"
+        }
+    for routing_error in routing_errors:
+        source_index = int(routing_error["source_index"])
+        source_path = str(routing_error["source_path"])
+        result_paths_by_source_index[source_index] = source_path
+        inspection_results_by_source_index[source_index] = {
+            "request_id": f"{batch_request_id}-image-{source_index}",
+            "recipe_code": None,
+            "recipe_version": None,
+            "result": "ERROR",
+            "elapsed_ms": 0,
+            "image_results": [
+                {
+                    "image_path": source_path,
+                    "source_image_path": source_path,
+                    "result_image_path": source_path,
+                    "result": "ERROR",
+                    "inspection_items": [],
+                    "routing_error": routing_error["message"],
+                }
+            ],
+        }
     group_values = image_groups
     if can_parallelize_groups:
         group_outcomes = await asyncio.gather(
@@ -960,32 +1037,67 @@ async def execute_filename_routed_inspection(
             except Exception as exc:
                 group_outcomes.append(exc)
 
-    errors: list[str] = []
-    for outcome in group_outcomes:
+    errors: list[str] = [str(item["message"]) for item in routing_errors]
+    for group, outcome in zip(group_values, group_outcomes):
+        source_index = int(group["source_index"])
+        source_path = str(group["source_paths"][0])
         if isinstance(outcome, Exception):
             errors.append(str(outcome))
+            result_paths_by_source_index[source_index] = source_path
+            inspection_results_by_source_index[source_index] = {
+                "request_id": f"{batch_request_id}-{group['group_key']}",
+                "recipe_code": group["recipe"].code,
+                "recipe_version": group["recipe"].version,
+                "result": "ERROR",
+                "elapsed_ms": None,
+                "image_results": [
+                    {
+                        "image_path": source_path,
+                        "source_image_path": source_path,
+                        "result_image_path": source_path,
+                        "result": "ERROR",
+                        "inspection_items": [],
+                        "execution_error": str(outcome),
+                    }
+                ],
+            }
             continue
         result = outcome["result"]
-        result_image_paths.extend(result.get("image_paths") or [])
-        inspection_results.append(
-            {
-                "request_id": result.get("request_id"),
-                "recipe_code": outcome["recipe_code"],
-                "recipe_version": result.get("recipe_version"),
-                "result": result.get("result", "ERROR"),
-                "elapsed_ms": result.get("elapsed_ms"),
-                "image_results": result.get("image_results") or [],
-            }
+        result_image_paths = list(result.get("image_paths") or [])
+        result_paths_by_source_index[source_index] = str(
+            result_image_paths[0] if result_image_paths else source_path
         )
+        inspection_results_by_source_index[source_index] = {
+            "request_id": result.get("request_id"),
+            "recipe_code": outcome["recipe_code"],
+            "recipe_version": result.get("recipe_version"),
+            "result": result.get("result", "ERROR"),
+            "elapsed_ms": result.get("elapsed_ms"),
+            "image_results": result.get("image_results") or [],
+        }
         group_result = str(result.get("result", "ERROR")).upper()
         if group_result == "ERROR":
             aggregate_result = "ERROR"
         elif group_result == "NG" and aggregate_result != "ERROR":
             aggregate_result = "NG"
 
+    result_image_paths = [
+        result_paths_by_source_index.get(index, image_path)
+        for index, image_path in enumerate(active_image_paths, start=1)
+    ]
+    inspection_results = [
+        inspection_results_by_source_index[index]
+        for index in range(1, len(active_image_paths) + 1)
+        if index in inspection_results_by_source_index
+    ]
+
     if errors:
         return {
-            "code": 1002 if any("Image does not exist" in error for error in errors) else 4001,
+            "code": (
+                2001
+                if routing_errors
+                else 1002 if any("Image does not exist" in error for error in errors) else 4001
+            ),
             "message": "; ".join(errors),
             "sn": resolved_sn,
             "result": "ERROR",
@@ -994,7 +1106,11 @@ async def execute_filename_routed_inspection(
         }
     return {
         "code": 0,
-        "message": "success",
+        "message": (
+            "success"
+            if not pass_through_results
+            else f"success；{len(pass_through_results)} 张图片按无需检测配方原图透传"
+        ),
         "sn": resolved_sn,
         "result": aggregate_result,
         "image_paths": result_image_paths,
@@ -1080,6 +1196,108 @@ def _standard_roi_crop_url(
     return _local_asset_url(str(destination))
 
 
+def _elapsed_value(value: Any) -> float | None:
+    try:
+        return round(float(value), 2) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scenario_timing_payload(
+    execution: ScenarioExecution | None,
+    *,
+    item: dict[str, Any],
+    persisted: DetectionItemResult | None,
+) -> dict[str, Any] | None:
+    raw_output = (
+        (execution.output_json if execution is not None else None)
+        or item.get("actual")
+        or (persisted.actual_json if persisted is not None else None)
+        or {}
+    )
+    output = raw_output if isinstance(raw_output, dict) else {}
+    raw_traces = output.get("traces")
+    traces = raw_traces if isinstance(raw_traces, list) else []
+    scenario_version = execution.scenario_version if execution is not None else None
+    scenario = scenario_version.scenario if scenario_version is not None else None
+    mode = str(
+        (scenario.mode if scenario is not None else None)
+        or item.get("capability")
+        or ""
+    ).upper()
+    total_elapsed_ms = _elapsed_value(
+        execution.elapsed_ms if execution is not None else item.get("elapsed_ms")
+    )
+    execution_id = execution.id if execution is not None else item.get("scenario_execution_id")
+    if not mode and not traces and total_elapsed_ms is None:
+        return None
+
+    common = {
+        "execution_id": execution_id,
+        "mode": mode or "SCENARIO",
+        "scenario_name": scenario.name if scenario is not None else item.get("item_name"),
+        "scenario_version": scenario_version.version if scenario_version is not None else item.get("scenario_version"),
+        "total_elapsed_ms": total_elapsed_ms,
+    }
+    if mode == "VLM_DIRECT":
+        vlm_trace = next(
+            (
+                trace
+                for trace in traces
+                if isinstance(trace, dict)
+                and str(trace.get("node_type") or "").upper() == "VLM"
+            ),
+            None,
+        )
+        return {
+            **common,
+            "display_type": "VLM",
+            "vlm_elapsed_ms": _elapsed_value(
+                vlm_trace.get("elapsed_ms") if vlm_trace is not None else total_elapsed_ms
+            ),
+        }
+
+    nodes = [
+        {
+            "node_key": trace.get("node_key"),
+            "node_name": trace.get("node_name") or trace.get("node_key") or "节点",
+            "node_type": trace.get("node_type") or "UNKNOWN",
+            "status": trace.get("status") or "UNCERTAIN",
+            "elapsed_ms": _elapsed_value(trace.get("elapsed_ms")),
+        }
+        for trace in traces
+        if isinstance(trace, dict)
+    ]
+    return {
+        **common,
+        "display_type": "WORKFLOW" if mode == "WORKFLOW" else "SCENARIO",
+        "nodes": nodes,
+    }
+
+
+def _scenario_execution_for_record_item(
+    item: dict[str, Any],
+    *,
+    task: DetectionTask | None,
+    execution_by_id: dict[int, ScenarioExecution],
+    executions_by_task_roi: dict[tuple[int, int], list[ScenarioExecution]],
+) -> ScenarioExecution | None:
+    try:
+        execution_id = int(item.get("scenario_execution_id"))
+    except (TypeError, ValueError):
+        execution_id = None
+    if execution_id is not None:
+        return execution_by_id.get(execution_id)
+    try:
+        roi_id = int(item.get("roi_id"))
+    except (TypeError, ValueError):
+        roi_id = None
+    if task is None or roi_id is None:
+        return None
+    candidates = executions_by_task_roi.get((task.id, roi_id), [])
+    return candidates[0] if len(candidates) == 1 else None
+
+
 @router.get("/call-records/{record_id}")
 def detection_call_record_detail(
     record_id: int,
@@ -1101,6 +1319,24 @@ def detection_call_record_detail(
         .where(DetectionTask.request_id.in_(request_ids))
     ).all() if request_ids else []
     task_by_request = {task.request_id: task for task in tasks}
+    task_ids = [task.id for task in tasks]
+    scenario_executions = database.scalars(
+        select(ScenarioExecution)
+        .options(
+            selectinload(ScenarioExecution.scenario_version).selectinload(
+                InspectionScenarioVersion.scenario
+            )
+        )
+        .where(
+            ScenarioExecution.detection_task_id.in_(task_ids),
+            ScenarioExecution.source == "PRODUCTION",
+        )
+    ).all() if task_ids else []
+    execution_by_id = {execution.id: execution for execution in scenario_executions}
+    executions_by_task_roi: dict[tuple[int, int], list[ScenarioExecution]] = defaultdict(list)
+    for execution in scenario_executions:
+        if execution.detection_task_id is not None and execution.roi_id is not None:
+            executions_by_task_roi[(execution.detection_task_id, execution.roi_id)].append(execution)
 
     recipes: list[dict[str, Any]] = []
     for inspection in inspection_results:
@@ -1124,6 +1360,12 @@ def detection_call_record_detail(
                 roi_code = str(item.get("roi_code") or "")
                 roi = roi_by_code.get(roi_code)
                 persisted = persisted_results.get(roi.id) if roi is not None else None
+                execution = _scenario_execution_for_record_item(
+                    item,
+                    task=task,
+                    execution_by_id=execution_by_id,
+                    executions_by_task_roi=executions_by_task_roi,
+                )
                 roi_blocks.append(
                     {
                         "roi_code": roi_code,
@@ -1133,6 +1375,11 @@ def detection_call_record_detail(
                         "score": item.get("score") if item.get("score") is not None else (persisted.score if persisted else None),
                         "message": item.get("message") or (persisted.message if persisted else None),
                         "processing": item.get("actual") or (persisted.actual_json if persisted else {}),
+                        "scenario_timing": _scenario_timing_payload(
+                            execution,
+                            item=item,
+                            persisted=persisted,
+                        ),
                         "standard_roi_image_url": _standard_roi_crop_url(record.id, recipe, roi) if roi else None,
                         "actual_roi_image_url": item.get("roi_image_url") or _local_asset_url(persisted.roi_image_path if persisted else None),
                     }
@@ -1148,6 +1395,8 @@ def detection_call_record_detail(
                         image_result.get("local_result_image_path")
                     ),
                     "status": image_result.get("result"),
+                    "pass_through": bool(image_result.get("pass_through")),
+                    "skip_reason": image_result.get("skip_reason"),
                     "alignment": image_result.get("alignment") or {},
                     "rois": roi_blocks,
                 }
@@ -1157,6 +1406,8 @@ def detection_call_record_detail(
                 "recipe_code": recipe.code,
                 "recipe_name": recipe.name,
                 "recipe_version": inspection.get("recipe_version") or recipe.version,
+                "execution_mode": recipe.execution_mode,
+                "skip_reason": recipe.skip_reason,
                 "result": inspection.get("result"),
                 "elapsed_ms": inspection.get("elapsed_ms"),
                 "standard_image_url": _local_asset_url(recipe.base_image_path),
