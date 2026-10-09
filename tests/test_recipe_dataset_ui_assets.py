@@ -70,6 +70,27 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
         ):
             self.assertIn(implementation_marker, script)
 
+    def test_recipe_and_dataset_boxes_only_appear_after_a_real_drag(self) -> None:
+        recipe_script = (PROJECT_ROOT / "app" / "static" / "js" / "workspace.js").read_text(encoding="utf-8")
+        dataset_script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
+
+        for implementation_marker in (
+            "drawHasMoved: false",
+            "function hasPointerDragExceeded(",
+            "function drawStartMarker(",
+            "lastPointerPoint",
+            "Do not show or save an implicit minimum-size rectangle",
+        ):
+            self.assertIn(implementation_marker, recipe_script)
+        for implementation_marker in (
+            "function detectionDrawOriginMarkup(",
+            "function annotationDragExceeded(",
+            "dragged: false",
+            "state.annotation.draft = null;",
+            "interaction.dragged",
+        ):
+            self.assertIn(implementation_marker, dataset_script)
+
     def test_dataset_supports_offline_yolo_label_package_import(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")

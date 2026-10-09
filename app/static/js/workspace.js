@@ -14,7 +14,11 @@ const state = {
   drawMode: "ROI",
   pendingRect: null,
   drawing: false,
+  drawHasMoved: false,
   startPoint: null,
+  lastPointerPoint: null,
+  drawStartClientX: 0,
+  drawStartClientY: 0,
   activePointerId: null,
   pointerRoi: null,
   interactionMode: null,
@@ -901,7 +905,10 @@ function clearCanvas() {
 }
 
 function canvasVisualUnit() {
-  return 1 / Math.max(0.01, state.imageView.fitScale || 1);
+  return 1 / Math.max(
+    0.01,
+    (state.imageView.fitScale || 1) * (state.imageView.scale || 1),
+  );
 }
 
 function roiRect(roi) {
@@ -941,6 +948,20 @@ function drawHandles(rect) {
     context.fillRect(x - size / 2, y - size / 2, size, size);
     context.strokeRect(x - size / 2, y - size / 2, size, size);
   });
+}
+
+function drawStartMarker(point, feature = false) {
+  if (!point) return;
+  const unit = canvasVisualUnit();
+  context.save();
+  context.beginPath();
+  context.fillStyle = "#fff";
+  context.strokeStyle = feature ? "#15803d" : "#ff6b35";
+  context.lineWidth = 2 * unit;
+  context.arc(point.x, point.y, 4 * unit, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  context.restore();
 }
 
 function drawCanvas() {
@@ -984,6 +1005,12 @@ function drawCanvas() {
     context.fillRect(state.pendingRect.x, state.pendingRect.y, state.pendingRect.width, state.pendingRect.height);
     context.strokeRect(state.pendingRect.x, state.pendingRect.y, state.pendingRect.width, state.pendingRect.height);
     context.setLineDash([]);
+  } else if (
+    state.drawing
+    && !state.drawHasMoved
+    && ["draw", "feature-draw"].includes(state.interactionMode)
+  ) {
+    drawStartMarker(state.startPoint, state.drawMode === "FEATURE");
   }
 }
 
@@ -998,11 +1025,31 @@ function featureAnchorRect(anchor) {
 
 function pointerPosition(event) {
   const canvasBounds = canvas.getBoundingClientRect();
-  if (!canvasBounds.width || !canvasBounds.height) return { x: 0, y: 0 };
+  if (!canvasBounds.width || !canvasBounds.height) return { x: 0, y: 0, inside: false };
+  const rawX = (event.clientX - canvasBounds.left) * (canvas.width / canvasBounds.width);
+  const rawY = (event.clientY - canvasBounds.top) * (canvas.height / canvasBounds.height);
   return {
-    x: Math.max(0, Math.min(canvas.width, (event.clientX - canvasBounds.left) * (canvas.width / canvasBounds.width))),
-    y: Math.max(0, Math.min(canvas.height, (event.clientY - canvasBounds.top) * (canvas.height / canvasBounds.height))),
+    x: Math.max(0, Math.min(canvas.width, rawX)),
+    y: Math.max(0, Math.min(canvas.height, rawY)),
+    inside: rawX >= 0 && rawX <= canvas.width && rawY >= 0 && rawY <= canvas.height,
   };
+}
+
+function hasPointerDragExceeded(event) {
+  return Math.hypot(
+    event.clientX - state.drawStartClientX,
+    event.clientY - state.drawStartClientY,
+  ) >= 4;
+}
+
+function resetDrawingGesture() {
+  state.drawing = false;
+  state.drawHasMoved = false;
+  state.startPoint = null;
+  state.lastPointerPoint = null;
+  state.drawStartClientX = 0;
+  state.drawStartClientY = 0;
+  state.activePointerId = null;
 }
 
 function drawRectFromPoints(first, second) {
@@ -1044,11 +1091,16 @@ canvas.addEventListener("pointerdown", (event) => {
   if (state.editorReadOnly) return;
   if (event.button !== 0) return;
   const point = pointerPosition(event);
+  if (!point.inside) return;
   const handle = hitResizeHandle(point);
   const existing = hitRoi(point);
   state.drawing = true;
+  state.drawHasMoved = false;
   state.activePointerId = event.pointerId;
   state.startPoint = point;
+  state.lastPointerPoint = point;
+  state.drawStartClientX = event.clientX;
+  state.drawStartClientY = event.clientY;
   state.pointerRoi = existing;
   state.pendingRect = null;
   state.workingRect = null;
@@ -1066,6 +1118,7 @@ canvas.addEventListener("pointerdown", (event) => {
     state.selectedRoiId = null;
   }
   canvas.setPointerCapture(event.pointerId);
+  drawCanvas();
 });
 
 canvas.addEventListener("pointermove", (event) => {
@@ -1077,16 +1130,21 @@ canvas.addEventListener("pointermove", (event) => {
   }
   if (!state.drawing || state.activePointerId !== event.pointerId) return;
   const point = pointerPosition(event);
-  const dx = point.x - state.startPoint.x;
-  const dy = point.y - state.startPoint.y;
-  if (state.interactionMode === "potential-move" && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+  if (point.inside) state.lastPointerPoint = point;
+  const currentPoint = state.lastPointerPoint || point;
+  const dx = currentPoint.x - state.startPoint.x;
+  const dy = currentPoint.y - state.startPoint.y;
+  const exceeded = hasPointerDragExceeded(event);
+  if (state.interactionMode === "potential-move" && exceeded) {
     state.interactionMode = "move";
   }
   if (["draw", "feature-draw"].includes(state.interactionMode)) {
-    // Drawing uses the exact drag distance.  The minimum-size clamp is only
-    // for moving/resizing an existing ROI; applying it here created a large
-    // box even when the operator had not actually dragged one.
-    state.pendingRect = drawRectFromPoints(state.startPoint, point);
+    if (exceeded) state.drawHasMoved = true;
+    // Do not show or save an implicit minimum-size rectangle. A click keeps
+    // only a small start marker; a frame appears after a real drag.
+    if (state.drawHasMoved) {
+      state.pendingRect = drawRectFromPoints(state.startPoint, currentPoint);
+    }
   } else if (state.interactionMode === "move") {
     state.workingRect = clampRect({
       ...state.originalRect,
@@ -1120,22 +1178,26 @@ canvas.addEventListener("pointerup", async (event) => {
   }
   if (!state.drawing || state.activePointerId !== event.pointerId) return;
   const endPoint = pointerPosition(event);
-  if (["draw", "feature-draw"].includes(state.interactionMode)) {
-    state.pendingRect = drawRectFromPoints(state.startPoint, endPoint);
+  if (endPoint.inside) state.lastPointerPoint = endPoint;
+  const finalPoint = state.lastPointerPoint || endPoint;
+  if (["draw", "feature-draw"].includes(state.interactionMode) && state.drawHasMoved) {
+    state.pendingRect = drawRectFromPoints(state.startPoint, finalPoint);
   }
-  state.drawing = false;
-  state.activePointerId = null;
   if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
   const mode = state.interactionMode;
   const selected = state.pointerRoi;
   state.pointerRoi = null;
   state.interactionMode = null;
   const minimumDrawSize = 8 * canvasVisualUnit();
-  if (mode === "feature-draw" && state.pendingRect?.width > minimumDrawSize && state.pendingRect?.height > minimumDrawSize) {
+  const drewMeaningfulRect = state.drawHasMoved
+    && state.pendingRect?.width > minimumDrawSize
+    && state.pendingRect?.height > minimumDrawSize;
+  resetDrawingGesture();
+  if (mode === "feature-draw" && drewMeaningfulRect) {
     await saveFeatureAnchorRect(state.pendingRect);
     return;
   }
-  if (mode === "draw" && state.pendingRect?.width > minimumDrawSize && state.pendingRect?.height > minimumDrawSize) {
+  if (mode === "draw" && drewMeaningfulRect) {
     await createRoiFromRect(state.pendingRect);
     return;
   }
@@ -1155,8 +1217,7 @@ canvas.addEventListener("pointerup", async (event) => {
 canvas.addEventListener("pointercancel", (event) => {
   if (state.imageView.panning) endImagePan();
   if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-  state.drawing = false;
-  state.activePointerId = null;
+  resetDrawingGesture();
   state.pendingRect = null;
   state.workingRect = null;
   state.interactionMode = null;
