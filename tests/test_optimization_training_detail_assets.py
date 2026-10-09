@@ -10,7 +10,9 @@ from app.services.automation_worker import (
     _build_prompt_optimization_request,
     _optimization_target_reached,
     _optimizer_proposal_error,
+    _prompt_optimizer_system_prompt,
 )
+from app.services.openai_compatible_vlm import INSPECTION_VLM_SYSTEM_PROMPT
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,8 @@ class PromptOptimizationPolicyTests(unittest.TestCase):
         self.assertIn("【优化器自身返回格式】", request)
         self.assertIn("【检测模型需要满足的用户优化要求】", request)
         self.assertIn("它不约束优化器自身的 JSON 输出", request)
+        self.assertIn("【不可变的生产输出契约】", request)
+        self.assertIn("USER_OPTIMIZATION_REQUIREMENTS", request)
         self.assertIn("检测模型的 result 只能返回 OK 或 NG", request)
         self.assertIn(
             "优化模型返回了检测结论",
@@ -54,6 +58,14 @@ class PromptOptimizationPolicyTests(unittest.TestCase):
                 preserved_variables={"input.ocr_text"},
             ),
         )
+
+    def test_output_contract_cannot_be_replaced_by_optimization_requirements(self) -> None:
+        optimizer_contract = _prompt_optimizer_system_prompt()
+
+        self.assertIn("不可变的生产输出契约", optimizer_contract)
+        self.assertIn("纯文本、Markdown、XML", optimizer_contract)
+        self.assertIn("必须包含 result 字段", INSPECTION_VLM_SYSTEM_PROMPT)
+        self.assertIn("只返回一个 JSON 对象", INSPECTION_VLM_SYSTEM_PROMPT)
         self.assertIsNone(
             _optimizer_proposal_error(
                 {

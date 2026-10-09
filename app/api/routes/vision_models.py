@@ -1,7 +1,9 @@
 from datetime import datetime
+from pathlib import Path
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -9,7 +11,13 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.models.intelligence import AutomationJob, Dataset, VisionModel, VisionModelVersion
 from app.services.dataset_split import assign_training_splits
-from app.services.vision_model_runtime import resolve_weights_path, task_output_profile
+from app.core.config import PROJECT_ROOT
+from app.services.vision_model_runtime import (
+    VisionModelRuntimeError,
+    resolve_weights_path,
+    task_output_profile,
+    validate_yolo_weights_for_task,
+)
 from app.services.yolo_training import (
     YoloTrainingError,
     build_training_snapshot,
@@ -24,6 +32,8 @@ TRAINABLE_TASK_TYPES = {
     "YOLO_SEGMENTATION",
     "YOLO_CLASSIFICATION",
 }
+
+MAX_IMPORTED_WEIGHTS_BYTES = 8 * 1024 * 1024 * 1024
 
 
 class VisionModelCreate(BaseModel):
@@ -60,6 +70,78 @@ class TrainingJobCreate(BaseModel):
     batch_size: int | None = Field(default=None, ge=1, le=1024)
     gpu_memory_required_mb: int = Field(default=4096, ge=512, le=1024 * 1024)
     extra_params_json: dict[str, Any] = Field(default_factory=dict)
+
+
+def _safe_path_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    return normalized.strip("._") or "model"
+
+
+def _weights_root() -> Path:
+    return PROJECT_ROOT / "vision-models"
+
+
+def _relative_project_path(path: Path) -> str:
+    return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+
+
+def _existing_import_path(raw_path: str) -> Path:
+    """Resolve a server-side import path without allowing arbitrary file reads."""
+
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    allowed_root = _weights_root().resolve()
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="服务器已有权重只能引用 vision-models/ 目录下的 .pt 文件。",
+        ) from exc
+    if resolved.suffix.lower() != ".pt":
+        raise HTTPException(status_code=400, detail="当前仅支持导入 .pt 权重文件。")
+    if not resolved.is_file():
+        raise HTTPException(status_code=400, detail="指定的服务器权重文件不存在。")
+    return resolved
+
+
+async def _save_imported_weights(
+    *,
+    model: VisionModel,
+    version: str,
+    uploaded_file: UploadFile,
+) -> tuple[Path, str]:
+    original_name = Path(uploaded_file.filename or "weights.pt").name
+    if Path(original_name).suffix.lower() != ".pt":
+        raise HTTPException(status_code=400, detail="当前仅支持上传 .pt 权重文件。")
+    destination = (
+        _weights_root()
+        / "imported"
+        / f"model-{model.id}-{_safe_path_component(model.code)}"
+        / _safe_path_component(version)
+        / "weights.pt"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    total_bytes = 0
+    try:
+        with destination.open("wb") as output:
+            while chunk := await uploaded_file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_IMPORTED_WEIGHTS_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="权重文件超过 8 GB 导入上限，请将文件放入 vision-models/ 后用服务器路径引用。",
+                    )
+                output.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    if total_bytes == 0:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="上传的权重文件为空。")
+    return destination, original_name
 
 
 def _version_payload(version: VisionModelVersion) -> dict[str, Any]:
@@ -248,6 +330,101 @@ def create_model_version(
     database.commit()
     database.refresh(version)
     return _version_payload(version)
+
+
+@router.post("/{model_id}/versions/import")
+async def import_model_version(
+    model_id: int,
+    version: str = Form(..., min_length=1, max_length=50),
+    existing_weights_path: str | None = Form(default=None),
+    weights_file: UploadFile | None = File(default=None),
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Register a pre-trained local Ultralytics YOLO checkpoint as a draft version.
+
+    Two mutually exclusive input modes are exposed deliberately: upload a local
+    ``.pt`` file through the browser, or reference a file an administrator has
+    already copied below ``vision-models/``.  Imported versions are never
+    published automatically.
+    """
+
+    model = database.get(VisionModel, model_id)
+    if model is None or model.is_deleted:
+        raise HTTPException(status_code=404, detail="视觉模型不存在。")
+
+    normalized_version = version.strip()
+    if not normalized_version:
+        raise HTTPException(status_code=400, detail="模型版本不能为空。")
+    if database.scalar(
+        select(VisionModelVersion.id).where(
+            VisionModelVersion.vision_model_id == model.id,
+            VisionModelVersion.version == normalized_version,
+        )
+    ):
+        raise HTTPException(status_code=409, detail="该模型版本已存在，请更换版本号。")
+
+    has_uploaded_file = bool(weights_file and weights_file.filename)
+    normalized_existing_path = str(existing_weights_path or "").strip()
+    has_existing_file = bool(normalized_existing_path)
+    if has_uploaded_file == has_existing_file:
+        raise HTTPException(
+            status_code=400,
+            detail="请上传一个 .pt 权重文件，或填写一个服务器已有权重路径，两者只能选择一种。",
+        )
+
+    uploaded_destination: Path | None = None
+    import_source = "server_path"
+    original_filename: str | None = None
+    import_committed = False
+    try:
+        if has_uploaded_file:
+            assert weights_file is not None
+            uploaded_destination, original_filename = await _save_imported_weights(
+                model=model,
+                version=normalized_version,
+                uploaded_file=weights_file,
+            )
+            weights_path = uploaded_destination
+            import_source = "upload"
+        else:
+            weights_path = _existing_import_path(normalized_existing_path)
+            original_filename = weights_path.name
+
+        validation = validate_yolo_weights_for_task(weights_path, model.task_type)
+        version_row = VisionModelVersion(
+            vision_model_id=model.id,
+            version=normalized_version,
+            status="DRAFT",
+            weights_path=_relative_project_path(weights_path),
+            artifact_paths_json={
+                "import_source": import_source,
+                "original_filename": original_filename,
+                "validation": validation,
+            },
+        )
+        database.add(version_row)
+        database.commit()
+        import_committed = True
+        database.refresh(version_row)
+        return {
+            **_version_payload(version_row),
+            "message": "权重已导入并完成任务类型校验，当前为草稿版本；请确认后手动发布。",
+        }
+    except HTTPException:
+        database.rollback()
+        if uploaded_destination is not None and not import_committed:
+            uploaded_destination.unlink(missing_ok=True)
+        raise
+    except VisionModelRuntimeError as exc:
+        database.rollback()
+        if uploaded_destination is not None and not import_committed:
+            uploaded_destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"权重校验失败：{exc}") from exc
+    except Exception as exc:
+        database.rollback()
+        if uploaded_destination is not None and not import_committed:
+            uploaded_destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"导入模型版本失败：{exc}") from exc
 
 
 @router.post("/{model_id}/versions/{version_id}/publish")

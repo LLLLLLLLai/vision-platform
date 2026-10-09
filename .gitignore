@@ -9,6 +9,7 @@ __pycache__/
 .env
 data/*.db
 data/*.sqlite3
+data/logs/
 data/model_services/
 data/training_runs/
 data/alignment_debug/

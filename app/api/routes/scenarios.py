@@ -58,6 +58,9 @@ _DYNAMIC_BBOX_REFERENCE = re.compile(
 _DYNAMIC_OBJECTS_REFERENCE = re.compile(
     r"^\s*\{\{\s*nodes\.([A-Za-z0-9_-]+)\.objects\s*\}\}\s*$"
 )
+_DYNAMIC_NODE_REFERENCE = re.compile(
+    r"\{\{\s*nodes\.([A-Za-z0-9_-]+)(?:\.|\s*\}\})"
+)
 
 
 def _trim_text(value: Any) -> Any:
@@ -566,6 +569,193 @@ def _validate_workflow_graph(version: InspectionScenarioVersion) -> None:
                 ready.append(target)
     if visited != len(known_keys):
         raise HTTPException(status_code=400, detail="工作流不能存在闭环；请使用循环控制节点处理集合。")
+
+
+def _workflow_upstream_keys(
+    version: InspectionScenarioVersion,
+    node_key: str,
+) -> set[str]:
+    """Return every executable node that can provide data to ``node_key``."""
+
+    reverse: dict[str, set[str]] = {}
+    for edge in version.edges:
+        reverse.setdefault(edge.target_node_key, set()).add(edge.source_node_key)
+    upstream: set[str] = set()
+    pending = list(reverse.get(node_key, set()))
+    while pending:
+        current = pending.pop()
+        if current in upstream:
+            continue
+        upstream.add(current)
+        pending.extend(reverse.get(current, set()))
+    return upstream
+
+
+def _configured_node_references(value: Any) -> set[str]:
+    """Extract ``{{ nodes.<key>... }}`` references from an arbitrary config."""
+
+    if isinstance(value, str):
+        return set(_DYNAMIC_NODE_REFERENCE.findall(value))
+    if isinstance(value, dict):
+        references: set[str] = set()
+        for nested in value.values():
+            references.update(_configured_node_references(nested))
+        return references
+    if isinstance(value, (list, tuple)):
+        references = set()
+        for nested in value:
+            references.update(_configured_node_references(nested))
+        return references
+    return set()
+
+
+def _workflow_preflight(
+    database: Session,
+    version: InspectionScenarioVersion,
+) -> dict[str, Any]:
+    """Inspect a draft/published scene without changing it.
+
+    The designer needs a complete, node-oriented answer before an operator
+    presses publish.  Publishing reuses this exact inspection so the canvas and
+    production rules cannot drift apart.
+    """
+
+    diagnostics: list[dict[str, Any]] = []
+
+    def add(
+        level: str,
+        code: str,
+        message: str,
+        *,
+        node: ScenarioNode | None = None,
+        suggestion: str | None = None,
+    ) -> None:
+        item: dict[str, Any] = {
+            "level": level,
+            "code": code,
+            "message": message,
+        }
+        if node is not None:
+            item.update(
+                {
+                    "node_id": node.id,
+                    "node_key": node.node_key,
+                    "node_name": node.name,
+                    "node_type": node.node_type,
+                }
+            )
+        if suggestion:
+            item["suggestion"] = suggestion
+        diagnostics.append(item)
+
+    scene = version.scenario
+    if scene.mode == "VLM_DIRECT":
+        if not version.primary_vlm_model_id:
+            add("ERROR", "DIRECT_VLM_REQUIRED", "直接 VLM 场景必须配置主 VLM。", suggestion="在“检测配置”中选择可用的 VLM 模型。")
+        else:
+            try:
+                _validate_vlm(database, version.primary_vlm_model_id)
+            except HTTPException as exc:
+                add("ERROR", "DIRECT_VLM_INVALID", str(exc.detail), suggestion="重新选择一个可用的 VLM 模型。")
+        if not str(version.prompt_template or "").strip():
+            add("ERROR", "DIRECT_PROMPT_REQUIRED", "直接 VLM 场景必须填写检测提示词。", suggestion="说明检测对象、OK/NG 规则和返回格式。")
+        if not any(item["level"] == "ERROR" for item in diagnostics):
+            add("INFO", "DIRECT_READY", "主 VLM、提示词和接口参数已具备执行条件。")
+    else:
+        nodes = [node for node in version.nodes if node.enabled]
+        node_by_key = {node.node_key: node for node in nodes}
+        node_types = {node.node_type.upper() for node in nodes}
+        if node_types.isdisjoint({"VLM", "VISION_MODEL"}):
+            add("ERROR", "VISION_NODE_REQUIRED", "工作流至少需要一个 VLM 检测或模型检测节点。", suggestion="从节点库添加并连接 VLM 检测或训练模型节点。")
+        try:
+            _validate_workflow_graph(version)
+        except HTTPException as exc:
+            add("ERROR", "GRAPH_INVALID", str(exc.detail), suggestion="检查开始、结束节点之间的连线，并移除未接入主路径的节点。")
+
+        validators: dict[str, Any] = {
+            "VLM": lambda node: _validate_vlm_node(database, node),
+            "VISION_MODEL": lambda node: _validate_published_vision_model_node(database, node),
+            "IMAGE_CROP": lambda node: _validate_image_crop_node(database, version, node),
+            "IMAGE_ANNOTATE": lambda node: _validate_image_annotate_node(database, version, node),
+        }
+        for node in nodes:
+            node_type = node.node_type.upper()
+            validator = validators.get(node_type)
+            if validator is not None:
+                try:
+                    validator(node)
+                except HTTPException as exc:
+                    add("ERROR", f"{node_type}_INVALID", str(exc.detail), node=node)
+
+            if node_type == "WEB_API":
+                url = str((node.config_json or {}).get("url") or "").strip()
+                if not url:
+                    add("ERROR", "WEB_API_URL_REQUIRED", f"Web 接口节点“{node.name}”尚未填写接口地址。", node=node)
+            if node_type == "LOOP":
+                config = node.config_json or {}
+                if not config.get("items"):
+                    add("ERROR", "LOOP_ITEMS_REQUIRED", f"循环节点“{node.name}”尚未指定循环集合。", node=node)
+                try:
+                    max_iterations = int(config.get("max_iterations", 10))
+                    if not 1 <= max_iterations <= 1000:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    add("ERROR", "LOOP_LIMIT_INVALID", f"循环节点“{node.name}”的最大次数必须在 1 到 1000 之间。", node=node)
+                add(
+                    "WARNING",
+                    "LOOP_BOUNDARY",
+                    f"循环节点“{node.name}”会限制遍历次数；请确认下游节点能够接收集合或当前项。",
+                    node=node,
+                    suggestion="生产流程建议为循环集合和最大次数设置明确上限。",
+                )
+
+            if node_type not in {"START", "END"}:
+                upstream = _workflow_upstream_keys(version, node.node_key)
+                for source_key in sorted(_configured_node_references(node.config_json or {})):
+                    source = node_by_key.get(source_key)
+                    if source is None:
+                        add(
+                            "ERROR",
+                            "VARIABLE_SOURCE_MISSING",
+                            f"节点“{node.name}”引用了不存在的变量来源“{source_key}”。",
+                            node=node,
+                            suggestion="使用变量选择器重新选择开始输入或已连通的上游节点输出。",
+                        )
+                    elif source_key not in upstream:
+                        add(
+                            "ERROR",
+                            "VARIABLE_SOURCE_NOT_UPSTREAM",
+                            f"节点“{node.name}”引用了“{source.name}”的输出，但两者没有上游数据路径。",
+                            node=node,
+                            suggestion="先连接数据来源节点，或改为引用当前节点真正上游的变量。",
+                        )
+
+        end = next((node for node in nodes if node.node_type.upper() == "END"), None)
+        if end is not None and not (end.config_json or {}).get("output"):
+            add(
+                "INFO",
+                "END_DEFAULT_OUTPUT",
+                "结束节点未声明自定义返回字段，将返回最后一个执行节点的完整结果。",
+                node=end,
+            )
+
+        if not any(item["level"] == "ERROR" for item in diagnostics):
+            add("INFO", "WORKFLOW_READY", "流程图、节点配置与变量数据路径检查通过，可测试或发布。")
+
+    errors = sum(item["level"] == "ERROR" for item in diagnostics)
+    warnings = sum(item["level"] == "WARNING" for item in diagnostics)
+    return {
+        "version_id": version.id,
+        "scene_id": version.scenario_id,
+        "mode": scene.mode,
+        "ready": errors == 0,
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "infos": sum(item["level"] == "INFO" for item in diagnostics),
+        },
+        "diagnostics": diagnostics,
+    }
 
 
 def _version_query(version_id: int):
@@ -1248,6 +1438,16 @@ def get_scenario_version(
     return _version_payload(_version_or_404(database, version_id))
 
 
+@router.get("/versions/{version_id}/preflight")
+def preflight_scenario_version(
+    version_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return a non-mutating design-time inspection for the selected version."""
+
+    return _workflow_preflight(database, _version_or_404(database, version_id))
+
+
 @router.put("/versions/{version_id}")
 def update_scenario_version(
     version_id: int,
@@ -1402,6 +1602,12 @@ def publish_scenario_version(
     version = _version_or_404(database, version_id)
     _ensure_draft(version)
     scene = version.scenario
+    preflight = _workflow_preflight(database, version)
+    blocking = [item for item in preflight["diagnostics"] if item["level"] == "ERROR"]
+    if blocking:
+        details = "；".join(str(item["message"]) for item in blocking[:3])
+        more = "" if len(blocking) <= 3 else f"；另有 {len(blocking) - 3} 项问题"
+        raise HTTPException(status_code=400, detail=f"发布前检查未通过：{details}{more}")
     if scene.mode == "VLM_DIRECT":
         if not version.primary_vlm_model_id or not version.prompt_template:
             raise HTTPException(status_code=400, detail="直接 VLM 场景必须配置主 VLM 和提示词。")

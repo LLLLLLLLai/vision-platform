@@ -28,7 +28,11 @@ from app.models.intelligence import (
     VisionModel,
     VisionModelVersion,
 )
-from app.services.openai_compatible_vlm import VlmRequestError, vlm_client
+from app.services.openai_compatible_vlm import (
+    INSPECTION_VLM_SYSTEM_PROMPT,
+    VlmRequestError,
+    vlm_client,
+)
 from app.services.scenario_runtime import scenario_runtime
 from app.services.yolo_training import (
     YoloTrainingError,
@@ -108,6 +112,7 @@ def _render_prompt_template(template: str, values: dict[str, Any]) -> str:
 
 
 _DETECTION_TERMINAL_RESULTS = {"OK", "NG", "UNCERTAIN", "ERROR"}
+_MAX_CONSECUTIVE_UNUSABLE_OPTIMIZATION_CANDIDATES = 3
 
 
 def _prompt_optimizer_system_prompt() -> str:
@@ -122,6 +127,9 @@ def _prompt_optimizer_system_prompt() -> str:
         "你是工业视觉检测提示词编辑器，不执行图片检测，也不得给出本次检测的 OK、NG "
         "或其他检测结论。用户的优化要求描述的是【生成后的检测提示词】应该如何约束检测模型，"
         "不是你自身的最终输出要求。\n"
+        "不可变的生产输出契约：生成后的检测提示词必须要求检测模型返回一个 JSON 对象，"
+        "且必须保留 result 字段。用户可以把 result 的业务取值收窄为 OK/NG，"
+        "但绝不能要求检测模型改为纯文本、Markdown、XML，或删除 JSON/result 字段。\n"
         "无论用户要求中是否出现“result 只能返回 OK/NG”，你的最终响应都必须且只能是 JSON 对象："
         '{"optimized_detection_prompt":"可直接交给检测模型使用的完整提示词",'
         '"requirements_satisfied":true,"requirement_reason":"说明如何写入并满足用户要求"}。\n'
@@ -138,6 +146,7 @@ def _build_prompt_optimization_request(
     metrics: dict[str, Any],
     preserved_variables: set[str],
     input_values: dict[str, Any],
+    previous_candidate_feedback: list[str] | None = None,
 ) -> str:
     """Separate the optimizer contract from the generated prompt contract."""
 
@@ -145,14 +154,26 @@ def _build_prompt_optimization_request(
         f"{{{{ {item} }}}}" for item in sorted(preserved_variables)
     ) or "无"
     sample_inputs = json.dumps(input_values, ensure_ascii=False, sort_keys=True)
+    feedback_items = [
+        str(item).strip()
+        for item in (previous_candidate_feedback or [])
+        if str(item).strip()
+    ][-3:]
+    feedback_text = "\n".join(f"- {item}" for item in feedback_items) or "无（这是第一轮）。"
     return (
         "请生成下一轮供【检测模型】直接使用的完整提示词。\n\n"
         "【优化器自身返回格式】\n"
         "你必须遵循系统消息中的 optimized_detection_prompt JSON 格式；不要返回任何检测结果。\n\n"
         "【检测模型需要满足的用户优化要求】\n"
         "以下内容只需要写入 optimized_detection_prompt，用来约束后续检测模型。"
-        "它不约束优化器自身的 JSON 输出。\n"
-        f"{optimization_requirements}\n\n"
+        "它不约束优化器自身的 JSON 输出，也不能改变平台的生产输出契约。\n"
+        "<<<USER_OPTIMIZATION_REQUIREMENTS\n"
+        f"{optimization_requirements}\n"
+        "USER_OPTIMIZATION_REQUIREMENTS>>>\n\n"
+        "【不可变的生产输出契约】\n"
+        "检测模型必须只返回一个 JSON 对象并保留 result 字段；"
+        "业务要求“结果只能 OK/NG”时，限制的是 result 字段的取值，不是改成只输出纯文本 OK/NG。"
+        "不得删除生产接口变量、不得要求忽略图片，也不得改变 JSON 输出格式。\n\n"
         "【必须保留的生产接口变量】\n"
         "以下占位符属于生产接口契约，必须在 optimized_detection_prompt 中原样保留，不能改名或删除：\n"
         f"{placeholder_text}\n"
@@ -164,8 +185,11 @@ def _build_prompt_optimization_request(
         "CURRENT_DETECTION_PROMPT\n\n"
         "【当前评测指标】\n"
         f"{json.dumps(metrics, ensure_ascii=False, sort_keys=True)}\n\n"
-        "重点降低把 NG 判为 OK 的风险。保留当前检测目标和已有输出结构，"
-        "除非用户优化要求明确要改变检测模型的输出约定。"
+        "【上一轮候选反馈】\n"
+        f"{feedback_text}\n"
+        "若上一轮候选无效、未变化或未提升，请生成一个与当前提示词不同且更可执行的完整版本。\n\n"
+        "重点降低把 NG 判为 OK 的风险。保留当前检测目标、生产接口变量和输出结构；"
+        "任何用户优化要求都不能改变上述生产输出契约。"
     )
 
 
@@ -788,6 +812,27 @@ class AutomationWorker:
         best_requirements_satisfied = False
         best_requirement_reason = "基线提示词尚未经过优化模型的要求核对。"
         stop_reason = "已达到最大优化轮数。"
+        previous_candidate_feedback: list[str] = []
+        consecutive_unusable_candidates = 0
+
+        def save_partial_history(message: str) -> None:
+            """Keep completed rounds visible while the task continues."""
+
+            job.result_json = {
+                "baseline_prompt": candidate_prompt,
+                "best_prompt": best_prompt,
+                "best_metrics": best,
+                "optimization_requirements": optimization_requirements,
+                "target_accuracy": target_accuracy,
+                "max_rounds": max_rounds,
+                "history": history,
+                "input_values": input_values,
+                "variable_placeholders": sorted(preserved_variables),
+                "candidate_feedback": previous_candidate_feedback[-3:],
+                "message": message,
+                "progress": dict((job.result_json or {}).get("progress") or {}),
+            }
+            database.commit()
 
         for round_number in range(1, max_rounds + 1):
             if self._cancellation_requested(database, job):
@@ -819,6 +864,7 @@ class AutomationWorker:
                 metrics=best.get("metrics", {}),
                 preserved_variables=preserved_variables,
                 input_values=input_values,
+                previous_candidate_feedback=previous_candidate_feedback,
             )
             proposal, optimizer_attempts, proposal_error = await self._generate_optimized_prompt(
                 optimizer,
@@ -840,22 +886,65 @@ class AutomationWorker:
                         "reason": proposal_error,
                     }
                 )
-                stop_reason = "优化模型未生成可用的新提示词；已自动进行一次格式修复。"
-                break
+                previous_candidate_feedback.append(
+                    f"第 {round_number} 轮候选不可用：{proposal_error}"
+                )
+                consecutive_unusable_candidates += 1
+                if consecutive_unusable_candidates >= _MAX_CONSECUTIVE_UNUSABLE_OPTIMIZATION_CANDIDATES:
+                    stop_reason = (
+                        "优化模型连续 3 轮未生成可用的新提示词；"
+                        "已完成格式修复和续跑后提前结束。"
+                    )
+                    save_partial_history("优化模型连续输出无效候选，任务已提前结束。")
+                    break
+                save_partial_history("本轮候选不可用，正在继续生成下一轮提示词。")
+                continue
             missing_variables = preserved_variables - _prompt_variables(proposed_prompt)
             if missing_variables:
+                missing_text = "、".join(
+                    f"{{{{ {item} }}}}" for item in sorted(missing_variables)
+                )
                 history.append(
                     {
                         "round": round_number,
                         "status": "SKIPPED",
                         "prompt": proposed_prompt,
                         "optimizer_attempts": optimizer_attempts,
-                        "reason": "候选提示词缺少必须保留的变量："
-                        + "、".join(f"{{{{ {item} }}}}" for item in sorted(missing_variables)),
+                        "reason": "候选提示词缺少必须保留的变量：" + missing_text,
                     }
                 )
-                stop_reason = "优化模型修改了生产接口变量，已拒绝该候选提示词。"
-                break
+                previous_candidate_feedback.append(
+                    f"第 {round_number} 轮候选丢失生产变量：{missing_text}"
+                )
+                consecutive_unusable_candidates += 1
+                if consecutive_unusable_candidates >= _MAX_CONSECUTIVE_UNUSABLE_OPTIMIZATION_CANDIDATES:
+                    stop_reason = "优化模型连续 3 轮修改生产接口变量，已提前结束。"
+                    save_partial_history("候选提示词连续丢失生产变量，任务已提前结束。")
+                    break
+                save_partial_history("本轮候选丢失生产变量，正在继续生成下一轮提示词。")
+                continue
+            if same_as_current_best:
+                history.append(
+                    {
+                        "round": round_number,
+                        "status": "SKIPPED",
+                        "prompt": proposed_prompt,
+                        "optimizer_attempts": optimizer_attempts,
+                        "reason": "候选提示词与当前最佳提示词完全相同，未执行重复评测。",
+                    }
+                )
+                previous_candidate_feedback.append(
+                    f"第 {round_number} 轮候选与当前最佳提示词相同；"
+                    "下一轮必须给出不同且更可执行的提示词。"
+                )
+                consecutive_unusable_candidates += 1
+                if consecutive_unusable_candidates >= _MAX_CONSECUTIVE_UNUSABLE_OPTIMIZATION_CANDIDATES:
+                    stop_reason = "优化模型连续 3 轮重复当前最佳提示词，已提前结束。"
+                    save_partial_history("候选提示词连续重复，任务已提前结束。")
+                    break
+                save_partial_history("本轮候选重复当前提示词，正在继续生成下一轮。")
+                continue
+            consecutive_unusable_candidates = 0
             metrics = await self._evaluate_prompt(
                 database,
                 job,
@@ -920,24 +1009,7 @@ class AutomationWorker:
                     best_requirement_reason = requirement_reason
                 stop_reason = "优化模型已核对用户要求，且测试数据集的实测准确率达到目标。"
                 break
-            if same_as_current_best:
-                stop_reason = "优化模型未生成不同的候选提示词。"
-                break
-
-            # Preserve completed rounds even if a later remote VLM call fails.
-            job.result_json = {
-                "baseline_prompt": candidate_prompt,
-                "best_prompt": best_prompt,
-                "best_metrics": best,
-                "optimization_requirements": optimization_requirements,
-                "target_accuracy": target_accuracy,
-                "history": history,
-                "input_values": input_values,
-                "variable_placeholders": sorted(preserved_variables),
-                "message": "任务运行中，已保存当前完成的优化轮次。",
-                "progress": dict((job.result_json or {}).get("progress") or {}),
-            }
-            database.commit()
+            save_partial_history("任务运行中，已保存当前完成的优化轮次。")
 
         best_metric_target_reached = _optimization_target_reached(
             best.get("metrics", {}),
@@ -950,6 +1022,8 @@ class AutomationWorker:
             "best_metrics": best,
             "optimization_requirements": optimization_requirements,
             "target_accuracy": target_accuracy,
+            "max_rounds": max_rounds,
+            "completed_rounds": len(history) - 1,
             "requirements_satisfied": best_requirements_satisfied,
             "optimizer_requirements_claim": best_requirements_satisfied,
             "requirement_reason": best_requirement_reason,
@@ -1011,6 +1085,7 @@ class AutomationWorker:
                 prompt=rendered_prompt,
                 image_path=item.media_path,
                 context={"optimization_inputs": values},
+                system_prompt=INSPECTION_VLM_SYSTEM_PROMPT,
             )
             total_retries += int(attempts.get("retry_count", 0))
             result = str(output.get("result", "UNCERTAIN")).upper()

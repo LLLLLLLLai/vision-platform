@@ -352,7 +352,7 @@
     const cards = taskMetricCards(bestMetrics, [
       ["最佳准确率", percentage(result.best_metrics?.accuracy ?? bestMetrics.accuracy)],
       ["目标准确率", outcome.target === null ? "无效" : percentage(outcome.target)],
-      ["优化轮数", history.length ? Math.max(0, history.length - 1) : "—"],
+      ["优化轮数", history.length ? `${Math.max(0, history.length - 1)} / ${config.max_rounds || result.max_rounds || "—"}` : "—"],
       ["实测目标", outcome.target === null ? "目标无效，需重跑" : outcome.metricTargetMet ? "已达到" : "未达到"],
       ["优化要求核对", outcome.requirementsClaimed ? "优化模型声明已满足" : "优化模型未声明满足"],
       ["总体结果", outcome.label],
@@ -386,7 +386,7 @@
           : round.retry_count !== undefined
             ? `检测重试 ${round.retry_count} 次`
             : "—";
-        return `<tr><td>${Number(round.round) === 0 ? "基线" : `第 ${escapeHtml(round.round ?? "—")} 轮`}</td><td><span class="status-pill ${roundClassName}">${escapeHtml(roundResult)}</span><small>${escapeHtml(roundStatus)}</small></td><td>${percentage(round.accuracy ?? metrics.accuracy)}</td><td>${escapeHtml(metrics.labeled ?? metrics.total ?? "—")}</td><td>${escapeHtml(metrics.false_accept ?? "—")}</td><td>${escapeHtml(metrics.false_reject ?? "—")}</td><td>${escapeHtml(attempts)}</td><td class="optimization-round-reason" title="${escapeHtml(reason)}">${escapeHtml(compact(reason, 90))}</td><td class="task-prompt-cell"><div class="task-prompt-cell-content"><span class="task-prompt-preview">${escapeHtml(compact(roundPrompt || reason, 130))}</span>${roundPrompt ? promptActionButtons(roundPrompt, "prompt-action-group-inline") : ""}</div></td></tr>`;
+        return `<tr><td>${Number(round.round) === 0 ? "基线" : `第 ${escapeHtml(round.round ?? "—")} 轮`}</td><td><span class="status-pill ${roundClassName}">${escapeHtml(roundResult)}</span><small>${escapeHtml(roundStatus)}</small></td><td>${percentage(round.accuracy ?? metrics.accuracy)}</td><td>${escapeHtml(metrics.labeled ?? metrics.total ?? "—")}</td><td>${escapeHtml(metrics.false_accept ?? "—")}</td><td>${escapeHtml(metrics.false_reject ?? "—")}</td><td>${escapeHtml(attempts)}</td><td class="optimization-round-reason" title="${escapeHtml(reason)}"><div class="optimization-round-reason-content">${escapeHtml(reason)}</div></td><td class="task-prompt-cell"><div class="task-prompt-cell-content"><span class="task-prompt-preview">${escapeHtml(compact(roundPrompt || reason, 130))}</span>${roundPrompt ? promptActionButtons(roundPrompt, "prompt-action-group-inline") : ""}</div></td></tr>`;
       }).join("")
       : '<tr><td colspan="9" class="text-center text-muted">任务尚未产出优化轮次结果。</td></tr>';
     const copyButton = bestPromptKey
@@ -549,7 +549,14 @@
     byId("openSceneCreate")?.addEventListener("click", () => { byId("sceneCreateForm").reset(); byId("sceneCreateForm").elements.category.value = "HARNESS"; byId("sceneCreateForm").elements.version.value = "1.0"; openModal("sceneCreateModal"); });
     byId("createScene").addEventListener("click", createScene);
     byId("openEvaluationTask").addEventListener("click", () => { fillEvaluationOptions(); openModal("evaluationTaskModal"); });
-    byId("openOptimizationTask").addEventListener("click", () => { fillEvaluationOptions(); byId("optimizationRequirements").value = ""; syncOptimizationModels(); openModal("optimizationTaskModal"); });
+    byId("openOptimizationTask").addEventListener("click", () => {
+      fillEvaluationOptions();
+      byId("optimizationRequirements").value = "";
+      byId("optimizationTargetAccuracy").value = "0.95";
+      byId("optimizationMaxRounds").value = "10";
+      syncOptimizationModels();
+      openModal("optimizationTaskModal");
+    });
     byId("queueEvaluation").addEventListener("click", queueEvaluation);
     byId("queueOptimization").addEventListener("click", queueOptimization);
     byId("optimizationSceneVersion").addEventListener("change", syncOptimizationModels);

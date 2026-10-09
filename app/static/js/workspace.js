@@ -2669,6 +2669,29 @@ function renderScenarioTiming(timing) {
   </details>`;
 }
 
+function manualReviewLabel(verdict) {
+  const labels = { OK: "确认 OK", NG: "确认 NG", UNCERTAIN: "暂不确定" };
+  return labels[String(verdict || "").toUpperCase()] || "待人工确认";
+}
+
+function renderManualReview(roi) {
+  const review = roi.manual_review;
+  if (!review?.execution_id) {
+    return `<section class="record-manual-review unavailable"><header><strong>人工确认</strong><span>不可用</span></header><p>此历史 ROI 未关联可追溯的场景执行记录，无法写入人工结论。</p></section>`;
+  }
+  const manualVerdict = String(review.manual_verdict || "").toUpperCase();
+  const automatedVerdict = review.vlm_verdict || "未复核";
+  const savedAt = review.manually_reviewed_at ? formatDetectionTime(review.manually_reviewed_at) : "尚未保存";
+  const choice = (value, label, className) => `<button class="btn btn-sm ${manualVerdict === value ? className : "btn-outline-secondary"}" type="button" data-manual-verdict="${value}">${label}</button>`;
+  return `<section class="record-manual-review" data-manual-review-execution="${review.execution_id}" data-manual-verdict="${manualVerdict}">
+    <header><div><strong>人工确认</strong><small>人工结论优先于 VLM 复核，并进入生产场景统计。</small></div><span class="record-manual-review-state ${manualVerdict ? manualVerdict.toLowerCase() : "pending"}">${manualReviewLabel(manualVerdict)}</span></header>
+    <div class="record-manual-review-facts"><span>原始结果：<b>${escapeHtml(review.primary_result || roi.status || "-")}</b></span><span>VLM 复核：<b>${escapeHtml(automatedVerdict)}</b></span><span>最近确认：<b>${escapeHtml(savedAt)}</b></span></div>
+    <div class="record-manual-review-actions">${choice("OK", "确认 OK", "btn-success")}${choice("NG", "确认 NG", "btn-danger")}${choice("UNCERTAIN", "暂不确定", "btn-warning")}</div>
+    <textarea class="form-control form-control-sm" data-manual-review-note rows="2" maxlength="2000" placeholder="可选：填写确认依据或异常说明">${escapeHtml(review.manual_note || "")}</textarea>
+    <div class="record-manual-review-footer"><small>“暂不确定”会保留记录，但不会被计入人工确认准确率。</small><button class="btn btn-sm btn-primary" type="button" data-save-manual-review="${review.execution_id}">保存人工确认</button></div>
+  </section>`;
+}
+
 function renderDetectionRecordDetail(detail) {
   const recipeCards = (detail.recipes || []).map((recipe) => `
     <section class="record-recipe-detail">
@@ -2699,13 +2722,16 @@ function renderDetectionRecordDetail(detail) {
                   <div><dt>处理说明</dt><dd>${escapeHtml(roi.message || "-")}</dd></div>
                 </dl>
                  ${renderScenarioTiming(roi.scenario_timing)}
+                ${renderManualReview(roi)}
                 <details><summary>查看模型处理结果</summary><pre>${escapeHtml(JSON.stringify(roi.processing || {}, null, 2))}</pre></details>
               </article>`).join("") || '<div class="records-empty">该图片没有 ROI 处理明细</div>'}
           </div>
         </article>`).join("") || '<div class="records-empty">该配方没有图片处理结果</div>'}
     </section>`).join("") || '<div class="records-empty">本次调用未产生可追溯的配方执行结果</div>';
   byId("detectionRecordDetailTitle").textContent = `${detail.sn || "-"} · ${recordOperation(detail)}`;
-  byId("detectionRecordDetailContent").innerHTML = `
+  const content = byId("detectionRecordDetailContent");
+  content.dataset.recordId = String(detail.id || "");
+  content.innerHTML = `
     <div class="record-detail-meta"><span>调用方：<code>${escapeHtml(detail.caller_ip || "-")}</code></span><span>调用时间：${escapeHtml(formatDetectionTime(detail.called_at))}</span></div>
     ${recipeCards}`;
 }
@@ -2793,6 +2819,10 @@ function initializeReportDateRange() {
 }
 
 function reportTrendChart(title, periods, key, color, formatter) {
+  const hasData = periods.some((row) => row[key] !== null && row[key] !== undefined);
+  if (!hasData) {
+    return `<section class="report-chart-card report-chart-empty"><h3>${escapeHtml(title)}</h3><p>暂无可用数据</p></section>`;
+  }
   const values = periods.map((row) => Number(row[key] || 0));
   const maximum = Math.max(1, ...values);
   const width = 640;
@@ -2834,10 +2864,14 @@ function reportSceneValue(row, key) {
     name: row.key || "",
     total: Number(raw.total || 0),
     primary_pass_rate: Number(row.primary_pass_rate ?? raw.ok_rate ?? 0),
-    review_coverage: Number(row.review_coverage || 0),
-    review_accuracy: Number(row.review_accuracy ?? row.review_agreement_rate ?? -1),
-    human_reviewed_count: Number(row.human_reviewed_count || 0),
+    confirmed_count: Number(row.confirmed_count || 0),
     manual_accuracy: Number(row.manual_accuracy ?? row.confirmed_accuracy ?? -1),
+    false_accept_count: Number(row.false_accept_count || 0),
+    false_reject_count: Number(row.false_reject_count || 0),
+    vlm_agreement_rate: Number(row.vlm_agreement_rate ?? -1),
+    error_rate: Number(raw.error_rate || row.error_rate || 0),
+    p95_elapsed_ms: Number(row.p95_elapsed_ms ?? -1),
+    health: { CRITICAL: 4, WARNING: 3, PENDING: 2, STABLE: 1 }[row.health?.level] || 0,
   };
   return values[key] ?? "";
 }
@@ -2860,6 +2894,11 @@ function sceneReportDimensionCard(rows) {
       return direction * (Number(leftValue) - Number(rightValue));
     });
   const header = (label, key, extra = "") => `<th><button class="report-sort-button" type="button" data-scene-sort="${key}">${escapeHtml(label)} <span>${sceneSortIcon(key)}</span></button>${extra}</th>`;
+  const countRate = (count, total) => `${Number(count || 0)}<small>${formatRate(total ? Number(count || 0) / total : 0)}</small>`;
+  const healthBadge = (health) => {
+    const level = String(health?.level || "PENDING").toLowerCase();
+    return `<span class="report-health ${escapeHtml(level)}" title="${escapeHtml(health?.reason || "")}">${escapeHtml(health?.label || "待确认")}</span>`;
+  };
   const body = filteredRows.length
     ? filteredRows.map((row) => {
       const raw = row.raw || {};
@@ -2868,18 +2907,22 @@ function sceneReportDimensionCard(rows) {
           <td>${escapeHtml(row.key)}</td>
           <td>${raw.total || 0}</td>
           <td>${formatRate(row.primary_pass_rate ?? raw.ok_rate)}</td>
-          <td>${formatRate(row.review_coverage)}</td>
-          <td>${row.reviewed_count ? formatRate(row.review_accuracy ?? row.review_agreement_rate) : "待复核"}</td>
-          <td>${row.human_reviewed_count || 0}</td>
-          <td>${row.confirmed_count ? formatRate(row.manual_accuracy ?? row.confirmed_accuracy) : "待人工确认"}</td>
+          <td>${countRate(row.confirmed_count, raw.total)}</td>
+          <td>${row.confirmed_count ? formatRate(row.manual_accuracy ?? row.confirmed_accuracy) : "样本不足"}</td>
+          <td class="report-risk-count ${row.false_accept_count ? "critical" : ""}">${countRate(row.false_accept_count, row.confirmed_count)}</td>
+          <td class="report-risk-count ${row.false_reject_count ? "warning" : ""}">${countRate(row.false_reject_count, row.confirmed_count)}</td>
+          <td>${row.vlm_reviewed_count ? formatRate(row.vlm_agreement_rate) : "未复核"}</td>
+          <td>${countRate(raw.error, raw.total)}</td>
+          <td>${formatElapsedMs(row.p95_elapsed_ms)}</td>
+          <td>${healthBadge(row.health)}</td>
         </tr>`;
     }).join("")
-    : '<tr><td colspan="7" class="records-empty">没有匹配的场景生产记录</td></tr>';
+    : '<tr><td colspan="11" class="records-empty">没有匹配的场景生产记录</td></tr>';
   return `
     <section class="report-dimension-card report-scene-card">
-      <div class="report-scene-heading"><h3>场景统计</h3><label class="report-scene-search"><span>⌕</span><input id="sceneReportSearch" value="${escapeHtml(state.reportSceneSearch)}" placeholder="筛选场景名称"></label></div>
+      <div class="report-scene-heading"><div><h3>场景健康统计</h3><small>人工确认样本用于衡量真实准确率；漏判优先处理。</small></div><label class="report-scene-search"><span>⌕</span><input id="sceneReportSearch" value="${escapeHtml(state.reportSceneSearch)}" placeholder="筛选场景名称"></label></div>
       <div class="report-table-wrap"><table>
-        <thead><tr>${header("场景名称", "name")}${header("调用次数", "total")}${header("原始通过率", "primary_pass_rate")}${header("复核覆盖率", "review_coverage")}${header("复核参考准确率", "review_accuracy")}${header("人工确认", "human_reviewed_count")}${header("人工确认准确率", "manual_accuracy")}</tr></thead>
+        <thead><tr>${header("场景名称", "name")}${header("调用", "total")}${header("检测通过率", "primary_pass_rate")}${header("人工真值样本", "confirmed_count")}${header("样本准确率", "manual_accuracy")}${header("漏判 OK→NG", "false_accept_count")}${header("误判 NG→OK", "false_reject_count")}${header("VLM 一致率", "vlm_agreement_rate")}${header("异常执行", "error_rate")}${header("P95 耗时", "p95_elapsed_ms")}${header("状态", "health")}</tr></thead>
         <tbody>${body}</tbody>
       </table></div>
     </section>`;
@@ -2892,15 +2935,17 @@ function renderInspectionReports() {
   byId("inspectionReportNote").textContent = report.accuracy_note || "";
   byId("inspectionReportSummary").innerHTML = `
     <span><small>场景执行</small><strong>${overall.total || 0}</strong></span>
-    <span><small>原始通过率</small><strong>${formatRate(overall.ok_rate)}</strong></span>
-    <span><small>复核覆盖率</small><strong>${formatRate(overall.review_coverage)}</strong></span>
-    <span><small>复核参考准确率</small><strong>${overall.reviewed_count ? formatRate(overall.review_accuracy ?? overall.review_agreement_rate) : "待复核"}</strong></span>
-    <span><small>人工确认准确率</small><strong>${overall.confirmed_count ? formatRate(overall.confirmed_accuracy) : "待人工确认"}</strong></span>
+    <span><small>人工真值覆盖率</small><strong>${formatRate(overall.manual_confirmation_coverage)}</strong></span>
+    <span><small>人工确认样本准确率</small><strong>${overall.confirmed_count ? formatRate(overall.confirmed_accuracy) : "样本不足"}</strong></span>
+    <span><small>漏判 OK→NG</small><strong class="${overall.false_accept_count ? "report-summary-critical" : ""}">${overall.false_accept_count || 0}</strong></span>
+    <span><small>误判 NG→OK</small><strong>${overall.false_reject_count || 0}</strong></span>
+    <span><small>P95 耗时</small><strong>${formatElapsedMs(overall.p95_elapsed_ms)}</strong></span>
     `;
   const dimensions = report.dimensions || {};
   byId("inspectionReportCharts").innerHTML = [
     reportTrendChart("每月场景执行量", report.monthly || [], "total", "#2a76d2", (value) => `${value} 次`),
-    reportTrendChart("每月复核参考准确率", report.monthly || [], "review_accuracy", "#2a76d2", formatRate),
+    reportTrendChart("每月人工确认样本准确率", report.monthly || [], "confirmed_accuracy", "#2a76d2", formatRate),
+    reportTrendChart("每月漏判数（OK→NG）", report.monthly || [], "false_accept_count", "#dc3545", (value) => `${value} 项`),
   ].join("");
   byId("inspectionReportDimensions").innerHTML = [
     sceneReportDimensionCard(dimensions.scene || []),
@@ -3247,6 +3292,49 @@ byId("detectionRecordsBody").addEventListener("click", (event) => {
   const button = event.target.closest("[data-record-detail]");
   if (!button) return;
   openDetectionRecordDetail(Number(button.dataset.recordDetail));
+});
+byId("detectionRecordDetailContent").addEventListener("click", async (event) => {
+  const verdictButton = event.target.closest("[data-manual-verdict]");
+  if (verdictButton) {
+    const section = verdictButton.closest("[data-manual-review-execution]");
+    if (!section) return;
+    section.dataset.manualVerdict = verdictButton.dataset.manualVerdict || "";
+    section.querySelectorAll("[data-manual-verdict]").forEach((button) => {
+      const selected = button.dataset.manualVerdict === section.dataset.manualVerdict;
+      button.className = `btn btn-sm ${selected
+        ? (button.dataset.manualVerdict === "OK" ? "btn-success" : button.dataset.manualVerdict === "NG" ? "btn-danger" : "btn-warning")
+        : "btn-outline-secondary"}`;
+    });
+    return;
+  }
+  const saveButton = event.target.closest("[data-save-manual-review]");
+  if (!saveButton) return;
+  const section = saveButton.closest("[data-manual-review-execution]");
+  const executionId = Number(saveButton.dataset.saveManualReview);
+  const verdict = section?.dataset.manualVerdict || "";
+  if (!executionId || !["OK", "NG", "UNCERTAIN"].includes(verdict)) {
+    notify("请先选择确认 OK、确认 NG 或暂不确定。", "warning", false);
+    return;
+  }
+  const note = section.querySelector("[data-manual-review-note]")?.value.trim() || null;
+  saveButton.disabled = true;
+  saveButton.textContent = "保存中…";
+  try {
+    await request(`${api}/scenarios/executions/${executionId}/manual-review`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verdict, note }),
+    });
+    notify("人工确认已保存，并将用于场景统计。", "success", false);
+    const recordId = Number(byId("detectionRecordDetailContent").dataset.recordId);
+    if (recordId) await openDetectionRecordDetail(recordId);
+    if (byId("reportsView")?.classList.contains("active")) await loadInspectionReports();
+  } catch (error) {
+    notify(`保存人工确认失败：${error.message}`, "danger", false);
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = "保存人工确认";
+  }
 });
 byId("refreshInspectionReports").addEventListener("click", loadInspectionReports);
 byId("inspectionReportDimensions").addEventListener("click", (event) => {

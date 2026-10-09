@@ -33,34 +33,36 @@
       <div class="card-heading"><div><small id="datasetDetailCode">DATASET</small><h2 id="datasetDetailName">数据集</h2></div><span id="datasetDetailMeta" class="status-pill draft"></span></div>
       <div class="dataset-summary-grid" id="datasetSummary"></div>
 
-      <section class="dataset-upload-card">
-        <div class="section-heading"><div><strong>上传素材</strong><small id="datasetUploadHint">评测集上传后直接标记 OK 或 NG；YOLO 训练集上传后点击“框选标注”。</small></div></div>
+      <section class="dataset-upload-card dataset-action-card">
+        <div class="dataset-action-heading"><div><strong>素材操作</strong><small id="datasetUploadHint">选择素材后上传</small></div><span class="dataset-file-status" id="datasetSelectedFiles">未选择素材</span></div>
         <form id="datasetUploadForm" class="dataset-upload-form">
-          <input id="datasetFile" class="form-control" type="file" multiple required>
+          <input id="datasetFile" class="visually-hidden" type="file" multiple aria-label="选择素材">
           <input id="datasetFolder" class="visually-hidden" type="file" webkitdirectory directory multiple>
-          <button class="btn btn-outline-secondary" id="selectDatasetFolder" type="button">选择文件夹</button>
-          <div id="datasetUploadTruthWrap"><select id="datasetUploadTruth" class="form-select"><option value="">未标注</option><option value="OK">OK</option><option value="NG">NG</option></select></div>
-          <button class="btn btn-primary" type="submit">上传</button>
+          <div class="dataset-action-buttons">
+            <label class="btn btn-outline-primary" for="datasetFile">选择素材</label>
+            <button class="btn btn-outline-secondary" id="selectDatasetFolder" type="button">选择文件夹</button>
+            <div id="datasetUploadTruthWrap"><select id="datasetUploadTruth" class="form-select" aria-label="上传真值"><option value="">真值：未标注</option><option value="OK">真值：OK</option><option value="NG">真值：NG</option></select></div>
+            <button class="btn btn-primary" id="uploadDatasetItems" type="submit" disabled>开始上传</button>
+          </div>
         </form>
         <div class="dataset-offline-import" id="offlineYoloImportActions" hidden>
-          <div><strong>导入离线 YOLO 标注</strong><small>上传一个 ZIP：支持 <code>images/</code>、<code>labels/</code> 目录和同名 <code>.txt</code> 标签；类别可来自 <code>classes.txt</code> 或 <code>data.yaml</code>。</small></div>
           <input id="offlineYoloArchive" class="visually-hidden" type="file" accept=".zip,application/zip">
-          <button class="btn btn-outline-primary" id="selectOfflineYoloArchive" type="button">导入标注包</button>
+          <button class="btn btn-outline-primary" id="selectOfflineYoloArchive" type="button" title="导入 images、labels 与类别文件的 ZIP">导入离线标注包</button>
         </div>
       </section>
 
       <section class="dataset-label-card">
-        <div class="section-heading"><div><strong>数据集类别（类别字典）</strong><small>这里定义该数据集允许使用的全部类别，并决定 YOLO 导出的类别编号顺序；每张训练图片的每个框再从此字典选择对应类别，同一张图可标注多个类别。</small></div></div>
+        <div class="section-heading"><div><strong>类别</strong><small>训练标注使用的类别。</small></div></div>
         <div class="dataset-label-editor"><div id="datasetLabelList" class="dataset-label-list"></div><div class="dataset-label-add"><input id="datasetLabelInput" class="form-control" placeholder="例如：harness、connector"><button class="btn btn-outline-primary" id="addDatasetLabel" type="button">＋ 添加类别</button></div></div>
       </section>
 
       <section class="dataset-collection-card">
-        <div class="section-heading"><div><strong>自动采集 ROI</strong><small>关联已发布场景后，生产检测执行该场景时会复制 ROI 到本数据集；样本默认待标注，不会自动当成真值。</small></div></div>
+        <div class="section-heading"><div><strong>自动采集 ROI</strong><small>关联场景的生产素材。</small></div></div>
         <div class="dataset-collection-summary" id="datasetCollectionSummary"></div>
       </section>
 
       <section>
-        <div class="section-heading"><div><strong id="datasetItemsTitle">素材与真值</strong><small id="datasetItemsHint">人工 OK / NG 是场景评测准确率的真值来源。</small></div></div>
+        <div class="section-heading"><div><strong id="datasetItemsTitle">素材与真值</strong><small id="datasetItemsHint">选择素材后进行维护。</small></div></div>
         <div id="datasetItems" class="dataset-item-grid"></div>
       </section>
     </section>
@@ -95,6 +97,18 @@
         <input id="annotationItemId" type="hidden">
         <p id="annotationItemName" class="muted-copy mb-0"></p>
         <p id="annotationHint" class="muted-copy"></p>
+        <section class="annotation-ai-assistant" id="annotationAiAssistant">
+          <div class="annotation-ai-assistant-copy">
+            <strong>AI 预标注</strong>
+            <small>参考 X-AnyLabeling / CVAT 的“模型建议 + 人工确认”方式。模型结果只作为可编辑候选，点击“保存标注”后才会成为训练数据。</small>
+          </div>
+          <div class="annotation-ai-assistant-controls">
+            <label><span>已发布模型</span><select id="annotationPreModel" class="form-select form-select-sm"></select></label>
+            <label><span>置信度阈值</span><input id="annotationPreConfidence" class="form-control form-control-sm" type="number" min="0" max="1" step="0.05" value="0.25"></label>
+            <button class="btn btn-sm btn-primary" id="runAnnotationPrelabel" type="button">AI 预标注</button>
+          </div>
+          <small class="annotation-ai-assistant-status" id="annotationAiAssistantStatus">正在加载可用模型…</small>
+        </section>
 
         <section id="annotationDetectionEditor" class="annotation-editor" hidden>
           <div class="annotation-workspace">
@@ -143,9 +157,18 @@
               </section>
               <section class="annotation-inspector-section annotation-selected-panel">
                 <div class="annotation-inspector-heading"><strong>选中对象</strong><button class="btn btn-sm btn-outline-danger" id="annotationRemoveSelected" type="button" disabled>删除</button></div>
-                <div id="annotationSelectedEmpty" class="annotation-selected-empty">选择图片中的一个检测框后，可修改类别或移动、缩放该框。</div>
+                <div id="annotationSelectedEmpty" class="annotation-selected-empty">选择图片中的一个检测框后，可修改类别、直接编辑位置和大小，或在图片上拖动、缩放该框。</div>
                 <div id="annotationSelectedProperties" hidden>
-                  <label><span>类别</span><input id="annotationSelectedLabel" class="form-control form-control-sm" list="annotationLabelOptions" placeholder="类别名称"></label>
+                  <label><span>类别</span><input id="annotationSelectedLabel" class="form-control form-control-sm" list="annotationLabelOptions" placeholder="类别名称，按 Enter 或移出输入框应用"></label>
+                  <section class="annotation-geometry-editor" aria-label="选中检测框的位置和大小">
+                    <div class="annotation-geometry-heading"><strong>位置与大小（%）</strong><small>可直接输入，或拖动图片中的框和边角。</small></div>
+                    <div class="annotation-geometry-grid">
+                      <label><span>X</span><input id="annotationSelectedX" class="form-control form-control-sm" type="number" min="0" max="100" step="0.1"></label>
+                      <label><span>Y</span><input id="annotationSelectedY" class="form-control form-control-sm" type="number" min="0" max="100" step="0.1"></label>
+                      <label><span>宽</span><input id="annotationSelectedWidth" class="form-control form-control-sm" type="number" min="0.3" max="100" step="0.1"></label>
+                      <label><span>高</span><input id="annotationSelectedHeight" class="form-control form-control-sm" type="number" min="0.3" max="100" step="0.1"></label>
+                    </div>
+                  </section>
                   <div class="annotation-selected-metrics" id="annotationSelectedMetrics"></div>
                 </div>
               </section>
@@ -196,6 +219,6 @@
   </div>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20260929-01" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20260929-01"></script>
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261008-03" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261008-03"></script>
 {% endblock %}

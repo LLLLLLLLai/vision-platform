@@ -138,6 +138,12 @@ class PublishedVisionModelSpec:
 
 _MODEL_CACHE: dict[str, tuple[int, Any]] = {}
 
+_ULTRALYTICS_TASK_TYPES = {
+    "detect": "YOLO_DETECTION",
+    "segment": "YOLO_SEGMENTATION",
+    "classify": "YOLO_CLASSIFICATION",
+}
+
 
 def resolve_weights_path(raw_path: str | None) -> Path | None:
     if not raw_path:
@@ -180,6 +186,57 @@ def _load_yolo(weights_path: Path) -> Any:
     model = YOLO(str(weights_path))
     _MODEL_CACHE[cache_key] = (marker, model)
     return model
+
+
+def validate_yolo_weights_for_task(
+    weights_path: Path,
+    expected_task_type: str,
+) -> dict[str, Any]:
+    """Load an imported Ultralytics checkpoint and verify its task contract.
+
+    Importing a checkpoint is intentionally separate from publishing it.  This
+    lightweight check catches the common and dangerous case where a detection
+    model is accidentally registered as a classifier (or vice versa), before a
+    workflow can consume its output contract.
+    """
+
+    if not weights_path.is_file():
+        raise VisionModelRuntimeError("模型权重文件不存在。")
+    if weights_path.suffix.lower() != ".pt":
+        raise VisionModelRuntimeError("当前仅支持导入 Ultralytics YOLO 的 .pt 权重文件。")
+
+    model = _load_yolo(weights_path)
+    detected_task = str(getattr(model, "task", "") or "").strip().lower()
+    actual_task_type = _ULTRALYTICS_TASK_TYPES.get(detected_task)
+    if actual_task_type is None:
+        raise VisionModelRuntimeError(
+            "无法从权重识别 YOLO 任务类型；请确认该文件是兼容 Ultralytics 的检测、分割或分类 .pt 权重。"
+        )
+
+    required_task_type = str(expected_task_type or "").upper()
+    if actual_task_type != required_task_type:
+        labels = {
+            "YOLO_DETECTION": "目标检测",
+            "YOLO_SEGMENTATION": "目标分割",
+            "YOLO_CLASSIFICATION": "图像分类",
+        }
+        raise VisionModelRuntimeError(
+            f"导入权重实际是 {labels.get(actual_task_type, actual_task_type)} 模型，"
+            f"与当前模型卡片的 {labels.get(required_task_type, required_task_type)} 类型不一致。"
+        )
+
+    raw_names = getattr(model, "names", None)
+    if isinstance(raw_names, dict):
+        class_names = [str(raw_names[key]) for key in sorted(raw_names)]
+    elif isinstance(raw_names, (list, tuple)):
+        class_names = [str(item) for item in raw_names]
+    else:
+        class_names = []
+    return {
+        "detected_task": detected_task,
+        "task_type": actual_task_type,
+        "class_names": class_names,
+    }
 
 
 def _as_list(value: Any) -> list[Any]:

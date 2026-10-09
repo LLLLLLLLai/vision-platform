@@ -93,88 +93,172 @@ def _metrics(statuses: list[str]) -> dict[str, Any]:
     }
 
 
+_BINARY_REVIEW_VERDICTS = {"OK", "NG"}
+
+
+def _binary_review_verdict(value: str | None) -> str | None:
+    """Return a review conclusion suitable as a production truth label."""
+
+    normalized = str(value or "").upper()
+    return normalized if normalized in _BINARY_REVIEW_VERDICTS else None
+
+
+def _resolved_review_verdict(
+    vlm_verdict: str | None,
+    manual_verdict: str | None,
+) -> str | None:
+    """Prefer a human verdict, but do not treat UNCERTAIN as a truth label."""
+
+    return _binary_review_verdict(manual_verdict) or _binary_review_verdict(vlm_verdict)
+
+
+def _p95_elapsed_ms(values: list[float | None]) -> float | None:
+    samples = sorted(float(value) for value in values if value is not None)
+    if not samples:
+        return None
+    index = max(0, -(-len(samples) * 95 // 100) - 1)
+    return round(samples[index], 2)
+
+
+def _scene_health(metrics: dict[str, Any]) -> dict[str, str]:
+    if int(metrics.get("false_accept_count") or 0) > 0:
+        return {
+            "level": "CRITICAL",
+            "label": "存在漏判",
+            "reason": "人工确认发现原始 OK 实为 NG。",
+        }
+    if int(metrics.get("error") or 0) > 0:
+        return {
+            "level": "WARNING",
+            "label": "存在执行异常",
+            "reason": "部分场景调用未得到 OK 或 NG 结果。",
+        }
+    if int(metrics.get("false_reject_count") or 0) > 0:
+        return {
+            "level": "WARNING",
+            "label": "存在误判",
+            "reason": "人工确认发现原始 NG 实为 OK。",
+        }
+    if int(metrics.get("confirmed_count") or 0) == 0:
+        return {
+            "level": "PENDING",
+            "label": "缺少人工真值",
+            "reason": "尚未有人工确认的 OK/NG 样本，无法衡量生产准确率。",
+        }
+    return {"level": "STABLE", "label": "稳定", "reason": "未发现已确认的漏判、误判或执行异常。"}
+
+
+def _production_quality_metrics(
+    values: list[tuple[str | None, str | None, str | None, float | None]],
+) -> dict[str, Any]:
+    raw_statuses = [str(raw or "ERROR").upper() for raw, _, _, _ in values]
+    raw = _metrics(raw_statuses)
+    effective_comparisons = [
+        (str(raw_result or "ERROR").upper(), verdict)
+        for raw_result, vlm_verdict, manual_verdict, _ in values
+        if (verdict := _resolved_review_verdict(vlm_verdict, manual_verdict)) is not None
+    ]
+    vlm_comparisons = [
+        (str(raw_result or "ERROR").upper(), verdict)
+        for raw_result, vlm_verdict, _, _ in values
+        if (verdict := _binary_review_verdict(vlm_verdict)) is not None
+    ]
+    manual_comparisons = [
+        (str(raw_result or "ERROR").upper(), verdict)
+        for raw_result, _, manual_verdict, _ in values
+        if (verdict := _binary_review_verdict(manual_verdict)) is not None
+    ]
+    resolved = [verdict for _, verdict in effective_comparisons]
+    elapsed_values = [elapsed for _, _, _, elapsed in values]
+    total = len(values)
+    metrics: dict[str, Any] = {
+        **raw,
+        "raw": raw,
+        "primary_pass_rate": raw["ok_rate"],
+        "reviewed_count": len(effective_comparisons),
+        "review_coverage": round(len(effective_comparisons) / total, 4) if total else 0.0,
+        "review_disagreement_count": sum(
+            raw_result != review_result for raw_result, review_result in effective_comparisons
+        ),
+        "review_agreement_rate": (
+            round(
+                sum(raw_result == review_result for raw_result, review_result in effective_comparisons)
+                / len(effective_comparisons),
+                4,
+            )
+            if effective_comparisons
+            else None
+        ),
+        "review_result": _metrics(resolved) if resolved else None,
+        "vlm_reviewed_count": len(vlm_comparisons),
+        "vlm_review_coverage": round(len(vlm_comparisons) / total, 4) if total else 0.0,
+        "vlm_agreement_rate": (
+            round(
+                sum(raw_result == review_result for raw_result, review_result in vlm_comparisons)
+                / len(vlm_comparisons),
+                4,
+            )
+            if vlm_comparisons
+            else None
+        ),
+        "human_reviewed_count": sum(manual is not None for _, _, manual, _ in values),
+        "human_truth_count": len(manual_comparisons),
+        "confirmed_count": len(manual_comparisons),
+        "manual_confirmation_coverage": (
+            round(len(manual_comparisons) / total, 4) if total else 0.0
+        ),
+        "confirmed_accuracy": (
+            round(
+                sum(raw_result == manual_result for raw_result, manual_result in manual_comparisons)
+                / len(manual_comparisons),
+                4,
+            )
+            if manual_comparisons
+            else None
+        ),
+        "false_accept_count": sum(
+            raw_result == "OK" and manual_result == "NG"
+            for raw_result, manual_result in manual_comparisons
+        ),
+        "false_reject_count": sum(
+            raw_result == "NG" and manual_result == "OK"
+            for raw_result, manual_result in manual_comparisons
+        ),
+        "average_elapsed_ms": (
+            round(sum(float(value) for value in elapsed_values if value is not None) / sum(value is not None for value in elapsed_values), 2)
+            if any(value is not None for value in elapsed_values)
+            else None
+        ),
+        "p95_elapsed_ms": _p95_elapsed_ms(elapsed_values),
+    }
+    metrics["review_accuracy"] = metrics["review_agreement_rate"]
+    metrics["manual_accuracy"] = metrics["confirmed_accuracy"]
+    metrics["health"] = _scene_health(metrics)
+    return metrics
+
+
 def _scene_metrics(
-    rows: list[tuple[str, str, str | None, str | None, str | None]],
+    rows: list[tuple[str, str, str | None, str | None, str | None, float | None]],
 ) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
-    for scene_code, scene_name, raw_result, vlm_verdict, manual_verdict in rows:
+    for scene_code, scene_name, raw_result, vlm_verdict, manual_verdict, elapsed_ms in rows:
         group = grouped.setdefault(
             scene_code,
             {"name": scene_name, "values": []},
         )
-        group["values"].append((raw_result, vlm_verdict, manual_verdict))
+        group["values"].append((raw_result, vlm_verdict, manual_verdict, elapsed_ms))
     payload: list[dict[str, Any]] = []
     for scene_code, group in sorted(
         grouped.items(),
         key=lambda item: (-len(item[1]["values"]), item[1]["name"], item[0]),
     ):
         values = group["values"]
-        raw_statuses = [str(raw or "ERROR").upper() for raw, _, _ in values]
-        vlm_count = sum(verdict is not None for _, verdict, _ in values)
-        human_count = sum(verdict is not None for _, _, verdict in values)
-        resolved = [
-            str(manual or vlm or "").upper()
-            for _, vlm, manual in values
-            if manual or vlm
-        ]
-        comparisons = [
-            (str(raw or "ERROR").upper(), str(manual or vlm).upper())
-            for raw, vlm, manual in values
-            if manual or vlm
-        ]
-        manual_comparisons = [
-            (str(raw or "ERROR").upper(), str(manual).upper())
-            for raw, _, manual in values
-            if manual
-        ]
+        metrics = _production_quality_metrics(values)
         payload.append(
             {
                 "key": group["name"],
                 "scene_code": scene_code,
-                "raw": _metrics(raw_statuses),
-                "primary_pass_rate": _metrics(raw_statuses)["ok_rate"],
-                "review_coverage": round(len(comparisons) / len(values), 4) if values else 0.0,
-                "reviewed_count": len(comparisons),
-                "vlm_reviewed_count": vlm_count,
-                "human_reviewed_count": human_count,
-                "review_disagreement_count": sum(raw != review for raw, review in comparisons),
-                "review_agreement_rate": (
-                    round(
-                        sum(raw == review for raw, review in comparisons) / len(comparisons),
-                        4,
-                    )
-                    if comparisons
-                    else None
-                ),
-                "review_accuracy": (
-                    round(
-                        sum(raw == review for raw, review in comparisons) / len(comparisons),
-                        4,
-                    )
-                    if comparisons
-                    else None
-                ),
-                "review_result": _metrics(resolved) if resolved else None,
-                "human_truth_count": human_count,
-                "confirmed_count": len(manual_comparisons),
-                "confirmed_accuracy": (
-                    round(
-                        sum(raw == manual for raw, manual in manual_comparisons)
-                        / len(manual_comparisons),
-                        4,
-                    )
-                    if manual_comparisons
-                    else None
-                ),
-                "manual_accuracy": (
-                    round(
-                        sum(raw == manual for raw, manual in manual_comparisons)
-                        / len(manual_comparisons),
-                        4,
-                    )
-                    if manual_comparisons
-                    else None
-                ),
+                **metrics,
             }
         )
     return payload
@@ -219,6 +303,7 @@ def inspection_reports(
             ScenarioExecutionReview.verdict,
             ScenarioExecutionReview.manual_verdict,
             ScenarioExecution.created_at,
+            ScenarioExecution.elapsed_ms,
         )
         .select_from(ScenarioExecution)
         .join(
@@ -240,22 +325,19 @@ def inspection_reports(
         )
     )
     scene_rows = database.execute(scene_statement).all()
-    monthly_statuses: dict[str, list[str]] = defaultdict(list)
-    monthly_values: dict[str, list[tuple[str | None, str | None, str | None]]] = defaultdict(list)
-    scene_values: list[tuple[str | None, str | None, str | None]] = []
-    scene_dimension_rows: list[tuple[str, str, str | None, str | None, str | None]] = []
+    monthly_values: dict[str, list[tuple[str | None, str | None, str | None, float | None]]] = defaultdict(list)
+    scene_values: list[tuple[str | None, str | None, str | None, float | None]] = []
+    scene_dimension_rows: list[tuple[str, str, str | None, str | None, str | None, float | None]] = []
     for row in scene_rows:
         execution_month = (
             f"{row.created_at.year:04d}-{row.created_at.month:02d}"
             if row.created_at
             else f"{selected_start.year:04d}-{selected_start.month:02d}"
         )
-        raw_result = str(row.result or "ERROR").upper()
-        monthly_statuses[execution_month].append(raw_result)
         monthly_values[execution_month].append(
-            (row.result, row.verdict, row.manual_verdict)
+            (row.result, row.verdict, row.manual_verdict, row.elapsed_ms)
         )
-        scene_values.append((row.result, row.verdict, row.manual_verdict))
+        scene_values.append((row.result, row.verdict, row.manual_verdict, row.elapsed_ms))
         scene_dimension_rows.append(
             (
                 row.code,
@@ -263,6 +345,7 @@ def inspection_reports(
                 row.result,
                 row.verdict,
                 row.manual_verdict,
+                row.elapsed_ms,
             )
         )
     monthly = []
@@ -270,115 +353,14 @@ def inspection_reports(
     current_month = selected_start.month
     while (current_year, current_month) <= (selected_end.year, selected_end.month):
         month_key = f"{current_year:04d}-{current_month:02d}"
-        month_values = monthly_values[month_key]
-        month_comparisons = [
-            (str(raw or "ERROR").upper(), str(manual or vlm).upper())
-            for raw, vlm, manual in month_values
-            if manual or vlm
-        ]
-        month_manual_comparisons = [
-            (str(raw or "ERROR").upper(), str(manual).upper())
-            for raw, _, manual in month_values
-            if manual
-        ]
-        monthly.append(
-            {
-                "date": month_key,
-                **_metrics(monthly_statuses[month_key]),
-                "primary_pass_rate": _metrics(monthly_statuses[month_key])["ok_rate"],
-                "review_coverage": (
-                    round(len(month_comparisons) / len(month_values), 4)
-                    if month_values
-                    else 0.0
-                ),
-                "review_accuracy": (
-                    round(
-                        sum(raw == review for raw, review in month_comparisons)
-                        / len(month_comparisons),
-                        4,
-                    )
-                    if month_comparisons
-                    else None
-                ),
-                "manual_accuracy": (
-                    round(
-                        sum(raw == manual for raw, manual in month_manual_comparisons)
-                        / len(month_manual_comparisons),
-                        4,
-                    )
-                    if month_manual_comparisons
-                    else None
-                ),
-            }
-        )
+        monthly.append({"date": month_key, **_production_quality_metrics(monthly_values[month_key])})
         if current_month == 12:
             current_year += 1
             current_month = 1
         else:
             current_month += 1
 
-    raw_statuses = [str(raw or "ERROR").upper() for raw, _, _ in scene_values]
-    review_comparisons = [
-        (str(raw or "ERROR").upper(), str(manual or vlm).upper())
-        for raw, vlm, manual in scene_values
-        if manual or vlm
-    ]
-    manual_comparisons = [
-        (str(raw or "ERROR").upper(), str(manual).upper())
-        for raw, _, manual in scene_values
-        if manual
-    ]
-    overall = _metrics(raw_statuses)
-    overall.update(
-        {
-            "reviewed_count": len(review_comparisons),
-            "review_coverage": (
-                round(len(review_comparisons) / len(scene_values), 4)
-                if scene_values
-                else 0.0
-            ),
-            "review_disagreement_count": sum(
-                raw != review for raw, review in review_comparisons
-            ),
-            "review_agreement_rate": (
-                round(
-                    sum(raw == review for raw, review in review_comparisons)
-                    / len(review_comparisons),
-                    4,
-                )
-                if review_comparisons
-                else None
-            ),
-            "review_accuracy": (
-                round(
-                    sum(raw == review for raw, review in review_comparisons)
-                    / len(review_comparisons),
-                    4,
-                )
-                if review_comparisons
-                else None
-            ),
-            "confirmed_count": len(manual_comparisons),
-            "confirmed_accuracy": (
-                round(
-                    sum(raw == manual for raw, manual in manual_comparisons)
-                    / len(manual_comparisons),
-                    4,
-                )
-                if manual_comparisons
-                else None
-            ),
-            "manual_accuracy": (
-                round(
-                    sum(raw == manual for raw, manual in manual_comparisons)
-                    / len(manual_comparisons),
-                    4,
-                )
-                if manual_comparisons
-                else None
-            ),
-        }
-    )
+    overall = _production_quality_metrics(scene_values)
     return {
         "start_date": selected_start.isoformat(),
         "end_date": selected_end.isoformat(),
@@ -389,9 +371,9 @@ def inspection_reports(
             "scene": _scene_metrics(scene_dimension_rows),
         },
         "accuracy_note": (
-            "本报表按 ROI 关联的生产场景汇总。复核参考准确率表示原始结果与"
-            "人工优先、VLM 次之的复核结论一致的比例；只有人工确认准确率可作为"
-            "已确认样本的真实准确率。"
+            "本报表按 ROI 关联的生产场景汇总。人工确认样本准确率只统计人工确认的 OK/NG；"
+            "“暂不确定”不会作为真值。VLM 复核一致率仅表示模型结果与 VLM 结论是否一致，"
+            "不能替代人工真值。漏判指原始 OK、人工确认 NG；误判指原始 NG、人工确认 OK。"
         ),
     }
 
@@ -1298,6 +1280,27 @@ def _scenario_execution_for_record_item(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _manual_review_payload(execution: ScenarioExecution | None) -> dict[str, Any] | None:
+    """Expose the human-review state alongside one production ROI execution."""
+
+    if execution is None:
+        return None
+    review = execution.review
+    return {
+        "execution_id": execution.id,
+        "primary_result": execution.result,
+        "review_status": review.status if review is not None else None,
+        "vlm_verdict": review.verdict if review is not None else None,
+        "manual_verdict": review.manual_verdict if review is not None else None,
+        "manual_note": review.manual_note if review is not None else None,
+        "manually_reviewed_at": (
+            review.manually_reviewed_at.isoformat()
+            if review is not None and review.manually_reviewed_at
+            else None
+        ),
+    }
+
+
 @router.get("/call-records/{record_id}")
 def detection_call_record_detail(
     record_id: int,
@@ -1325,7 +1328,8 @@ def detection_call_record_detail(
         .options(
             selectinload(ScenarioExecution.scenario_version).selectinload(
                 InspectionScenarioVersion.scenario
-            )
+            ),
+            selectinload(ScenarioExecution.review),
         )
         .where(
             ScenarioExecution.detection_task_id.in_(task_ids),
@@ -1380,6 +1384,7 @@ def detection_call_record_detail(
                             item=item,
                             persisted=persisted,
                         ),
+                        "manual_review": _manual_review_payload(execution),
                         "standard_roi_image_url": _standard_roi_crop_url(record.id, recipe, roi) if roi else None,
                         "actual_roi_image_url": item.get("roi_image_url") or _local_asset_url(persisted.roi_image_path if persisted else None),
                     }

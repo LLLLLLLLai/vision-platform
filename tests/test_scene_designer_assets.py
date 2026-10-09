@@ -31,6 +31,10 @@ class SceneDesignerAssetTests(unittest.TestCase):
             "workflowPaletteClose",
             "workflowInspectorToggle",
             "workflowInspectorClose",
+            "designerValidate",
+            "workflowPreflightModal",
+            "workflowPreflightSummary",
+            "workflowPreflightList",
             "designerApi",
             "sceneApiModal",
             "sceneApiEndpoint",
@@ -72,6 +76,9 @@ class SceneDesignerAssetTests(unittest.TestCase):
         self.assertIn("function variableGroups(", script)
         self.assertIn("function applyVariablePickerToken(", script)
         self.assertIn("function updateWorkflowWorkbenchPanels(", script)
+        self.assertIn("function runDesignerPreflight(", script)
+        self.assertIn("function workflowNodeContract(", script)
+        self.assertIn("workflow-data-type", script)
         self.assertIn("function showSceneApiContract()", script)
         self.assertIn("function copySceneApiValue(kind)", script)
         self.assertIn('byId("designerApi").addEventListener', script)

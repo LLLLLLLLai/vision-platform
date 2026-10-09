@@ -136,12 +136,16 @@
     ariaLabel = "参数值",
     type = "text",
     rows = null,
+    acceptedTypes = "",
     dataAttributes = "",
   } = {}) {
     const fieldId = id ? ` id="${escapeHtml(id)}"` : "";
+    const acceptedTypesAttribute = String(acceptedTypes || "").trim()
+      ? ` data-variable-accept-types="${escapeHtml(String(acceptedTypes).trim())}"`
+      : "";
     const field = rows
-      ? `<textarea${fieldId} class="${escapeHtml(className)}" data-variable-target data-variable-scope="${escapeHtml(scope)}" data-variable-mode="${escapeHtml(mode)}" ${dataAttributes} aria-label="${escapeHtml(ariaLabel)}" placeholder="${escapeHtml(placeholder)}" rows="${Number(rows)}" ${readonly ? "readonly" : ""}>${escapeHtml(value)}</textarea>`
-      : `<input${fieldId} class="${escapeHtml(className)}" data-variable-target data-variable-scope="${escapeHtml(scope)}" data-variable-mode="${escapeHtml(mode)}" ${dataAttributes} aria-label="${escapeHtml(ariaLabel)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" type="${escapeHtml(type)}" ${readonly ? "readonly" : ""}>`;
+      ? `<textarea${fieldId} class="${escapeHtml(className)}" data-variable-target data-variable-scope="${escapeHtml(scope)}" data-variable-mode="${escapeHtml(mode)}"${acceptedTypesAttribute} ${dataAttributes} aria-label="${escapeHtml(ariaLabel)}" placeholder="${escapeHtml(placeholder)}" rows="${Number(rows)}" ${readonly ? "readonly" : ""}>${escapeHtml(value)}</textarea>`
+      : `<input${fieldId} class="${escapeHtml(className)}" data-variable-target data-variable-scope="${escapeHtml(scope)}" data-variable-mode="${escapeHtml(mode)}"${acceptedTypesAttribute} ${dataAttributes} aria-label="${escapeHtml(ariaLabel)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" type="${escapeHtml(type)}" ${readonly ? "readonly" : ""}>`;
     const trigger = readonly ? "" : '<button class="variable-picker-trigger" type="button" data-variable-picker title="选择变量" aria-label="选择变量"><span>{ }</span></button>';
     return `<div class="variable-control">${field}${trigger}</div>`;
   }
@@ -404,6 +408,12 @@
     saveButton.title = state.scene.mode === "WORKFLOW" ? "保存当前选中的节点配置" : "保存当前草稿";
     byId("designerPublish").hidden = !isDraft();
     byId("designerClone").disabled = false;
+    const validateButton = byId("designerValidate");
+    validateButton.textContent = state.scene.mode === "WORKFLOW" ? "检查编排" : "检查配置";
+    validateButton.title = state.scene.mode === "WORKFLOW"
+      ? "检查节点、连线、变量来源和模型配置"
+      : "检查主模型、提示词和输入参数";
+    validateButton.disabled = false;
     const apiButton = byId("designerApi");
     const hasPublishedVersion = Boolean(state.scene.published_version_id);
     apiButton.disabled = !hasPublishedVersion;
@@ -516,6 +526,47 @@
       notify(kind === "endpoint" ? "接口地址已复制。" : "接口示例已复制。");
     } catch (error) {
       notify(error.message, "warning");
+    }
+  }
+
+  function workflowPreflightLevelLabel(level) {
+    return ({ ERROR: "需修复", WARNING: "需确认", INFO: "通过" })[String(level || "").toUpperCase()] || "提示";
+  }
+
+  function renderWorkflowPreflight(result) {
+    const summary = result?.summary || {};
+    const diagnostics = Array.isArray(result?.diagnostics) ? result.diagnostics : [];
+    const ready = Boolean(result?.ready);
+    const summaryElement = byId("workflowPreflightSummary");
+    const stateLabel = ready ? "可发布" : "存在阻塞问题";
+    summaryElement.innerHTML = `<span class="workflow-preflight-state ${ready ? "ready" : "blocked"}">${stateLabel}</span><p>错误 ${Number(summary.errors || 0)} 项 · 需确认 ${Number(summary.warnings || 0)} 项 · 已通过 ${Number(summary.infos || 0)} 项</p>`;
+    const list = byId("workflowPreflightList");
+    list.innerHTML = diagnostics.length
+      ? diagnostics.map((item) => {
+        const level = String(item.level || "INFO").toUpperCase();
+        const target = item.node_name ? `<span class="workflow-preflight-node">${escapeHtml(item.node_name)} · ${escapeHtml(item.node_key || "")}</span>` : "";
+        const suggestion = item.suggestion ? `<p>${escapeHtml(item.suggestion)}</p>` : "";
+        return `<article class="workflow-preflight-item ${level.toLowerCase()}"><header><span>${workflowPreflightLevelLabel(level)}</span>${target}</header><strong>${escapeHtml(item.message || "未提供检查说明")}</strong>${suggestion}</article>`;
+      }).join("")
+      : '<div class="empty-state compact-empty"><strong>暂未返回检查项</strong><p>请重新执行编排检查。</p></div>';
+  }
+
+  async function runDesignerPreflight({ openModal = true, quiet = false } = {}) {
+    const version = currentVersion();
+    if (!version) return null;
+    try {
+      const result = await request(`${api}/scenarios/versions/${version.id}/preflight`);
+      renderWorkflowPreflight(result);
+      if (openModal) {
+        const modalElement = byId("workflowPreflightModal");
+        const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalElement);
+        if (modal) modal.show();
+      }
+      if (!quiet) notify(result.ready ? "编排检查通过，可以继续测试或发布。" : "编排检查发现需要处理的问题，请查看检查结果。", result.ready ? "success" : "warning");
+      return result;
+    } catch (error) {
+      if (!quiet) notify(error.message, "danger");
+      return null;
     }
   }
 
@@ -847,9 +898,12 @@
       const position = nodePosition(node);
       const systemNode = ["START", "END"].includes(node.node_type);
       const selected = node.id === state.selectedNodeId;
+      const contract = workflowNodeContract(node);
+      const inputLabel = contract.inputs[0]?.label || "无额外输入";
+      const outputLabel = contract.outputs[0]?.label || "无输出";
       return `<article class="workflow-canvas-node workflow-node-${String(node.node_type).toLowerCase()} ${selected ? "selected" : ""} ${systemNode ? "system-node" : ""}" data-node-id="${node.id}" style="left:${position.x}px;top:${position.y}px">
         <button class="workflow-port workflow-input-port" data-input-node="${escapeHtml(node.node_key)}" type="button" title="输入端点"></button>
-        <div class="workflow-node-content"><div class="workflow-node-label"><span class="workflow-node-icon" aria-hidden="true">${nodeTypeIcon(node.node_type)}</span><small>${escapeHtml(nodeTypeLabel(node.node_type))}</small></div><strong>${escapeHtml(node.name)}</strong><span class="workflow-node-key">${escapeHtml(node.node_key)}</span></div>
+        <div class="workflow-node-content"><div class="workflow-node-label"><span class="workflow-node-icon" aria-hidden="true">${nodeTypeIcon(node.node_type)}</span><small>${escapeHtml(nodeTypeLabel(node.node_type))}</small></div><strong>${escapeHtml(node.name)}</strong><span class="workflow-node-key">${escapeHtml(node.node_key)}</span><div class="workflow-node-contract" title="输入：${escapeHtml(inputLabel)}；输出：${escapeHtml(outputLabel)}"><span>IN · ${escapeHtml(inputLabel)}</span><span>OUT · ${escapeHtml(outputLabel)}</span></div></div>
         <button class="workflow-port workflow-output-port" data-output-node="${escapeHtml(node.node_key)}" type="button" title="输出端点"></button>
       </article>`;
     }).join("");
@@ -899,6 +953,42 @@
     },
   });
 
+  const workflowDataTypeLabels = Object.freeze({
+    ANY: "任意",
+    TEXT: "文本",
+    NUMBER: "数字",
+    BOOLEAN: "布尔值",
+    JSON: "JSON",
+    IMAGE: "图片",
+    IMAGE_LIST: "图片列表",
+    BBOX: "定位框",
+    OBJECT_LIST: "目标列表",
+    MASK: "轮廓",
+    MASK_LIST: "轮廓列表",
+    RESULT: "判定结果",
+  });
+
+  function normalizeWorkflowDataType(value) {
+    const normalized = String(value || "ANY").trim().toUpperCase();
+    if (["STRING", "STR", "INTEGER", "FLOAT", "DECIMAL"].includes(normalized)) {
+      return ["INTEGER", "FLOAT", "DECIMAL"].includes(normalized) ? "NUMBER" : "TEXT";
+    }
+    return workflowDataTypeLabels[normalized] ? normalized : "ANY";
+  }
+
+  function workflowTypeLabel(value) {
+    const normalized = normalizeWorkflowDataType(value);
+    return workflowDataTypeLabels[normalized] || workflowDataTypeLabels.ANY;
+  }
+
+  function workflowTypeClass(value) {
+    return normalizeWorkflowDataType(value).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  }
+
+  function contractDescriptor(name, type = "ANY", label = "") {
+    return { name, type: normalizeWorkflowDataType(type), label: label || name };
+  }
+
   function visionOutputProfile(modelOrTask) {
     const remote = modelOrTask && typeof modelOrTask === "object" ? modelOrTask.output_profile : null;
     const taskType = String(
@@ -918,21 +1008,143 @@
     return visionOutputProfile(selected).output_keys;
   }
 
-  function nodeOutputKeys(node) {
-    const defaults = {
-      VLM: ["result", "confidence", "reason"],
-      VISION_MODEL: visionOutputKeysForNode(node),
-      IMAGE_CROP: ["result", "image_path", "image_url", "source_image_path", "requested_bbox", "crop_bbox", "width", "height", "padding_ratio"],
-      IMAGE_ANNOTATE: ["result", "image_path", "image_url", "source_image_path", "annotation_count", "annotations", "width", "height"],
-      RULE: ["result", "actual", "expected", "operator"],
-      IF: ["result", "branch", "actual", "expected", "operator"],
-      WEB_API: ["result", "confidence", "status_code", "response"],
-      LOOP: ["result", "items", "count"],
-      END: ["result", "confidence", "reason"],
-    };
+  function nodeOutputDescriptors(node) {
     const nodeType = String(node?.node_type || "").toUpperCase();
-    const aliases = Object.keys((node?.config_json || {}).output_mapping || {});
-    return [...new Set([...(defaults[nodeType] || ["result"]), ...aliases])];
+    const profile = nodeType === "VISION_MODEL"
+      ? visionOutputProfile(selectedVisionModelVersion(node?.config_json?.model_version_id))
+      : null;
+    const descriptors = {
+      START: [contractDescriptor("image_path", "IMAGE", "检测图片")],
+      VLM: [
+        contractDescriptor("result", "RESULT", "判定结果"),
+        contractDescriptor("confidence", "NUMBER", "置信度"),
+        contractDescriptor("reason", "TEXT", "检测说明"),
+      ],
+      VISION_MODEL: [
+        contractDescriptor("result", "RESULT", "判定结果"),
+        contractDescriptor("confidence", "NUMBER", "置信度"),
+        contractDescriptor("reason", "TEXT", "检测说明"),
+        contractDescriptor("task_type", "TEXT", "模型任务类型"),
+        contractDescriptor("image", "JSON", "图片尺寸信息"),
+      ],
+      IMAGE_CROP: [
+        contractDescriptor("result", "RESULT", "裁剪状态"),
+        contractDescriptor("image_path", "IMAGE", "裁剪图片"),
+        contractDescriptor("image_url", "TEXT", "裁剪图片地址"),
+        contractDescriptor("crop_bbox", "BBOX", "实际裁剪框"),
+        contractDescriptor("width", "NUMBER", "裁剪宽度"),
+        contractDescriptor("height", "NUMBER", "裁剪高度"),
+      ],
+      IMAGE_ANNOTATE: [
+        contractDescriptor("result", "RESULT", "画框状态"),
+        contractDescriptor("image_path", "IMAGE", "标注结果图"),
+        contractDescriptor("image_url", "TEXT", "标注图片地址"),
+        contractDescriptor("annotations", "OBJECT_LIST", "已标注目标"),
+        contractDescriptor("annotation_count", "NUMBER", "标注数量"),
+      ],
+      RULE: [
+        contractDescriptor("result", "RESULT", "规则结果"),
+        contractDescriptor("actual", "ANY", "实际值"),
+        contractDescriptor("expected", "ANY", "期望值"),
+        contractDescriptor("operator", "TEXT", "比较运算符"),
+      ],
+      IF: [
+        contractDescriptor("result", "RESULT", "判断结果"),
+        contractDescriptor("branch", "BOOLEAN", "分支条件"),
+        contractDescriptor("actual", "ANY", "判断值"),
+        contractDescriptor("expected", "ANY", "期望值"),
+      ],
+      WEB_API: [
+        contractDescriptor("result", "RESULT", "接口调用结果"),
+        contractDescriptor("confidence", "NUMBER", "置信度"),
+        contractDescriptor("status_code", "NUMBER", "HTTP 状态码"),
+        contractDescriptor("response", "JSON", "接口响应"),
+      ],
+      LOOP: [
+        contractDescriptor("result", "RESULT", "循环结果"),
+        contractDescriptor("items", "JSON", "循环集合"),
+        contractDescriptor("count", "NUMBER", "集合数量"),
+      ],
+      END: [
+        contractDescriptor("result", "RESULT", "最终结果"),
+        contractDescriptor("confidence", "NUMBER", "最终置信度"),
+        contractDescriptor("reason", "TEXT", "最终说明"),
+      ],
+    }[nodeType] || [contractDescriptor("result", "RESULT", "执行结果")];
+
+    if (nodeType === "VISION_MODEL" && profile) {
+      if (profile.supports_objects) {
+        descriptors.push(
+          contractDescriptor("objects", "OBJECT_LIST", "目标列表"),
+          contractDescriptor("object_count", "NUMBER", "目标数量"),
+          contractDescriptor("detection_count", "NUMBER", "检测数量"),
+          contractDescriptor("objects.0.bbox", "BBOX", "首个目标定位框"),
+        );
+      }
+      if (profile.supports_mask) descriptors.push(contractDescriptor("objects.0.mask", "MASK", "首个目标轮廓"));
+      if (profile.supports_classification) {
+        descriptors.push(
+          contractDescriptor("classification", "JSON", "分类结果"),
+          contractDescriptor("classification.top1_label", "TEXT", "Top1 类别"),
+          contractDescriptor("classification.top1_confidence", "NUMBER", "Top1 置信度"),
+        );
+      }
+    }
+
+    Object.keys((node?.config_json || {}).output_mapping || {}).forEach((name) => {
+      if (!descriptors.some((item) => item.name === name)) {
+        descriptors.push(contractDescriptor(name, "ANY", `自定义输出 · ${name}`));
+      }
+    });
+    return descriptors;
+  }
+
+  function workflowNodeInputDescriptors(node) {
+    const nodeType = String(node?.node_type || "").toUpperCase();
+    const config = node?.config_json || {};
+    const inputs = {
+      START: [
+        contractDescriptor("image_path", "IMAGE", "检测图片（系统输入）"),
+        ...workflowInputFields().map((field) => contractDescriptor(field.name, field.type || "TEXT", field.label || field.name)),
+      ],
+      VLM: [
+        contractDescriptor("image_path", "IMAGE", "待检测图片"),
+        ...Object.keys(config.input_mapping ?? config.context ?? {}).map((name) => contractDescriptor(name, "ANY", `提示词参数 · ${name}`)),
+      ],
+      VISION_MODEL: [
+        contractDescriptor("image_path", "IMAGE", "待检测图片"),
+        ...Object.keys(config.input_mapping ?? config.context ?? {}).map((name) => contractDescriptor(name, "ANY", `模型参数 · ${name}`)),
+      ],
+      IMAGE_CROP: [contractDescriptor("image_path", "IMAGE", "输入图片"), contractDescriptor("bbox", "BBOX", "定位框")],
+      IMAGE_ANNOTATE: [contractDescriptor("image_path", "IMAGE", "输入图片"), contractDescriptor("objects", "OBJECT_LIST", "目标列表"), contractDescriptor("bbox", "BBOX", "单个定位框")],
+      RULE: [contractDescriptor("actual", "ANY", "实际值"), contractDescriptor("expected", "ANY", "期望值")],
+      IF: [contractDescriptor("actual", "ANY", "判断值"), contractDescriptor("expected", "ANY", "期望值")],
+      WEB_API: [contractDescriptor("url", "TEXT", "接口地址"), contractDescriptor("body", "JSON", "请求体")],
+      LOOP: [contractDescriptor("items", "JSON", "循环集合")],
+      END: Object.keys(config.output || {}).map((name) => contractDescriptor(name, "ANY", `返回字段 · ${name}`)),
+    }[nodeType] || [];
+    return inputs;
+  }
+
+  function workflowNodeContract(node) {
+    return {
+      inputs: workflowNodeInputDescriptors(node),
+      outputs: nodeOutputDescriptors(node),
+    };
+  }
+
+  function contractRowsMarkup(items, emptyText) {
+    if (!items.length) return `<p class="node-contract-empty">${escapeHtml(emptyText)}</p>`;
+    return `<div class="node-contract-list">${items.map((item) => `<div><code>${escapeHtml(item.name)}</code><span>${escapeHtml(item.label)}</span><em class="workflow-data-type ${workflowTypeClass(item.type)}">${escapeHtml(workflowTypeLabel(item.type))}</em></div>`).join("")}</div>`;
+  }
+
+  function workflowNodeContractMarkup(node) {
+    const contract = workflowNodeContract(node);
+    return `<div class="node-contract-overview"><p>字段类型用于变量选择与发布前校验。只有已连通上游节点的兼容字段会出现在变量选择器中。</p><section><header><strong>输入契约</strong><small>节点需要的数据</small></header>${contractRowsMarkup(contract.inputs, "本节点不需要额外输入字段。")}</section><section><header><strong>输出契约</strong><small>可供下游引用的数据</small></header>${contractRowsMarkup(contract.outputs, "本节点没有对外输出字段。")}</section></div>`;
+  }
+
+  function nodeOutputKeys(node) {
+    return [...new Set(nodeOutputDescriptors(node).map((item) => item.name))];
   }
 
   function upstreamNodeKeys(node) {
@@ -958,10 +1170,10 @@
   }
 
   function outputReferenceItems(node) {
-    const keys = [...new Set(["result", "confidence", "reason", ...nodeOutputKeys(node)])];
+    const descriptors = nodeOutputDescriptors(node);
     return [
-      ...keys.map((key) => ({ label: key, token: `{{ response.${key} }}` })),
-      { label: "完整原始输出", token: "{{ response }}" },
+      ...descriptors.map((item) => ({ label: item.label, token: `{{ response.${item.name} }}`, type: item.type })),
+      { label: "完整原始输出", token: "{{ response }}", type: "JSON" },
     ];
   }
 
@@ -985,10 +1197,10 @@
       ? workflowInputFields()
       : schemaFields(currentVersion()?.input_schema_json || {});
     const inputItems = [
-      { label: "检测图片", token: "{{ input.image_path }}" },
+      { label: "检测图片", token: "{{ input.image_path }}", type: "IMAGE" },
       ...fields
         .filter((field) => !imageInputNames.has(String(field.name || "").toLowerCase()))
-        .map((field) => ({ label: field.label || field.name, token: `{{ input.${field.name} }}` })),
+        .map((field) => ({ label: field.label || field.name, token: `{{ input.${field.name} }}`, type: field.type || "TEXT" })),
     ];
     const upstream = upstreamNodeKeys(node);
     const nodes = (currentVersion()?.nodes || []).filter((item) => (
@@ -1004,7 +1216,7 @@
           ? [{
             label: "本节点提示词参数",
             description: "来自“输入”页签的提示词参数映射",
-            items: keys.map((key) => ({ label: key, token: `{{ params.${key} }}` })),
+            items: keys.map((key) => ({ label: key, token: `{{ params.${key} }}`, type: "ANY" })),
           }]
           : [];
       })()
@@ -1016,11 +1228,25 @@
         label: `${item.name} · ${item.node_key}`,
         description: nodeTypeLabel(item.node_type),
         items: [
-          ...nodeOutputKeys(item).map((key) => ({ label: key, token: `{{ nodes.${item.node_key}.${key} }}` })),
-          { label: "完整输出", token: `{{ nodes.${item.node_key} }}` },
+          ...nodeOutputDescriptors(item).map((descriptor) => ({ label: descriptor.label, token: `{{ nodes.${item.node_key}.${descriptor.name} }}`, type: descriptor.type })),
+          { label: "完整输出", token: `{{ nodes.${item.node_key} }}`, type: "JSON" },
         ],
       })),
     ];
+  }
+
+  function variableAcceptedTypes(target) {
+    return String(target?.dataset?.variableAcceptTypes || "")
+      .split("|")
+      .map((item) => normalizeWorkflowDataType(item))
+      .filter((item) => item && item !== "ANY");
+  }
+
+  function variableTypeIsCompatible(item, target) {
+    const accepted = variableAcceptedTypes(target);
+    if (!accepted.length) return true;
+    const actual = normalizeWorkflowDataType(item?.type);
+    return actual === "ANY" || accepted.includes(actual);
   }
 
   function isEditableVariableTarget(target) {
@@ -1094,12 +1320,15 @@
     const picker = variablePickerElement();
     const query = String(state.variablePickerQuery || "").trim().toLocaleLowerCase();
     const scope = variableScopeForTarget(target);
+    const accepted = variableAcceptedTypes(target);
     const groups = variableGroups(node, scope)
-      .map((group) => ({ ...group, items: group.items.filter((item) => variableMatchesQuery(item, group, query)) }))
+      .map((group) => ({ ...group, items: group.items.filter((item) => (
+        variableMatchesQuery(item, group, query) && variableTypeIsCompatible(item, target)
+      )) }))
       .filter((group) => group.items.length);
     const list = groups.length
-      ? groups.map((group) => `<section class="workflow-variable-group"><header><strong>${escapeHtml(group.label)}</strong>${group.description ? `<small>${escapeHtml(group.description)}</small>` : ""}</header>${group.items.map((item) => `<button type="button" class="workflow-variable-option" data-variable-picker-token="${escapeHtml(item.token)}"><span>${escapeHtml(item.label)}</span><code>${escapeHtml(item.token)}</code></button>`).join("")}</section>`).join("")
-      : '<div class="workflow-variable-empty">没有匹配的可用变量</div>';
+      ? groups.map((group) => `<section class="workflow-variable-group"><header><strong>${escapeHtml(group.label)}</strong>${group.description ? `<small>${escapeHtml(group.description)}</small>` : ""}</header>${group.items.map((item) => `<button type="button" class="workflow-variable-option" data-variable-picker-token="${escapeHtml(item.token)}"><span>${escapeHtml(item.label)}</span><em class="workflow-data-type ${workflowTypeClass(item.type)}">${escapeHtml(workflowTypeLabel(item.type))}</em><code>${escapeHtml(item.token)}</code></button>`).join("")}</section>`).join("")
+      : `<div class="workflow-variable-empty">${accepted.length ? `没有可用于“${accepted.map(workflowTypeLabel).join(" / ")}”的上游变量` : "没有匹配的可用变量"}</div>`;
     const promptHint = scope === "PROMPT"
       ? `<div class="workflow-variable-prompt-hint">${promptMappedParameterKeys(node).length ? "优先使用本节点提示词参数；它们会在运行时替换成映射值。" : "先到“输入”页签新增提示词参数映射，再插入 {{ params.参数键 }}。"}</div>`
       : "";
@@ -1345,8 +1574,10 @@
     const settingsPanel = target.querySelector('[data-inspector-panel="SETTINGS"]');
     const inputPanel = target.querySelector('[data-inspector-panel="INPUT"]');
     const outputPanel = target.querySelector('[data-inspector-panel="OUTPUT"]');
+    const contractPanel = target.querySelector('[data-inspector-panel="CONTRACT"]');
     const inputContent = target.querySelector("#workflowNodeInputContent");
     const outputContent = target.querySelector("#workflowNodeOutputContent");
+    const contractContent = target.querySelector("#workflowNodeContractContent");
     const parameterSection = (element) => element?.closest(".node-parameter-section") || element;
     const inputSections = [...new Set([...target.querySelectorAll("#nodeInputParameters, #nodeStartInputParameters")]
       .map(parameterSection)
@@ -1358,12 +1589,16 @@
     outputSections.forEach((section) => outputContent?.append(section));
     if (inputPanel) inputPanel.hidden = inputSections.length === 0;
     if (outputPanel) outputPanel.hidden = outputSections.length === 0;
+    const node = nodeById(state.selectedNodeId);
+    if (contractContent && node) contractContent.innerHTML = workflowNodeContractMarkup(node);
+    if (contractPanel) contractPanel.hidden = !node;
 
     const tabList = target.querySelector(".node-config-tabs");
     const tabs = [
       { key: "SETTINGS", label: "设置", panel: settingsPanel },
       { key: "INPUT", label: "输入", panel: inputPanel },
       { key: "OUTPUT", label: "输出", panel: outputPanel },
+      { key: "CONTRACT", label: "契约", panel: contractPanel },
     ].filter((item) => item.panel && !item.panel.hidden);
     if (tabList) {
       tabList.innerHTML = tabs.map((item) => `<button type="button" class="node-config-tab" data-inspector-tab="${item.key}" role="tab" aria-selected="false">${item.label}</button>`).join("");
@@ -1404,16 +1639,16 @@
           : `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>请先由该模型适配器声明实际输出字段后，再把特定字段映射给后续节点。</p></div><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label>`;
       fields = `<label><span>已发布训练模型版本</span><select id="nodeVisionModelVersion" class="form-select" ${readonly ? "disabled" : ""}>${modelVersionOptions(config.model_version_id)}</select></label>${taskFields}${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_CROP") {
-      fields = `<div class="node-model-task-note"><strong>将定位框转换为局部图片</strong><p>bbox 使用像素坐标 <code>[x1, y1, x2, y2]</code>。点击字段右侧 <code>{ }</code>，从可用上游节点中选择图片或 bbox；固定坐标也可以直接填写。</p>${cropBboxSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeCropImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", ariaLabel: "输入图片", readonly })}${variableFieldMarkup({ label: "裁剪框（bbox）", id: "nodeCropBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", ariaLabel: "裁剪框", readonly })}<label><span>边缘扩展比例</span><input id="nodeCropPadding" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.padding_ratio ?? 0.05)}" ${readonly ? "readonly" : ""}></label>${outputMappingMarkup(config, readonly)}`;
+      fields = `<div class="node-model-task-note"><strong>将定位框转换为局部图片</strong><p>bbox 使用像素坐标 <code>[x1, y1, x2, y2]</code>。变量选择器只显示图片或定位框类型的兼容上游变量；固定坐标也可以直接填写。</p>${cropBboxSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeCropImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", acceptedTypes: "IMAGE", ariaLabel: "输入图片", readonly })}${variableFieldMarkup({ label: "裁剪框（bbox）", id: "nodeCropBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", acceptedTypes: "BBOX", ariaLabel: "裁剪框", readonly })}<label><span>边缘扩展比例</span><input id="nodeCropPadding" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.padding_ratio ?? 0.05)}" ${readonly ? "readonly" : ""}></label>${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_ANNOTATE") {
-      fields = `<div class="node-model-task-note"><strong>在检测结果图上画框</strong><p>目标检测可传入全部 <code>objects</code>；分割模型会额外显示轮廓。分类模型没有坐标，不适合本节点。输出的 <code>image_path</code> 可返回给接口或继续交给下游 VLM。</p>${annotationSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeAnnotateImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", ariaLabel: "画框输入图片", readonly })}${variableFieldMarkup({ label: "目标列表（推荐）", id: "nodeAnnotateObjects", value: config.objects || "", placeholder: "{{ nodes.model_1.objects }}", scope: "INPUT", ariaLabel: "画框目标列表", readonly })}${variableFieldMarkup({ label: "单个框（可选）", id: "nodeAnnotateBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", ariaLabel: "画框单个框", readonly })}<div class="form-row"><label><span>线宽</span><input id="nodeAnnotateLineWidth" class="form-control" type="number" min="1" max="20" step="1" value="${escapeHtml(config.line_width ?? 3)}" ${readonly ? "readonly" : ""}></label><label><span>标签前缀（可选）</span><input id="nodeAnnotateLabelPrefix" class="form-control" value="${escapeHtml(config.label_prefix || "")}" placeholder="例如 检测结果" ${readonly ? "readonly" : ""}></label></div><div class="node-annotate-options"><label><input id="nodeAnnotateShowLabel" type="checkbox" ${config.show_label !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示类别标签</label><label><input id="nodeAnnotateShowConfidence" type="checkbox" ${config.show_confidence !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示置信度</label><label><input id="nodeAnnotateDrawMasks" type="checkbox" ${config.draw_masks !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 分割模型显示轮廓</label></div>${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
+      fields = `<div class="node-model-task-note"><strong>在检测结果图上画框</strong><p>目标检测可传入全部 <code>objects</code>；分割模型会额外显示轮廓。分类模型没有坐标，不适合本节点。变量选择器会按图片、目标列表和定位框类型过滤可用输出。</p>${annotationSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeAnnotateImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", acceptedTypes: "IMAGE", ariaLabel: "画框输入图片", readonly })}${variableFieldMarkup({ label: "目标列表（推荐）", id: "nodeAnnotateObjects", value: config.objects || "", placeholder: "{{ nodes.model_1.objects }}", scope: "INPUT", acceptedTypes: "OBJECT_LIST", ariaLabel: "画框目标列表", readonly })}${variableFieldMarkup({ label: "单个框（可选）", id: "nodeAnnotateBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", acceptedTypes: "BBOX", ariaLabel: "画框单个框", readonly })}<div class="form-row"><label><span>线宽</span><input id="nodeAnnotateLineWidth" class="form-control" type="number" min="1" max="20" step="1" value="${escapeHtml(config.line_width ?? 3)}" ${readonly ? "readonly" : ""}></label><label><span>标签前缀（可选）</span><input id="nodeAnnotateLabelPrefix" class="form-control" value="${escapeHtml(config.label_prefix || "")}" placeholder="例如 检测结果" ${readonly ? "readonly" : ""}></label></div><div class="node-annotate-options"><label><input id="nodeAnnotateShowLabel" type="checkbox" ${config.show_label !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示类别标签</label><label><input id="nodeAnnotateShowConfidence" type="checkbox" ${config.show_confidence !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 显示置信度</label><label><input id="nodeAnnotateDrawMasks" type="checkbox" ${config.draw_masks !== false ? "checked" : ""} ${readonly ? "disabled" : ""}> 分割模型显示轮廓</label></div>${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "RULE" || node.node_type === "IF") {
       const isIf = node.node_type === "IF";
       fields = `${variableFieldMarkup({ label: isIf ? "判断值" : "实际值", id: "nodeActual", value: config.actual || "", placeholder: "{{ nodes.vlm_1.result }}", scope: "INPUT", ariaLabel: isIf ? "判断值" : "实际值", readonly })}<div class="form-row"><label><span>运算符</span><select id="nodeOperator" class="form-select" ${readonly ? "disabled" : ""}>${["EQUALS", "CONTAINS", "EXISTS", "NUMBER_EQUALS", "NUMBER_GT", "NUMBER_GTE", "NUMBER_LT", "NUMBER_LTE"].map((operator) => `<option value="${operator}" ${config.operator === operator ? "selected" : ""}>${operator}</option>`).join("")}</select></label>${variableFieldMarkup({ label: "期望值", id: "nodeExpected", value: config.expected ?? "", scope: "INPUT", ariaLabel: "期望值", readonly })}</div>${inputMappingMarkup(config, node, readonly)}${isIf ? '<p class="muted-copy">条件分支会输出 <code>branch=true/false</code>。选中该节点后，可在下方设置每条连线对应的分支。</p>' : ""}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "WEB_API") {
       fields = `<div class="form-row"><label><span>请求方法</span><select id="nodeApiMethod" class="form-select" ${readonly ? "disabled" : ""}>${["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => `<option value="${method}" ${(config.method || "POST") === method ? "selected" : ""}>${method}</option>`).join("")}</select></label><label><span>请求格式</span><select id="nodeApiRequestFormat" class="form-select" ${readonly ? "disabled" : ""}><option value="JSON" ${(config.request_format || "JSON") === "JSON" ? "selected" : ""}>JSON</option><option value="TEXT" ${(config.request_format || "JSON") === "TEXT" ? "selected" : ""}>Text</option></select></label></div>${variableFieldMarkup({ label: "接口地址", id: "nodeApiUrl", value: config.url || "", placeholder: "https://service.example.com/api/check", scope: "INPUT", mode: "INSERT", ariaLabel: "接口地址", readonly })}${variableFieldMarkup({ label: "请求头（JSON）", id: "nodeApiHeaders", value: Object.keys(config.headers || {}).length ? JSON.stringify(config.headers, null, 2) : "", className: "form-control node-textarea", rows: 3, scope: "INPUT", mode: "INSERT", ariaLabel: "请求头", readonly })}${variableFieldMarkup({ label: "请求体（JSON 或文本）", id: "nodeApiBody", value: typeof config.body === "string" ? config.body : JSON.stringify(config.body || {}, null, 2), className: "form-control node-textarea", rows: 5, scope: "INPUT", mode: "INSERT", ariaLabel: "请求体", readonly })}<label><span>响应格式</span><select id="nodeApiResponseFormat" class="form-select" ${readonly ? "disabled" : ""}><option value="JSON" ${(config.response_format || "JSON") === "JSON" ? "selected" : ""}>JSON</option><option value="TEXT" ${(config.response_format || "JSON") === "TEXT" ? "selected" : ""}>Text</option></select></label>${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "LOOP") {
-      fields = `${variableFieldMarkup({ label: "循环集合", id: "nodeLoopItems", value: config.items || "", placeholder: "{{ nodes.api_1.response }}", scope: "INPUT", ariaLabel: "循环集合", readonly })}<div class="form-row"><label><span>当前项变量名</span><input id="nodeLoopItemName" class="form-control" value="${escapeHtml(config.item_name || "item")}" ${readonly ? "readonly" : ""}></label><label><span>最大次数</span><input id="nodeLoopMaxIterations" class="form-control" type="number" min="1" max="1000" value="${escapeHtml(config.max_iterations ?? 10)}" ${readonly ? "readonly" : ""}></label></div>${inputMappingMarkup(config, node, readonly)}<p class="muted-copy">循环节点会限制集合处理次数并输出 items、count 与当前项变量。子流程执行将在后续运行器升级中开放；当前可用于把集合安全地传递给 Web 接口或规则节点。</p>${outputMappingMarkup(config, readonly)}`;
+      fields = `${variableFieldMarkup({ label: "循环集合", id: "nodeLoopItems", value: config.items || "", placeholder: "{{ nodes.api_1.response }}", scope: "INPUT", acceptedTypes: "JSON|OBJECT_LIST|IMAGE_LIST", ariaLabel: "循环集合", readonly })}<div class="form-row"><label><span>当前项变量名</span><input id="nodeLoopItemName" class="form-control" value="${escapeHtml(config.item_name || "item")}" ${readonly ? "readonly" : ""}></label><label><span>最大次数</span><input id="nodeLoopMaxIterations" class="form-control" type="number" min="1" max="1000" value="${escapeHtml(config.max_iterations ?? 10)}" ${readonly ? "readonly" : ""}></label></div>${inputMappingMarkup(config, node, readonly)}<p class="muted-copy">循环节点会限制集合处理次数并输出 items、count 与当前项变量。子流程执行将在后续运行器升级中开放；当前可用于把集合安全地传递给 Web 接口或规则节点。</p>${outputMappingMarkup(config, readonly)}`;
     } else {
       fields = node.node_type === "START"
         ? `<div class="system-node-note"><strong>开始节点</strong><p>系统自动注入必填图片变量 <code>{{ input.image_path }}</code>，无需在下方重复添加。外部接口把单张图片放在顶层 <code>image_path</code>；下方只维护业务校验参数，供配方 ROI 绑定和节点引用。当前一个场景执行一张图片，多图请逐张调用同一场景接口。</p></div>${parameterSectionMarkup({ id: "nodeStartInputParameters", title: "流程输入参数", description: "参数名称只用于页面展示，参数键用于配方绑定和节点引用。图片路径由系统保留，不会出现在此列表。", rows: schemaRows(config.inputs || []), kind: "SCHEMA", readonly, keyLabel: "参数键", valueLabel: "参数名称", keyPlaceholder: "例如 ocr_text", valuePlaceholder: "例如 OCR 校验文字", variableScope: "NONE" })}`
@@ -1434,6 +1669,7 @@
         </section>
         <section class="node-config-panel" data-inspector-panel="INPUT" role="tabpanel"><div class="node-config-section"><header><strong>输入映射</strong><small>从开始输入或真正上游节点中选择变量，作为本节点输入。</small></header><div id="workflowNodeInputContent" class="stack-form compact-stack-form"></div></div></section>
         <section class="node-config-panel" data-inspector-panel="OUTPUT" role="tabpanel"><div class="node-config-section"><header><strong>输出声明</strong><small>为节点原始输出设置易读字段，供后续节点或接口返回使用。</small></header><div id="workflowNodeOutputContent" class="stack-form compact-stack-form"></div></div></section>
+        <section class="node-config-panel" data-inspector-panel="CONTRACT" role="tabpanel"><div class="node-config-section"><header><strong>节点契约</strong><small>查看节点可接收和可输出的数据类型；变量选择器会据此过滤不兼容字段。</small></header><div id="workflowNodeContractContent" class="stack-form compact-stack-form"></div></div></section>
       </div>
       ${save}
     </div>`;
@@ -1552,6 +1788,15 @@
   }
   async function publishVersion() {
     if (!isDraft()) return;
+    const preflight = await runDesignerPreflight({ openModal: false, quiet: true });
+    if (!preflight?.ready) {
+      if (preflight) {
+        const modal = window.bootstrap?.Modal?.getOrCreateInstance(byId("workflowPreflightModal"));
+        modal?.show();
+      }
+      notify("发布前检查未通过，请先处理标记的问题。", "warning");
+      return;
+    }
     if (!confirm("发布后该版本可被工艺配方 ROI 引用；当前已发布版本会归档。确认发布吗？")) return;
     try {
       const published = await request(`${api}/scenarios/versions/${currentVersion().id}/publish`, { method: "POST" });
@@ -1950,6 +2195,7 @@
     byId("designerSave").addEventListener("click", saveDesigner);
     byId("directSave").addEventListener("click", () => saveDirect());
     byId("designerClone").addEventListener("click", cloneVersion);
+    byId("designerValidate").addEventListener("click", () => runDesignerPreflight());
     byId("designerPublish").addEventListener("click", publishVersion);
     byId("designerApi").addEventListener("click", showSceneApiContract);
     byId("copySceneApiEndpoint").addEventListener("click", () => copySceneApiValue("endpoint"));

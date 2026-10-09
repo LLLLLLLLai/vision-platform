@@ -38,7 +38,7 @@
 
   <section class="management-view {% if active_model_view == 'registry' %}active{% endif %}" id="visionView">
     <div class="catalog-section-heading">
-      <div><small>TRAINABLE MODEL REGISTRY</small><h2>训练模型卡片</h2><p>先定义模型用途、架构和类别，再进入模型训练页关联数据集生成版本。</p></div>
+      <div><small>TRAINABLE MODEL REGISTRY</small><h2>训练模型卡片</h2><p>先定义模型用途、架构和类别；可通过训练生成版本，也可直接导入已训练的 Ultralytics YOLO 权重。</p></div>
       <button class="btn btn-sm btn-primary" type="button" data-create-model="vision">创建训练模型</button>
     </div>
     <div id="visionModelList" class="model-card-grid"></div>
@@ -99,11 +99,36 @@
             <label><span>模型系列</span><input class="form-control" id="visionModelFamily" name="model_family" value="YOLO 系列" readonly></label>
           <label><span>任务类型</span><select class="form-select" id="visionModelTaskType" name="task_type"></select></label>
         </div>
-        <label><span>具体模型 / 基础权重</span><input class="form-control" id="visionBaseModel" name="base_model" list="visionBaseModelOptions" placeholder="例如 yolo26n.pt 或 custom/harness.pt" required><datalist id="visionBaseModelOptions"></datalist><small class="muted-copy">可从推荐权重中选择，也可直接填写兼容 Ultralytics 的权重名或相对路径。生产或离线服务器请将权重放入 <code>vision-models/</code>；平台会优先从本地读取。</small></label>
+        <label><span>具体模型 / 基础权重</span><input class="form-control" id="visionBaseModel" name="base_model" list="visionBaseModelOptions" placeholder="例如 yolo26n.pt 或 custom/harness.pt" required><datalist id="visionBaseModelOptions"></datalist><small class="muted-copy">该字段用于后续训练时选择初始权重；保存模型卡片后，可通过卡片上的“导入已训练模型”导入现有 <code>.pt</code> 权重。生产或离线服务器请将权重放入 <code>vision-models/</code>。</small></label>
         <label><span>识别类别（每行一个）</span><textarea class="form-control" name="labels" rows="5" placeholder="harness\nconnector\nscrew"></textarea></label>
         <label><span>说明</span><textarea class="form-control" name="description" rows="3" placeholder="说明这个模型解决的检测问题"></textarea></label>
       </div>
       <div class="modal-footer"><button class="btn btn-light" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit">保存训练模型</button></div>
+    </form>
+  </div></div>
+</div>
+
+<div class="modal fade" id="importVisionVersionModal" tabindex="-1" aria-labelledby="importVisionVersionModalTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <form id="importVisionVersionForm" enctype="multipart/form-data">
+      <div class="modal-header"><div><small class="text-primary">IMPORT TRAINED YOLO WEIGHTS</small><h2 class="modal-title fs-5" id="importVisionVersionModalTitle">导入已训练模型</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body stack-form">
+        <input id="importVisionModelId" type="hidden">
+        <p class="muted-copy">导入前会校验权重的任务类型是否与模型卡片一致。导入成功后仅生成草稿版本，不会自动替换当前生产模型。</p>
+        <div class="form-row">
+          <label><span>目标模型</span><input class="form-control" id="importVisionModelName" readonly></label>
+          <label><span>版本号</span><input class="form-control" id="importVisionVersion" name="version" value="1.0" placeholder="例如 1.0 或 2026.10.09" required></label>
+        </div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="import_mode" id="importWeightsUpload" value="upload" checked><label class="form-check-label" for="importWeightsUpload">从本机上传已训练权重</label></div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="import_mode" id="importWeightsServerPath" value="server_path"><label class="form-check-label" for="importWeightsServerPath">引用服务器已有权重</label></div>
+        <div id="importWeightsUploadPanel">
+          <label><span>YOLO 权重文件</span><input class="form-control" id="importVisionWeightsFile" name="weights_file" type="file" accept=".pt"><small class="muted-copy">仅支持兼容 Ultralytics 的 <code>.pt</code> 文件。大文件可改用下方的服务器路径方式。</small></label>
+        </div>
+        <div id="importWeightsServerPathPanel" hidden>
+          <label><span>服务器权重路径</span><input class="form-control" id="importVisionWeightsPath" name="existing_weights_path" placeholder="vision-models/imported/harness/best.pt"><small class="muted-copy">仅允许引用项目 <code>vision-models/</code> 目录内已存在的 <code>.pt</code> 文件。</small></label>
+        </div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-light" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="submitImportVisionVersion" type="submit">导入并校验</button></div>
     </form>
   </div></div>
 </div>
@@ -139,5 +164,5 @@
 </div>
 
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260928-02" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/models.js') }}?v=20260928-02"></script>
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20261009-01"></script>
 {% endblock %}

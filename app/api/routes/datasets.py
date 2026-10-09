@@ -4,7 +4,7 @@ import re
 import shutil
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -19,6 +19,13 @@ from app.models.intelligence import (
     Dataset,
     DatasetItem,
     InspectionScenarioVersion,
+    VisionModel,
+    VisionModelVersion,
+)
+from app.services.vision_model_runtime import (
+    VisionModelRuntimeError,
+    build_published_model_spec,
+    run_yolo_inference,
 )
 
 
@@ -62,6 +69,15 @@ class DatasetItemUpdate(BaseModel):
     annotation_status: str | None = Field(default=None, max_length=30)
     annotation_json: dict[str, Any] | None = None
     split: str | None = Field(default=None, max_length=30)
+
+
+class DatasetItemPreAnnotationRequest(BaseModel):
+    """Runtime options for a non-persistent AI pre-annotation request."""
+
+    vision_model_version_id: int = Field(gt=0)
+    confidence: float = Field(default=0.25, ge=0.0, le=1.0)
+    iou: float = Field(default=0.45, ge=0.0, le=1.0)
+    max_detections: int = Field(default=300, ge=1, le=3000)
 
 
 def _normalize(value: str) -> str:
@@ -196,6 +212,121 @@ def _annotation_labels(dataset: Dataset, annotation: dict[str, Any]) -> list[str
         segments = annotation.get("segments", annotation.get("polygons", []))
         return [str(item.get("label") or "").strip() for item in segments]
     return []
+
+
+ANNOTATION_MODEL_TASKS = {
+    "DETECTION": "YOLO_DETECTION",
+    "SEGMENTATION": "YOLO_SEGMENTATION",
+    "CLASSIFICATION": "YOLO_CLASSIFICATION",
+}
+
+
+def _clamp_normalized(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _pre_annotation_from_inference(
+    dataset: Dataset,
+    inference: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Turn the common YOLO output contract into editable dataset annotations.
+
+    This deliberately returns only suggestions. The browser presents these as
+    editable candidates and only a later explicit save turns them into labeled
+    training data.
+    """
+
+    annotation_type = _normalize(dataset.annotation_type)
+    warnings: list[str] = []
+    if annotation_type == "CLASSIFICATION":
+        classification = inference.get("classification") or {}
+        label = str(classification.get("top1_label") or "").strip()
+        if not label:
+            raise HTTPException(status_code=422, detail="模型未返回可用的分类类别。")
+        return {
+            "label": label,
+            "_meta": {"source": "AI_PREANNOTATION"},
+        }, warnings
+
+    if annotation_type == "DETECTION":
+        image = inference.get("image") or {}
+        image_width = float(image.get("width") or 0)
+        image_height = float(image.get("height") or 0)
+        if image_width <= 0 or image_height <= 0:
+            raise HTTPException(status_code=422, detail="模型未返回图片尺寸，无法转换检测框。")
+        boxes: list[dict[str, Any]] = []
+        for object_result in inference.get("objects") or []:
+            bbox = object_result.get("bbox") if isinstance(object_result, dict) else None
+            if not isinstance(bbox, list) or len(bbox) < 4:
+                continue
+            try:
+                left, top, right, bottom = (float(value) for value in bbox[:4])
+            except (TypeError, ValueError):
+                continue
+            left = _clamp_normalized(left / image_width)
+            top = _clamp_normalized(top / image_height)
+            right = _clamp_normalized(right / image_width)
+            bottom = _clamp_normalized(bottom / image_height)
+            width = right - left
+            height = bottom - top
+            label = str(object_result.get("label") or "").strip()
+            if not label or width <= 0 or height <= 0:
+                continue
+            boxes.append(
+                {
+                    "label": label,
+                    "x": round(left, 6),
+                    "y": round(top, 6),
+                    "width": round(width, 6),
+                    "height": round(height, 6),
+                    "confidence": object_result.get("confidence"),
+                    "auto_generated": True,
+                }
+            )
+        return {
+            "boxes": boxes,
+            "_meta": {"source": "AI_PREANNOTATION"},
+        }, warnings
+
+    if annotation_type == "SEGMENTATION":
+        segments: list[dict[str, Any]] = []
+        missing_masks = 0
+        for object_result in inference.get("objects") or []:
+            if not isinstance(object_result, dict):
+                continue
+            label = str(object_result.get("label") or "").strip()
+            raw_points = object_result.get("mask")
+            if not label or not isinstance(raw_points, list):
+                missing_masks += 1
+                continue
+            points: list[list[float]] = []
+            for point in raw_points:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+                try:
+                    x, y = float(point[0]), float(point[1])
+                except (TypeError, ValueError):
+                    continue
+                points.append([round(_clamp_normalized(x), 6), round(_clamp_normalized(y), 6)])
+            if len(points) >= 3:
+                segments.append(
+                    {
+                        "label": label,
+                        "points": points,
+                        "confidence": object_result.get("confidence"),
+                        "auto_generated": True,
+                    }
+                )
+            else:
+                missing_masks += 1
+        if missing_masks:
+            warnings.append("部分模型结果没有可用轮廓，未生成对应分割建议。")
+        return {
+            "segments": segments,
+            "_meta": {"source": "AI_PREANNOTATION"},
+        }, warnings
+
+    raise HTTPException(status_code=400, detail="当前数据集未启用可自动标注的训练类型。")
 
 
 def _dataset_payload(dataset: Dataset, *, include_items: bool = False) -> dict[str, Any]:
@@ -948,6 +1079,112 @@ def upload_dataset_items_batch(
         "created_count": len(created),
         "skipped": skipped,
         "skipped_count": len(skipped),
+    }
+
+
+@router.post("/{dataset_id}/items/{item_id}/pre-annotations")
+def pre_annotate_dataset_item(
+    dataset_id: int,
+    item_id: int,
+    payload: DatasetItemPreAnnotationRequest,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Generate editable AI annotation candidates from a published YOLO model.
+
+    Nothing is written to ``DatasetItem`` here.  That makes the contract safe
+    for production datasets: an operator may review, edit, reject or save the
+    suggestions in the annotation workspace before they become training truth.
+    """
+
+    dataset = database.get(Dataset, dataset_id)
+    item = database.get(DatasetItem, item_id)
+    if dataset is None or dataset.is_deleted or item is None or item.dataset_id != dataset_id:
+        raise HTTPException(status_code=404, detail="数据集样本不存在。")
+    if dataset.purpose != "TRAIN" or dataset.media_type != "IMAGE" or item.media_type != "IMAGE":
+        raise HTTPException(status_code=400, detail="自动预标注仅支持图片训练数据集。")
+
+    annotation_type = _normalize(dataset.annotation_type)
+    required_task_type = ANNOTATION_MODEL_TASKS.get(annotation_type)
+    if required_task_type is None:
+        raise HTTPException(status_code=400, detail="当前数据集的标注方式不支持自动预标注。")
+
+    model_row = database.execute(
+        select(VisionModel, VisionModelVersion)
+        .join(VisionModelVersion, VisionModelVersion.vision_model_id == VisionModel.id)
+        .where(
+            VisionModelVersion.id == payload.vision_model_version_id,
+            VisionModel.is_deleted.is_(False),
+            VisionModel.enabled.is_(True),
+            VisionModelVersion.is_deleted.is_(False),
+            VisionModelVersion.status == "PUBLISHED",
+        )
+    ).first()
+    if model_row is None:
+        raise HTTPException(status_code=404, detail="未找到可用的已发布模型版本。")
+    model, version = model_row
+    if _normalize(model.task_type) != required_task_type:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"当前数据集需要 {required_task_type} 模型，"
+                f"所选模型为 {_normalize(model.task_type)}。"
+            ),
+        )
+    try:
+        specification = build_published_model_spec(version, model)
+        inference = run_yolo_inference(
+            specification,
+            item.media_path,
+            config={
+                "confidence": payload.confidence,
+                "iou": payload.iou,
+                "max_detections": payload.max_detections,
+            },
+        )
+    except VisionModelRuntimeError as exc:
+        raise HTTPException(status_code=422, detail=f"自动预标注失败：{exc}") from exc
+
+    annotation, warnings = _pre_annotation_from_inference(dataset, inference)
+    annotation["_meta"] = {
+        **dict(annotation.get("_meta") or {}),
+        "model_version_id": version.id,
+        "model_name": model.name,
+        "model_version": version.version,
+        "task_type": model.task_type,
+        "confidence_threshold": payload.confidence,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+    candidate_count = (
+        len(annotation.get("boxes") or [])
+        if annotation_type == "DETECTION"
+        else len(annotation.get("segments") or [])
+        if annotation_type == "SEGMENTATION"
+        else 1
+    )
+    labels = _annotation_labels(dataset, annotation)
+    existing_labels = {label.casefold() for label in dataset.label_schema_json or []}
+    unknown_labels = sorted({label for label in labels if label.casefold() not in existing_labels})
+    if unknown_labels:
+        warnings.append("模型建议包含数据集类别字典外的类别；保存前请确认类别名称和编号顺序。")
+    return {
+        "annotation": annotation,
+        "candidate_count": candidate_count,
+        "unknown_labels": unknown_labels,
+        "warnings": warnings,
+        "model": {
+            "version_id": version.id,
+            "model_id": model.id,
+            "code": model.code,
+            "name": model.name,
+            "version": version.version,
+            "task_type": model.task_type,
+        },
+        "inference": {
+            "confidence": inference.get("confidence"),
+            "object_count": inference.get("object_count"),
+            "classification": inference.get("classification"),
+            "elapsed_note": "预标注结果尚未保存为训练真值，请人工确认后保存。",
+        },
     }
 
 

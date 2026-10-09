@@ -97,17 +97,28 @@ def main() -> None:
         default="sqlite:///./data/vision_platform.db",
         help="SQLite URL; defaults to the local platform database.",
     )
-    parser.add_argument(
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
         "--target-url",
-        required=True,
         help="Empty MySQL URL, for example mysql+pymysql://user:password@host:3306/database?charset=utf8mb4",
+    )
+    target_group.add_argument(
+        "--target-url-file",
+        type=Path,
+        help="UTF-8 file containing the empty MySQL URL; useful for local cutover without shell history.",
     )
     parser.add_argument("--batch-size", type=int, default=500)
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("--batch-size 必须大于 0。")
 
-    copied = migrate(args.source_url, args.target_url, args.batch_size)
+    target_url = args.target_url
+    if args.target_url_file is not None:
+        target_url = args.target_url_file.read_text(encoding="utf-8").strip()
+    if not target_url:
+        parser.error("目标 MySQL 连接地址不能为空。")
+
+    copied = migrate(args.source_url, target_url, args.batch_size)
     total = sum(copied.values())
     print(f"迁移完成：{len(copied)} 张表，{total} 行数据。")
     for table_name, row_count in copied.items():

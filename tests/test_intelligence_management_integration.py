@@ -451,6 +451,75 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "DRAFT",
         )
 
+    async def test_prompt_optimization_continues_after_unusable_candidate(self) -> None:
+        scene = create_scenario(
+            ScenarioCreate(
+                name="提示词续跑验证",
+                category="HARNESS",
+                mode="VLM_DIRECT",
+                primary_vlm_model_id=self.primary_vlm_id,
+                prompt_template="基线：检查线束锁付状态。",
+            ),
+            database=self.database,
+        )
+        publish_scenario_version(scene["version_id"], database=self.database)
+        dataset = self._create_test_dataset()
+        optimizer_responses = iter(
+            [
+                {"result": "NG"},
+                {"result": "NG"},
+                {
+                    "optimized_detection_prompt": "检查线束锁付状态，只输出 JSON，result 只能为 OK 或 NG。",
+                    "requirements_satisfied": True,
+                    "requirement_reason": "已限定锁付检测范围。",
+                },
+                {
+                    "optimized_detection_prompt": "检查线束端子是否锁付，只输出 JSON，result 只能为 OK 或 NG。",
+                    "requirements_satisfied": True,
+                    "requirement_reason": "已进一步明确端子锁付区域。",
+                },
+            ]
+        )
+        optimizer_requests: list[str] = []
+        detection_system_prompts: list[str] = []
+
+        async def staged_judge(_model, *, prompt: str, image_path: str | None = None, **_kwargs):
+            if image_path is None:
+                optimizer_requests.append(prompt)
+                return next(optimizer_responses)
+            detection_system_prompts.append(str(_kwargs.get("system_prompt") or ""))
+            return {"result": "NG", "confidence": 0.7, "reason": "模拟检测输出。"}
+
+        runtime_module.vlm_client.judge = staged_judge
+        worker_module.vlm_client.judge = staged_judge
+        queued = queue_prompt_optimization(
+            PromptOptimizationRequest(
+                scenario_version_id=scene["version_id"],
+                dataset_id=dataset["id"],
+                detection_vlm_model_id=self.primary_vlm_id,
+                optimizer_vlm_model_id=self.review_vlm_id,
+                prompt_template="基线：检查线束锁付状态。",
+                optimization_requirements="优先降低漏判，保持 JSON 输出。",
+                target_accuracy=1.0,
+                max_rounds=3,
+            ),
+            database=self.database,
+        )
+
+        worker = AutomationWorker()
+        self.assertTrue(await worker.process_once())
+        self.database.expire_all()
+        job = self.database.get(AutomationJob, queued["job_id"])
+        self.assertEqual(job.status, "COMPLETED")
+        self.assertEqual([entry["round"] for entry in job.result_json["history"]], [0, 1, 2, 3])
+        self.assertEqual(job.result_json["history"][1]["status"], "SKIPPED")
+        self.assertEqual(job.result_json["max_rounds"], 3)
+        self.assertEqual(job.result_json["completed_rounds"], 3)
+        self.assertEqual(job.result_json["stop_reason"], "已达到最大优化轮数。")
+        self.assertIn("第 1 轮候选不可用", optimizer_requests[2])
+        self.assertTrue(detection_system_prompts)
+        self.assertTrue(all("必须包含 result 字段" in item for item in detection_system_prompts))
+
     async def test_running_jobs_are_not_falsely_canceled_and_restart_marks_them_failed(self) -> None:
         running_job = AutomationJob(
             job_type="YOLO_TRAINING",

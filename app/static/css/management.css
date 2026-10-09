@@ -140,7 +140,21 @@
 .optimization-round-table td:nth-child(8) { width: 20%; }
 .optimization-round-table th:nth-child(9),
 .optimization-round-table td:nth-child(9) { width: 24%; }
-.optimization-round-reason { min-width: 0; max-width: none; overflow-wrap: anywhere; word-break: break-word; color: #5b7088; line-height: 1.5; }
+.optimization-round-reason {
+  min-width: 0;
+  max-width: none;
+  color: #5b7088;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.optimization-round-reason-content {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 .prompt-round-row {
   display: grid;

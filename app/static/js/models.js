@@ -178,6 +178,7 @@
             <div class="model-card-actions">
               <button class="btn btn-sm btn-outline-secondary" data-edit-vision="${model.id}" type="button">编辑</button>
               <button class="btn btn-sm btn-outline-secondary" data-toggle-vision-versions="${model.id}" type="button">查看版本</button>
+              <button class="btn btn-sm btn-outline-primary" data-import-vision="${model.id}" type="button">导入已训练模型</button>
               <button class="btn btn-sm btn-outline-primary" data-train-vision="${model.id}" type="button">创建训练任务</button>
               ${publishableVersion ? `<button class="btn btn-sm btn-primary" data-publish-vision-version="${publishableVersion.id}" data-model-id="${model.id}" type="button">发布 V${escapeHtml(publishableVersion.version)}</button>` : ""}
               <button class="btn btn-sm btn-outline-danger" data-delete-vision="${model.id}" type="button">删除</button>
@@ -355,6 +356,32 @@
     modal("visionModelModal").show();
   }
 
+  function syncImportSourceMode() {
+    const useUpload = byId("importWeightsUpload").checked;
+    byId("importWeightsUploadPanel").hidden = !useUpload;
+    byId("importWeightsServerPathPanel").hidden = useUpload;
+    byId("importVisionWeightsFile").required = useUpload;
+    byId("importVisionWeightsPath").required = !useUpload;
+  }
+
+  function openImportVisionVersion(modelId) {
+    const model = state.visionModels.find((item) => item.id === Number(modelId));
+    if (!model) {
+      notify("未找到要导入权重的训练模型。", "warning");
+      return;
+    }
+    const form = byId("importVisionVersionForm");
+    form.reset();
+    byId("importVisionModelId").value = model.id;
+    byId("importVisionModelName").value = `${model.name}（${taskLabel(model.task_type)}）`;
+    byId("importVisionVersion").value = "1.0";
+    byId("importWeightsUpload").checked = true;
+    byId("importVisionWeightsFile").value = "";
+    byId("importVisionWeightsPath").value = "";
+    syncImportSourceMode();
+    modal("importVisionVersionModal").show();
+  }
+
   function syncVisionFamily({ taskType = null, baseModel = null } = {}) {
     const catalog = visionCatalog.YOLO;
     const taskSelect = byId("visionModelTaskType");
@@ -444,6 +471,50 @@
       notify(editId ? "训练模型已更新。" : "训练模型已创建。卡片已加入训练模型维护页面。");
     } catch (error) {
       notify(error.message, "danger");
+    }
+  }
+
+  async function importVisionVersion(event) {
+    event.preventDefault();
+    const form = byId("importVisionVersionForm");
+    const modelId = Number(byId("importVisionModelId").value || 0);
+    if (!modelId) {
+      notify("请先从训练模型卡片中选择要导入的模型。", "warning");
+      return;
+    }
+    const useUpload = byId("importWeightsUpload").checked;
+    const formData = new FormData(form);
+    formData.delete("import_mode");
+    if (useUpload) {
+      formData.delete("existing_weights_path");
+      const file = byId("importVisionWeightsFile").files?.[0];
+      if (!file) {
+        notify("请选择要导入的 .pt 权重文件。", "warning");
+        return;
+      }
+    } else {
+      formData.delete("weights_file");
+      if (!byId("importVisionWeightsPath").value.trim()) {
+        notify("请填写服务器中已有的权重路径。", "warning");
+        return;
+      }
+    }
+    const button = byId("submitImportVisionVersion");
+    button.disabled = true;
+    button.textContent = "正在导入并校验…";
+    try {
+      const result = await request(`${api}/vision-models/${modelId}/versions/import`, {
+        method: "POST",
+        body: formData,
+      });
+      modal("importVisionVersionModal").hide();
+      await loadData();
+      notify(result.message || "权重已导入为草稿版本，请确认后发布。", "success");
+    } catch (error) {
+      notify(error.message, "danger");
+    } finally {
+      button.disabled = false;
+      button.textContent = "导入并校验";
     }
   }
 
@@ -623,6 +694,7 @@
     byId("reloadModels").addEventListener("click", () => loadData().catch((error) => notify(error.message, "danger")));
     byId("vlmModelForm").addEventListener("submit", saveVlm);
     byId("visionModelForm").addEventListener("submit", saveVision);
+    byId("importVisionVersionForm").addEventListener("submit", importVisionVersion);
     byId("trainingJobForm").addEventListener("submit", queueTraining);
     byId("reloadModelJobs").addEventListener("click", () => loadData().catch((error) => notify(error.message, "danger")));
     byId("openTrainingTask")?.addEventListener("click", () => openTrainingTask());
@@ -648,6 +720,7 @@
       const versions = event.target.closest("[data-toggle-vision-versions]");
       const train = event.target.closest("[data-train-vision]");
       const edit = event.target.closest("[data-edit-vision]");
+      const importVersion = event.target.closest("[data-import-vision]");
       const remove = event.target.closest("[data-delete-vision]");
       const publish = event.target.closest("[data-publish-vision-version]");
       if (versions) {
@@ -656,6 +729,7 @@
       }
       if (train) openTrainingForModel(Number(train.dataset.trainVision));
       if (edit) openVisionModal(state.visionModels.find((item) => item.id === Number(edit.dataset.editVision)));
+      if (importVersion) openImportVisionVersion(Number(importVersion.dataset.importVision));
       if (remove) deleteVision(Number(remove.dataset.deleteVision));
       if (publish) publishVisionVersion(Number(publish.dataset.modelId), Number(publish.dataset.publishVisionVersion));
     });
@@ -671,6 +745,9 @@
     byId("trainingDataset").addEventListener("change", updateTrainingSelectionHint);
     byId("visionModelTaskType").addEventListener("change", (event) => {
       syncVisionFamily({ taskType: event.target.value });
+    });
+    document.querySelectorAll('input[name="import_mode"]').forEach((input) => {
+      input.addEventListener("change", syncImportSourceMode);
     });
     syncVisionFamily();
     loadData()

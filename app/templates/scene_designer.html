@@ -15,6 +15,7 @@
       <button class="btn btn-outline-secondary btn-sm" id="designerVersionHistory" type="button">版本历史</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerApi" type="button">接口调用</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerClone" type="button">新建草稿版本</button>
+       <button class="btn btn-outline-primary btn-sm" id="designerValidate" type="button">检查编排</button>
       <button class="btn btn-outline-primary btn-sm" id="designerSave" type="button">保存草稿</button>
       <button class="btn btn-primary btn-sm" id="designerPublish" type="button">发布</button>
     </div>
@@ -53,6 +54,21 @@
             <div class="scene-api-contract-heading"><div><small>RESPONSE BODY</small><strong>返回示例</strong></div><button class="btn btn-outline-secondary btn-sm" id="copySceneApiResponse" type="button">复制返回示例</button></div>
             <pre class="scene-api-code" id="sceneApiResponseExample"></pre>
           </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="workflowPreflightModal" tabindex="-1" aria-labelledby="workflowPreflightModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content workflow-preflight-modal">
+        <div class="modal-header">
+          <div><small>WORKFLOW PRECHECK</small><h2 class="modal-title fs-5" id="workflowPreflightModalTitle">编排检查</h2></div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body">
+          <div class="workflow-preflight-summary" id="workflowPreflightSummary"><span class="workflow-preflight-state pending">等待检查</span><p>检查流程图、节点配置、变量来源及可发布条件。</p></div>
+          <div class="workflow-preflight-list" id="workflowPreflightList"></div>
         </div>
       </div>
     </div>
@@ -164,7 +180,7 @@
   </section>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260929-02" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20260929-02" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20260929-02" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20260929-02"></script>
+<link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20261008-01" rel="stylesheet">
+<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20261008-01" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20261008-01"></script>
 {% endblock %}

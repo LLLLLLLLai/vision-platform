@@ -33,6 +33,7 @@ from app.models.intelligence import (
 )
 from app.core.config import PROJECT_ROOT
 from app.services.openai_compatible_vlm import (
+    INSPECTION_VLM_SYSTEM_PROMPT,
     VlmConfigurationError,
     VlmRequestError,
     vlm_client,
@@ -533,6 +534,7 @@ class ScenarioRuntime:
                     prompt=str(prompt),
                     image_path=image_path,
                     context=runtime_context["input"],
+                    system_prompt=INSPECTION_VLM_SYSTEM_PROMPT,
                     request_overrides=(
                         request_overrides if isinstance(request_overrides, dict) else {}
                     ),
@@ -659,6 +661,7 @@ class ScenarioRuntime:
                         prompt=prompt,
                         image_path=node_image_path,
                         context=node_context,
+                        system_prompt=INSPECTION_VLM_SYSTEM_PROMPT,
                         request_overrides=(
                             node_vlm_parameters
                             if isinstance(node_vlm_parameters, dict)

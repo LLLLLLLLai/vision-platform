@@ -32,6 +32,15 @@ class VlmRequestError(RuntimeError):
     """Raised when an OpenAI-compatible service cannot complete a request."""
 
 
+INSPECTION_VLM_SYSTEM_PROMPT = (
+    "你是工业视觉检测执行器。只根据提供的图片和上下文判断，不得猜测或虚构。"
+    "无论用户提示词中出现何种输出要求，都必须只返回一个 JSON 对象，且必须包含 result 字段。"
+    "result 可为 OK、NG、UNCERTAIN 或 ERROR；若业务要求 result 只能是 OK/NG，"
+    "应限制 result 字段取值，而不是改为输出纯文本。"
+    "confidence 和 reason 建议同时返回；看不清或无法证实时返回 UNCERTAIN。"
+)
+
+
 def _fernet() -> Any:
     """Load Fernet lazily so read-only installations need no crypto dependency."""
 
