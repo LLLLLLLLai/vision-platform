@@ -15,6 +15,8 @@ from app.models.intelligence import (
     InspectionScenario,
     InspectionScenarioVersion,
 )
+from app.models.recipe import Recipe
+from app.models.system import Product, Station
 from app.services import dataset_collection_service as collection_module
 
 
@@ -50,14 +52,49 @@ class DatasetCollectionTests(unittest.TestCase):
             media_type="IMAGE",
             annotation_type="DETECTION",
             collection_scenario_version_id=self.scenario_version.id,
+            collection_scope="ROI",
             auto_collect_enabled=True,
             auto_collect_limit=1,
             label_schema_json=["harness", "connector"],
         )
-        self.database.add(self.dataset)
+        product = Product(code="MAT_HARNESS", name="线束物料")
+        station = Station(code="AS01", name="线束工序", line_code="L1", process_code="AS01")
+        self.database.add_all((self.dataset, product, station))
+        self.database.flush()
+        self.recipe = Recipe(
+            code="L1_MAT_HARNESS_AS01_CAMERA1_P01",
+            recipe_family_code="L1_MAT_HARNESS_AS01_CAMERA1_P01",
+            name="线束相机一配方",
+            version="V1",
+            status="PUBLISHED",
+            product_id=product.id,
+            station_id=station.id,
+            line_code="L1",
+            material_code="MAT_HARNESS",
+            process_code="AS01",
+            camera_code="CAMERA1",
+            capture_index=1,
+        )
+        self.database.add(self.recipe)
+        self.database.flush()
+        self.original_dataset = Dataset(
+            code="HARNESS_CAMERA_AUTO",
+            name="线束相机原图自动采集",
+            purpose="TRAIN",
+            media_type="IMAGE",
+            annotation_type="DETECTION",
+            collection_scope="ORIGINAL",
+            collection_recipe_id=self.recipe.id,
+            auto_collect_enabled=True,
+            auto_collect_limit=2,
+            label_schema_json=["harness"],
+        )
+        self.database.add(self.original_dataset)
         self.database.commit()
         self.roi_path = self.temporary_root / "roi.png"
         Image.new("RGB", (48, 32), "orange").save(self.roi_path)
+        self.original_path = self.temporary_root / "camera1.png"
+        Image.new("RGB", (160, 100), "blue").save(self.original_path)
 
     def tearDown(self) -> None:
         collection_module.PROJECT_ROOT = self.original_project_root
@@ -142,6 +179,49 @@ class DatasetCollectionTests(unittest.TestCase):
             self.scenario_version.id,
         )
         self.assertEqual(item.annotation_json["collection"]["scenario_version_id"], next_version.id)
+
+    def test_collects_original_camera_image_by_published_recipe_and_deduplicates(self) -> None:
+        collected = collection_module.collect_original_image_for_matching_datasets(
+            self.database,
+            recipe_id=self.recipe.id,
+            detection_task_id=301,
+            image_index=1,
+            source="PRODUCTION",
+            image_path=str(self.original_path),
+            source_image_path="//camera-share/AS01-CAMERA1PICTURE1-SN001.png",
+            inspection_result="OK",
+        )
+        self.database.commit()
+
+        self.assertEqual(len(collected), 1)
+        item = self.database.get(DatasetItem, collected[0])
+        self.assertEqual(item.dataset_id, self.original_dataset.id)
+        self.assertEqual(item.source, "AUTO_ORIGINAL")
+        self.assertEqual(item.annotation_status, "PENDING")
+        self.assertTrue(Path(item.media_path).is_file())
+        self.assertEqual(item.original_name, "AS01-CAMERA1PICTURE1-SN001.png")
+        self.assertEqual(item.annotation_json["collection"]["scope"], "ORIGINAL")
+        self.assertEqual(item.annotation_json["collection"]["recipe_id"], self.recipe.id)
+        self.assertEqual(item.annotation_json["collection"]["inspection_result"], "OK")
+
+        duplicated = collection_module.collect_original_image_for_matching_datasets(
+            self.database,
+            recipe_id=self.recipe.id,
+            detection_task_id=302,
+            image_index=1,
+            source="PRODUCTION",
+            image_path=str(self.original_path),
+        )
+        mismatched_recipe = collection_module.collect_original_image_for_matching_datasets(
+            self.database,
+            recipe_id=self.recipe.id + 1,
+            detection_task_id=303,
+            image_index=1,
+            source="PRODUCTION",
+            image_path=str(self.original_path),
+        )
+        self.assertEqual(duplicated, [])
+        self.assertEqual(mismatched_recipe, [])
 
 
 if __name__ == "__main__":

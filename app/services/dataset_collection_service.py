@@ -62,6 +62,7 @@ def collect_roi_for_matching_datasets(
             Dataset.is_deleted.is_(False),
             Dataset.enabled.is_(True),
             Dataset.auto_collect_enabled.is_(True),
+            Dataset.collection_scope == "ROI",
             Dataset.media_type == "IMAGE",
             bound_version.c.scenario_id == executed_version.scenario_id,
         )
@@ -123,6 +124,92 @@ def collect_roi_for_matching_datasets(
     return collected_ids
 
 
+def collect_original_image_for_matching_datasets(
+    database: Session,
+    *,
+    recipe_id: int,
+    detection_task_id: int,
+    image_index: int,
+    source: str,
+    image_path: str,
+    source_image_path: str | None = None,
+    inspection_result: str | None = None,
+) -> list[int]:
+    if source != "PRODUCTION":
+        return []
+    source_path = Path(image_path)
+    if not source_path.is_file():
+        return []
+    datasets = database.scalars(
+        select(Dataset).where(
+            Dataset.is_deleted.is_(False),
+            Dataset.enabled.is_(True),
+            Dataset.auto_collect_enabled.is_(True),
+            Dataset.collection_scope == "ORIGINAL",
+            Dataset.collection_recipe_id == recipe_id,
+            Dataset.media_type == "IMAGE",
+        )
+    ).all()
+    if not datasets:
+        return []
+
+    payload = source_path.read_bytes()
+    content_hash = hashlib.sha256(payload).hexdigest()
+    filename = str(source_image_path or image_path).replace("\\", "/").rsplit("/", 1)[-1]
+    collected_ids: list[int] = []
+    for dataset in datasets:
+        collected_count = database.scalar(
+            select(func.count(DatasetItem.id)).where(
+                DatasetItem.dataset_id == dataset.id,
+                DatasetItem.source == "AUTO_ORIGINAL",
+                DatasetItem.is_deleted.is_(False),
+            )
+        ) or 0
+        if collected_count >= max(1, dataset.auto_collect_limit):
+            continue
+        duplicate = database.scalar(
+            select(DatasetItem.id).where(
+                DatasetItem.dataset_id == dataset.id,
+                DatasetItem.content_hash == content_hash,
+                DatasetItem.is_deleted.is_(False),
+            )
+        )
+        if duplicate is not None:
+            continue
+
+        target_dir = Path(PROJECT_ROOT / "uploads" / "datasets" / dataset.code / "auto" / "original")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source_path.suffix.lower() or ".jpg"
+        target_path = target_dir / f"image_{image_index}_task_{detection_task_id}{suffix}"
+        if target_path.exists():
+            target_path = target_dir / f"image_{image_index}_{detection_task_id}_{content_hash[:10]}{suffix}"
+        shutil.copy2(source_path, target_path)
+        item = DatasetItem(
+            dataset_id=dataset.id,
+            media_path=str(target_path),
+            original_name=filename or target_path.name,
+            media_type="IMAGE",
+            annotation_status="PENDING",
+            annotation_json={
+                "collection": {
+                    "scope": "ORIGINAL",
+                    "recipe_id": recipe_id,
+                    "detection_task_id": detection_task_id,
+                    "image_index": image_index,
+                    "source_image_path": source_image_path,
+                    "inspection_result": inspection_result,
+                }
+            },
+            source="AUTO_ORIGINAL",
+            content_hash=content_hash,
+        )
+        database.add(item)
+        dataset.revision += 1
+        database.flush()
+        collected_ids.append(item.id)
+    return collected_ids
+
+
 def try_collect_roi_for_matching_datasets(**kwargs: object) -> list[int]:
     """Non-blocking wrapper for the production execution path."""
 
@@ -130,4 +217,12 @@ def try_collect_roi_for_matching_datasets(**kwargs: object) -> list[int]:
         return collect_roi_for_matching_datasets(**kwargs)  # type: ignore[arg-type]
     except Exception:
         logger.exception("Automatic ROI collection failed; production execution continues")
+        return []
+
+
+def try_collect_original_image_for_matching_datasets(**kwargs: object) -> list[int]:
+    try:
+        return collect_original_image_for_matching_datasets(**kwargs)  # type: ignore[arg-type]
+    except Exception:
+        logger.exception("Automatic original-image collection failed; production execution continues")
         return []

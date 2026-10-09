@@ -114,7 +114,6 @@
 .annotation-svg-box.ai-candidate { stroke-dasharray: .012 .008; }
 .annotation-svg-box.selected { fill: color-mix(in srgb, var(--annotation-color, #155eef) 23%, transparent); stroke-width: .006; }
 .annotation-svg-draft { fill: rgba(242, 153, 74, .13); stroke: #f79009; stroke-dasharray: .012 .009; cursor: crosshair; }
-.annotation-svg-label { fill: #102a56; font-size: .031px; font-weight: 800; paint-order: stroke; pointer-events: none; stroke: #fff; stroke-width: .008px; stroke-linejoin: round; }
 .annotation-svg-handle { fill: #fff; stroke: var(--annotation-color, #155eef); stroke-width: .004; vector-effect: non-scaling-stroke; cursor: nwse-resize; }
 .annotation-svg-handle[data-handle="n"], .annotation-svg-handle[data-handle="s"] { cursor: ns-resize; }
 .annotation-svg-handle[data-handle="e"], .annotation-svg-handle[data-handle="w"] { cursor: ew-resize; }

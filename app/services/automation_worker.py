@@ -775,7 +775,7 @@ class AutomationWorker:
             stage="BASELINE_EVALUATION",
             label="正在评测基线提示词",
             current=0,
-            total=planned_progress_units,
+            total=max_rounds,
         )
         best = await self._evaluate_prompt(
             database,
@@ -787,6 +787,8 @@ class AutomationWorker:
             progress_offset=0,
             progress_total=planned_progress_units,
             progress_label="正在评测基线提示词",
+            progress_round_current=0,
+            progress_round_total=max_rounds,
         )
         if best.get("canceled"):
             self._finish_canceled(database, job, partial_result={"history": []})
@@ -855,8 +857,8 @@ class AutomationWorker:
                 percent=round_offset / planned_progress_units * 100,
                 stage="GENERATING_PROMPT",
                 label=f"正在生成第 {round_number}/{max_rounds} 轮候选提示词",
-                current=round_offset,
-                total=planned_progress_units,
+                current=round_number,
+                total=max_rounds,
             )
             optimization_prompt = _build_prompt_optimization_request(
                 optimization_requirements=optimization_requirements,
@@ -955,6 +957,8 @@ class AutomationWorker:
                 progress_offset=round_offset + 1,
                 progress_total=planned_progress_units,
                 progress_label=f"正在评测第 {round_number}/{max_rounds} 轮候选提示词",
+                progress_round_current=round_number,
+                progress_round_total=max_rounds,
             )
             if metrics.get("canceled"):
                 self._finish_canceled(
@@ -1041,8 +1045,8 @@ class AutomationWorker:
                 "percent": 100,
                 "stage": "COMPLETED",
                 "label": "场景优化完成",
-                "current": planned_progress_units,
-                "total": planned_progress_units,
+                "current": len(history) - 1,
+                "total": max_rounds,
                 "completed": True,
                 "updated_at": datetime.utcnow().isoformat(),
             },
@@ -1063,6 +1067,8 @@ class AutomationWorker:
         progress_offset: int | None = None,
         progress_total: int | None = None,
         progress_label: str | None = None,
+        progress_round_current: int | None = None,
+        progress_round_total: int | None = None,
     ) -> dict[str, Any]:
         rows: list[tuple[str | None, str | None]] = []
         details: list[dict[str, Any]] = []
@@ -1110,8 +1116,16 @@ class AutomationWorker:
                     percent=current / progress_total * 100,
                     stage="EVALUATING_PROMPT",
                     label=progress_label or "正在评测候选提示词",
-                    current=current,
-                    total=progress_total,
+                    current=(
+                        progress_round_current
+                        if progress_round_current is not None
+                        else current
+                    ),
+                    total=(
+                        progress_round_total
+                        if progress_round_total is not None
+                        else progress_total
+                    ),
                 )
             if self._cancellation_requested(database, job):
                 metrics = _metrics(rows)

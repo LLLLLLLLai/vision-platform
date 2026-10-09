@@ -38,6 +38,7 @@ const state = {
     scale: 1,
     minScale: 0.2,
     maxScale: 6,
+    fitScale: 1,
     translateX: 0,
     translateY: 0,
     displayWidth: 0,
@@ -795,8 +796,9 @@ async function uploadBaseImage(file) {
 
 function applyImageTransform() {
   const view = state.imageView;
+  const renderedScale = Math.max(0.01, (view.fitScale || 1) * view.scale);
   imageSurface.style.transform =
-    `translate(${view.translateX}px, ${view.translateY}px) scale(${view.scale})`;
+    `translate(${view.translateX}px, ${view.translateY}px) scale(${renderedScale})`;
   const zoomIndicator = byId("resetZoomButton");
   const panButton = byId("togglePanButton");
   if (zoomIndicator) zoomIndicator.textContent = `${Math.round(view.scale * 100)}%`;
@@ -815,25 +817,27 @@ function resetImageView() {
 
 function syncCanvas(resetView = true) {
   if (!baseImage.naturalWidth || !baseImage.naturalHeight) return;
+  const sourceWidth = baseImage.naturalWidth;
+  const sourceHeight = baseImage.naturalHeight;
   const availableWidth = Math.max(320, imageStage.clientWidth - 32);
   const availableHeight = Math.max(320, imageStage.clientHeight - 32);
   const fitScale = Math.min(
-    availableWidth / baseImage.naturalWidth,
-    availableHeight / baseImage.naturalHeight,
+    availableWidth / sourceWidth,
+    availableHeight / sourceHeight,
     1,
   );
-  const width = Math.max(1, Math.round(baseImage.naturalWidth * fitScale));
-  const height = Math.max(1, Math.round(baseImage.naturalHeight * fitScale));
-  state.imageView.displayWidth = width;
-  state.imageView.displayHeight = height;
-  imageSurface.style.width = `${width}px`;
-  imageSurface.style.height = `${height}px`;
-  baseImage.style.width = `${width}px`;
-  baseImage.style.height = `${height}px`;
-  canvas.width = width;
-  canvas.height = height;
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
+  state.imageView.fitScale = fitScale;
+  state.imageView.displayWidth = Math.max(1, Math.round(sourceWidth * fitScale));
+  state.imageView.displayHeight = Math.max(1, Math.round(sourceHeight * fitScale));
+  state.imageView.maxScale = Math.max(1, Math.min(6, 1 / fitScale));
+  imageSurface.style.width = `${sourceWidth}px`;
+  imageSurface.style.height = `${sourceHeight}px`;
+  baseImage.style.width = `${sourceWidth}px`;
+  baseImage.style.height = `${sourceHeight}px`;
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
+  canvas.style.width = `${sourceWidth}px`;
+  canvas.style.height = `${sourceHeight}px`;
   if (resetView) resetImageView();
   else applyImageTransform();
   drawCanvas();
@@ -855,12 +859,13 @@ function setImageScale(nextScale, clientX = null, clientY = null) {
     && clientX <= surfaceBounds.right
     && clientY >= surfaceBounds.top
     && clientY <= surfaceBounds.bottom;
+  const renderedOldScale = Math.max(0.01, (view.fitScale || 1) * oldScale);
   const contentX = pointerInsideImage
-    ? (clientX - surfaceBounds.left) / oldScale
-    : view.displayWidth / 2;
+    ? (clientX - surfaceBounds.left) / renderedOldScale
+    : canvas.width / 2;
   const contentY = pointerInsideImage
-    ? (clientY - surfaceBounds.top) / oldScale
-    : view.displayHeight / 2;
+    ? (clientY - surfaceBounds.top) / renderedOldScale
+    : canvas.height / 2;
   const anchorX = pointerInsideImage
     ? clientX - stageOriginX
     : view.translateX + (view.displayWidth * oldScale) / 2;
@@ -868,8 +873,9 @@ function setImageScale(nextScale, clientX = null, clientY = null) {
     ? clientY - stageOriginY
     : view.translateY + (view.displayHeight * oldScale) / 2;
   view.scale = scale;
-  view.translateX = anchorX - contentX * scale;
-  view.translateY = anchorY - contentY * scale;
+  const renderedNextScale = (view.fitScale || 1) * scale;
+  view.translateX = anchorX - contentX * renderedNextScale;
+  view.translateY = anchorY - contentY * renderedNextScale;
   applyImageTransform();
 }
 
@@ -894,6 +900,10 @@ function clearCanvas() {
   context.clearRect(0, 0, canvas.width, canvas.height);
 }
 
+function canvasVisualUnit() {
+  return 1 / Math.max(0.01, state.imageView.fitScale || 1);
+}
+
 function roiRect(roi) {
   return {
     x: roi.x_ratio * canvas.width,
@@ -904,7 +914,7 @@ function roiRect(roi) {
 }
 
 function clampRect(rect) {
-  const minimum = 16;
+  const minimum = 16 * canvasVisualUnit();
   const width = Math.max(minimum, Math.min(rect.width, canvas.width));
   const height = Math.max(minimum, Math.min(rect.height, canvas.height));
   return {
@@ -916,7 +926,8 @@ function clampRect(rect) {
 }
 
 function drawHandles(rect) {
-  const size = 10;
+  const unit = canvasVisualUnit();
+  const size = 10 * unit;
   const points = [
     [rect.x, rect.y],
     [rect.x + rect.width, rect.y],
@@ -925,7 +936,7 @@ function drawHandles(rect) {
   ];
   context.fillStyle = "#fff";
   context.strokeStyle = "#ff6b35";
-  context.lineWidth = 2;
+  context.lineWidth = 2 * unit;
   points.forEach(([x, y]) => {
     context.fillRect(x - size / 2, y - size / 2, size, size);
     context.strokeRect(x - size / 2, y - size / 2, size, size);
@@ -935,19 +946,20 @@ function drawHandles(rect) {
 function drawCanvas() {
   clearCanvas();
   if (!state.recipe) return;
+  const unit = canvasVisualUnit();
   const featureAnchor = state.recipe.feature_anchor;
   if (featureAnchor?.enabled) {
     const rect = featureAnchorRect(featureAnchor);
     context.fillStyle = "rgba(22,163,74,.12)";
     context.strokeStyle = "#15803d";
-    context.lineWidth = 3;
-    context.setLineDash([8, 5]);
+    context.lineWidth = 3 * unit;
+    context.setLineDash([8 * unit, 5 * unit]);
     context.fillRect(rect.x, rect.y, rect.width, rect.height);
     context.strokeRect(rect.x, rect.y, rect.width, rect.height);
     context.setLineDash([]);
     context.fillStyle = "#166534";
-    context.font = "700 13px Segoe UI, sans-serif";
-    context.fillText("定位特征点", rect.x + 7, rect.y + 18);
+    context.font = `700 ${13 * unit}px Segoe UI, sans-serif`;
+    context.fillText("定位特征点", rect.x + (7 * unit), rect.y + (18 * unit));
   }
   state.recipe.rois.forEach((roi) => {
     const selected = roi.id === state.selectedRoiId;
@@ -955,20 +967,20 @@ function drawCanvas() {
     const { x, y, width, height } = rect;
     context.fillStyle = selected ? "rgba(255,107,53,.15)" : "rgba(47,117,223,.10)";
     context.strokeStyle = selected ? "#ff6b35" : "#2f75df";
-    context.lineWidth = selected ? 4 : 2;
+    context.lineWidth = (selected ? 4 : 2) * unit;
     context.fillRect(x, y, width, height);
     context.strokeRect(x, y, width, height);
     context.fillStyle = selected ? "#e64f18" : "#245db7";
-    context.font = "700 13px Segoe UI, sans-serif";
-    context.fillText(roi.code, x + 7, y + 18);
+    context.font = `700 ${13 * unit}px Segoe UI, sans-serif`;
+    context.fillText(roi.code, x + (7 * unit), y + (18 * unit));
     if (selected) drawHandles(rect);
   });
   if (state.pendingRect) {
     const feature = state.drawMode === "FEATURE";
     context.strokeStyle = feature ? "#15803d" : "#ff6b35";
     context.fillStyle = feature ? "rgba(22,163,74,.12)" : "rgba(255,107,53,.12)";
-    context.lineWidth = 3;
-    context.setLineDash([8, 5]);
+    context.lineWidth = 3 * unit;
+    context.setLineDash([8 * unit, 5 * unit]);
     context.fillRect(state.pendingRect.x, state.pendingRect.y, state.pendingRect.width, state.pendingRect.height);
     context.strokeRect(state.pendingRect.x, state.pendingRect.y, state.pendingRect.width, state.pendingRect.height);
     context.setLineDash([]);
@@ -1018,8 +1030,9 @@ function hitResizeHandle(point) {
     sw: [rect.x, rect.y + rect.height],
     se: [rect.x + rect.width, rect.y + rect.height],
   };
+  const tolerance = 12 * canvasVisualUnit();
   return Object.entries(handles).find(([, [x, y]]) =>
-    Math.abs(point.x - x) <= 12 && Math.abs(point.y - y) <= 12)?.[0] || null;
+    Math.abs(point.x - x) <= tolerance && Math.abs(point.y - y) <= tolerance)?.[0] || null;
 }
 
 canvas.addEventListener("pointerdown", (event) => {
@@ -1117,11 +1130,12 @@ canvas.addEventListener("pointerup", async (event) => {
   const selected = state.pointerRoi;
   state.pointerRoi = null;
   state.interactionMode = null;
-  if (mode === "feature-draw" && state.pendingRect?.width > 8 && state.pendingRect?.height > 8) {
+  const minimumDrawSize = 8 * canvasVisualUnit();
+  if (mode === "feature-draw" && state.pendingRect?.width > minimumDrawSize && state.pendingRect?.height > minimumDrawSize) {
     await saveFeatureAnchorRect(state.pendingRect);
     return;
   }
-  if (mode === "draw" && state.pendingRect?.width > 8 && state.pendingRect?.height > 8) {
+  if (mode === "draw" && state.pendingRect?.width > minimumDrawSize && state.pendingRect?.height > minimumDrawSize) {
     await createRoiFromRect(state.pendingRect);
     return;
   }

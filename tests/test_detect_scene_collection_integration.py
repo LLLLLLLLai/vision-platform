@@ -144,10 +144,23 @@ class DetectSceneCollectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 media_type="IMAGE",
                 annotation_type="NONE",
                 collection_scenario_version_id=scenario_version.id,
+                collection_scope="ROI",
                 auto_collect_enabled=True,
                 auto_collect_limit=10,
             )
-            database.add(dataset)
+            original_dataset = Dataset(
+                code="HARNESS_CAMERA_ORIGINAL_AUTO",
+                name="线束相机原图自动采集",
+                purpose="TRAIN",
+                media_type="IMAGE",
+                annotation_type="DETECTION",
+                collection_scope="ORIGINAL",
+                collection_recipe_id=recipe.id,
+                auto_collect_enabled=True,
+                auto_collect_limit=10,
+                label_schema_json=["harness"],
+            )
+            database.add_all((dataset, original_dataset))
             database.commit()
 
             prompts: list[str] = []
@@ -198,6 +211,9 @@ class DetectSceneCollectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             collected = database.scalars(
                 select(DatasetItem).where(DatasetItem.dataset_id == dataset.id)
             ).all()
+            original_collected = database.scalars(
+                select(DatasetItem).where(DatasetItem.dataset_id == original_dataset.id)
+            ).all()
             self.assertEqual(call.sn, "CN000798263700002")
             self.assertEqual(call.call_status, "SUCCESS")
             self.assertEqual(len(tasks), 2)
@@ -208,6 +224,14 @@ class DetectSceneCollectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(collected[0].source, "AUTO_ROI")
             self.assertEqual(collected[0].annotation_status, "PENDING")
             self.assertTrue(Path(collected[0].media_path).is_file())
+            self.assertEqual(len(original_collected), 1)
+            self.assertEqual(original_collected[0].source, "AUTO_ORIGINAL")
+            self.assertEqual(original_collected[0].annotation_status, "PENDING")
+            self.assertTrue(Path(original_collected[0].media_path).is_file())
+            self.assertEqual(
+                original_collected[0].annotation_json["collection"]["recipe_id"],
+                recipe.id,
+            )
 
 
 if __name__ == "__main__":

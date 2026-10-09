@@ -516,6 +516,8 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.result_json["max_rounds"], 3)
         self.assertEqual(job.result_json["completed_rounds"], 3)
         self.assertEqual(job.result_json["stop_reason"], "已达到最大优化轮数。")
+        self.assertEqual(job.result_json["progress"]["current"], 3)
+        self.assertEqual(job.result_json["progress"]["total"], 3)
         self.assertIn("第 1 轮候选不可用", optimizer_requests[2])
         self.assertTrue(detection_system_prompts)
         self.assertTrue(all("必须包含 result 字段" in item for item in detection_system_prompts))

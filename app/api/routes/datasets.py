@@ -22,6 +22,7 @@ from app.models.intelligence import (
     VisionModel,
     VisionModelVersion,
 )
+from app.models.recipe import Recipe
 from app.services.vision_model_runtime import (
     VisionModelRuntimeError,
     build_published_model_spec,
@@ -35,6 +36,7 @@ PURPOSES = {"TEST", "TRAIN"}
 MEDIA_TYPES = {"IMAGE", "VIDEO"}
 ANNOTATION_TYPES = {"NONE", "CLASSIFICATION", "DETECTION", "SEGMENTATION"}
 GROUND_TRUTHS = {"OK", "NG"}
+COLLECTION_SCOPES = {"ROI", "ORIGINAL"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 OFFLINE_YOLO_MAX_IMAGES = 2000
 OFFLINE_YOLO_MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
@@ -50,6 +52,8 @@ class DatasetCreate(BaseModel):
     annotation_type: str = "NONE"
     labels: list[str] = Field(default_factory=list)
     collection_scenario_version_id: int | None = None
+    collection_scope: str = "ROI"
+    collection_recipe_id: int | None = None
     auto_collect_enabled: bool = False
     auto_collect_limit: int = Field(default=1000, ge=1, le=100000)
 
@@ -60,6 +64,8 @@ class DatasetUpdate(BaseModel):
     enabled: bool | None = None
     labels: list[str] | None = None
     collection_scenario_version_id: int | None = None
+    collection_scope: str | None = None
+    collection_recipe_id: int | None = None
     auto_collect_enabled: bool | None = None
     auto_collect_limit: int | None = Field(default=None, ge=1, le=100000)
 
@@ -111,18 +117,29 @@ def _validate_collection_configuration(
     database: Session,
     *,
     media_type: str,
+    collection_scope: str,
     scenario_version_id: int | None,
+    recipe_id: int | None,
     enabled: bool,
 ) -> None:
+    if collection_scope not in COLLECTION_SCOPES:
+        raise HTTPException(status_code=400, detail="自动采集范围仅支持 ROI 或 ORIGINAL。")
     if not enabled:
         return
     if media_type != "IMAGE":
-        raise HTTPException(status_code=400, detail="自动采集 ROI 仅支持图片数据集。")
-    if scenario_version_id is None:
-        raise HTTPException(status_code=400, detail="启用自动采集时必须关联一个已发布场景。")
-    scenario_version = database.get(InspectionScenarioVersion, scenario_version_id)
-    if scenario_version is None or scenario_version.status != "PUBLISHED":
-        raise HTTPException(status_code=400, detail="自动采集只能关联已发布的检测场景。")
+        raise HTTPException(status_code=400, detail="自动采集仅支持图片数据集。")
+    if collection_scope == "ROI":
+        if scenario_version_id is None:
+            raise HTTPException(status_code=400, detail="采集 ROI 时必须关联一个已发布场景。")
+        scenario_version = database.get(InspectionScenarioVersion, scenario_version_id)
+        if scenario_version is None or scenario_version.status != "PUBLISHED":
+            raise HTTPException(status_code=400, detail="ROI 自动采集只能关联已发布的检测场景。")
+        return
+    if recipe_id is None:
+        raise HTTPException(status_code=400, detail="采集相机原图时必须关联一个已发布工艺配方。")
+    recipe = database.get(Recipe, recipe_id)
+    if recipe is None or recipe.is_deleted or recipe.status != "PUBLISHED":
+        raise HTTPException(status_code=400, detail="原图自动采集只能关联已发布工艺配方。")
 
 
 def _new_dataset_code(purpose: str, media_type: str) -> str:
@@ -345,6 +362,8 @@ def _dataset_payload(dataset: Dataset, *, include_items: bool = False) -> dict[s
         "annotation_type": dataset.annotation_type,
         "labels": list(dataset.label_schema_json or []),
         "collection_scenario_version_id": dataset.collection_scenario_version_id,
+        "collection_scope": dataset.collection_scope or "ROI",
+        "collection_recipe_id": dataset.collection_recipe_id,
         "auto_collect_enabled": dataset.auto_collect_enabled,
         "auto_collect_limit": dataset.auto_collect_limit,
         "revision": dataset.revision,
@@ -414,10 +433,13 @@ def create_dataset(
     if database.scalar(select(Dataset.id).where(Dataset.code == code)):
         raise HTTPException(status_code=409, detail="数据集编码已存在。")
     labels = _normalize_labels(payload.labels)
+    collection_scope = _normalize(payload.collection_scope)
     _validate_collection_configuration(
         database,
         media_type=media_type,
+        collection_scope=collection_scope,
         scenario_version_id=payload.collection_scenario_version_id,
+        recipe_id=payload.collection_recipe_id,
         enabled=payload.auto_collect_enabled,
     )
     dataset = Dataset(
@@ -428,7 +450,17 @@ def create_dataset(
         media_type=media_type,
         annotation_type=annotation_type,
         label_schema_json=labels,
-        collection_scenario_version_id=payload.collection_scenario_version_id,
+        collection_scenario_version_id=(
+            payload.collection_scenario_version_id
+            if collection_scope == "ROI"
+            else None
+        ),
+        collection_scope=collection_scope,
+        collection_recipe_id=(
+            payload.collection_recipe_id
+            if collection_scope == "ORIGINAL"
+            else None
+        ),
         auto_collect_enabled=payload.auto_collect_enabled,
         auto_collect_limit=payload.auto_collect_limit,
     )
@@ -467,15 +499,26 @@ def update_dataset(
     next_collection_id = values.get(
         "collection_scenario_version_id", dataset.collection_scenario_version_id
     )
+    next_collection_scope = _normalize(
+        str(values.get("collection_scope", dataset.collection_scope or "ROI"))
+    )
+    next_recipe_id = values.get("collection_recipe_id", dataset.collection_recipe_id)
     next_auto_collect = values.get(
         "auto_collect_enabled", dataset.auto_collect_enabled
     )
     _validate_collection_configuration(
         database,
         media_type=next_media_type,
+        collection_scope=next_collection_scope,
         scenario_version_id=next_collection_id,
+        recipe_id=next_recipe_id,
         enabled=bool(next_auto_collect),
     )
+    values["collection_scope"] = next_collection_scope
+    if next_collection_scope == "ROI":
+        values["collection_recipe_id"] = None
+    else:
+        values["collection_scenario_version_id"] = None
     if "labels" in values:
         values["label_schema_json"] = _normalize_labels(values.pop("labels"))
     for key, value in values.items():

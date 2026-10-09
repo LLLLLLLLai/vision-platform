@@ -4,6 +4,7 @@
     datasets: [],
     selectedId: null,
     publishedScenarios: [],
+    publishedRecipes: [],
     publishedVisionModels: [],
     annotation: {
       itemId: null,
@@ -55,6 +56,8 @@
     return {
       OFFLINE_YOLO: "离线 YOLO 导入",
       AUTO_COLLECTION: "自动采集",
+      AUTO_ROI: "ROI 自动采集",
+      AUTO_ORIGINAL: "相机原图采集",
       UPLOAD: "手动上传",
     }[String(source || "UPLOAD").toUpperCase()] || "手动上传";
   }
@@ -255,12 +258,18 @@
 
   function renderCollectionSummary(dataset) {
     const container = byId("datasetCollectionSummary");
+    const scope = String(dataset.collection_scope || "ROI").toUpperCase();
     const scene = state.publishedScenarios.find((item) => Number(item.scenario_version_id) === Number(dataset.collection_scenario_version_id));
+    const recipe = state.publishedRecipes.find((item) => Number(item.id) === Number(dataset.collection_recipe_id));
     if (!dataset.auto_collect_enabled) {
-      container.innerHTML = '<span class="muted-copy">未启用自动采集。创建或编辑数据集时可关联一个已发布场景。</span>';
+      container.innerHTML = '<span class="muted-copy">未启用自动采集。可关联已发布场景采集 ROI，或关联已发布工艺配方采集相机原图。</span>';
       return;
     }
-    container.innerHTML = `<span class="status-pill published">已启用</span><strong>${escapeHtml(scene?.scenario_name || `场景版本 #${dataset.collection_scenario_version_id}`)}</strong><span>达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止；采集图片需人工标注后才会用于训练或评测。</span>`;
+    if (scope === "ORIGINAL") {
+      container.innerHTML = `<span class="status-pill published">相机原图采集</span><strong>${escapeHtml(recipeLabel(recipe) || `工艺配方 #${dataset.collection_recipe_id}`)}</strong><span>每张原图按内容去重；达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止。</span>`;
+      return;
+    }
+    container.innerHTML = `<span class="status-pill published">ROI 采集</span><strong>${escapeHtml(scene?.scenario_name || `场景版本 #${dataset.collection_scenario_version_id}`)}</strong><span>每个生产 ROI 按内容去重；达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止。</span>`;
   }
 
   async function loadPublishedScenarios() {
@@ -270,6 +279,27 @@
       state.publishedScenarios = [];
     }
     fillCollectionScenarioSelect();
+    if (selected()) renderDetail();
+  }
+
+  function recipeLabel(recipe) {
+    if (!recipe) return "";
+    const route = [recipe.line_code, recipe.material_code, recipe.process_code, recipe.camera_code]
+      .filter(Boolean)
+      .join(" · ");
+    const capture = recipe.capture_index ? `第 ${recipe.capture_index} 次拍照` : "";
+    return [recipe.name || recipe.code, route, capture].filter(Boolean).join(" · ");
+  }
+
+  async function loadPublishedRecipes() {
+    try {
+      const recipes = await request(`${api}/configuration/recipes`);
+      state.publishedRecipes = recipes.filter((item) => String(item.status || "").toUpperCase() === "PUBLISHED");
+    } catch {
+      state.publishedRecipes = [];
+    }
+    fillCollectionRecipeSelect();
+    if (selected()) renderDetail();
   }
 
   async function loadPublishedVisionModels() {
@@ -290,6 +320,35 @@
       ...state.publishedScenarios.map((item) => `<option value="${item.scenario_version_id}">${escapeHtml(item.scenario_name)} · V${escapeHtml(item.version)}</option>`),
     ].join("");
     if ([...select.options].some((option) => option.value === current)) select.value = current;
+  }
+
+  function fillCollectionRecipeSelect() {
+    const select = byId("datasetCollectionRecipe");
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = [
+      '<option value="">请选择工艺配方</option>',
+      ...state.publishedRecipes.map((item) => `<option value="${item.id}">${escapeHtml(recipeLabel(item))}</option>`),
+    ].join("");
+    if ([...select.options].some((option) => option.value === current)) select.value = current;
+  }
+
+  function syncDatasetCollectionMode() {
+    const scope = String(byId("datasetCollectionScope").value || "ROI").toUpperCase();
+    const collectOriginal = scope === "ORIGINAL";
+    byId("datasetCollectionScenarioField").hidden = collectOriginal;
+    byId("datasetCollectionRecipeField").hidden = !collectOriginal;
+    byId("datasetAutoCollectEnabledLabel").textContent = collectOriginal
+      ? "启用自动采集相机原图"
+      : "启用自动采集 ROI";
+    byId("datasetCollectionScopeHint").textContent = collectOriginal
+      ? "关联已发布工艺配方后，detect 接口中的完整相机原图会进入本数据集。"
+      : "关联已发布场景后，生产检测的 ROI 局部图会进入本数据集。";
+    if (collectOriginal) {
+      byId("datasetCollectionScenario").value = "";
+    } else {
+      byId("datasetCollectionRecipe").value = "";
+    }
   }
 
   async function loadData(keep = true) {
@@ -327,10 +386,10 @@
   function openDatasetCreate() {
     byId("datasetCreateForm").reset();
     fillCollectionScenarioSelect();
-    // Associating a scene means the operator intends to collect its production
-    // ROI samples.  Keep the switch on by default, while still allowing an
-    // explicit opt-out before creation.
-    byId("datasetAutoCollectEnabled").checked = Boolean(byId("datasetCollectionScenario").value);
+    fillCollectionRecipeSelect();
+    byId("datasetCollectionScope").value = "ROI";
+    byId("datasetAutoCollectEnabled").checked = false;
+    syncDatasetCollectionMode();
     syncDatasetCreateMode();
     openModal("datasetCreateModal");
   }
@@ -365,7 +424,9 @@
       .split(/[,，\n]/)
       .map((label) => label.trim())
       .filter(Boolean);
+    payload.collection_scope = byId("datasetCollectionScope").value;
     payload.collection_scenario_version_id = Number(byId("datasetCollectionScenario").value) || null;
+    payload.collection_recipe_id = Number(byId("datasetCollectionRecipe").value) || null;
     payload.auto_collect_enabled = byId("datasetAutoCollectEnabled").checked;
     payload.auto_collect_limit = Number(byId("datasetAutoCollectLimit").value) || 1000;
     try {
@@ -707,11 +768,10 @@
   }
 
   function detectionBoxMarkup(box, index, draft = false) {
-    const label = escapeHtml(box.label || `目标 ${index + 1}`);
     const selected = !draft && index === state.annotation.selectedBoxIndex;
     const color = draft ? "#f79009" : annotationColor(box.label);
     const handles = selected ? annotationBoxHandles(box, index) : "";
-    return `<g class="annotation-svg-object" data-box-index="${index}" style="--annotation-color:${color}"><rect class="annotation-svg-box ${draft ? "annotation-svg-draft" : ""} ${box.autoGenerated ? "ai-candidate" : ""} ${selected ? "selected" : ""}" data-box-index="${index}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}"></rect><text class="annotation-svg-label" x="${Math.min(box.x + 0.006, .92)}" y="${Math.max(box.y + 0.03, .035)}">${label}</text>${handles}</g>`;
+    return `<g class="annotation-svg-object" data-box-index="${index}" style="--annotation-color:${color}"><rect class="annotation-svg-box ${draft ? "annotation-svg-draft" : ""} ${box.autoGenerated ? "ai-candidate" : ""} ${selected ? "selected" : ""}" data-box-index="${index}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}"></rect>${handles}</g>`;
   }
 
   function renderDetectionCanvas() {
@@ -1151,7 +1211,11 @@
     });
     byId("reloadDatasets").addEventListener("click", () => loadData().catch((error) => notify(error.message, "danger")));
     byId("datasetSearch").addEventListener("input", renderList);
+    byId("datasetCollectionScope").addEventListener("change", syncDatasetCollectionMode);
     byId("datasetCollectionScenario").addEventListener("change", (event) => {
+      byId("datasetAutoCollectEnabled").checked = Boolean(event.target.value);
+    });
+    byId("datasetCollectionRecipe").addEventListener("change", (event) => {
       byId("datasetAutoCollectEnabled").checked = Boolean(event.target.value);
     });
     byId("datasetList").addEventListener("click", (event) => {
@@ -1317,6 +1381,7 @@
       else if (removeButton) removeItem(removeButton.dataset.itemRemove);
     });
     syncDatasetCreateMode();
-    Promise.all([loadData(false), loadPublishedScenarios(), loadPublishedVisionModels()]).catch((error) => notify(error.message, "danger"));
+    syncDatasetCollectionMode();
+    Promise.all([loadData(false), loadPublishedScenarios(), loadPublishedRecipes(), loadPublishedVisionModels()]).catch((error) => notify(error.message, "danger"));
   });
 })();

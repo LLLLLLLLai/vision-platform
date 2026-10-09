@@ -178,6 +178,12 @@ class Dataset(TimestampMixin, Base):
     collection_scenario_version_id: Mapped[int | None] = mapped_column(
         ForeignKey("inspection_scenario_versions.id"), nullable=True, index=True
     )
+    collection_scope: Mapped[str] = mapped_column(
+        String(30), default="ROI", server_default="ROI", index=True
+    )
+    collection_recipe_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipes.id"), nullable=True, index=True
+    )
     auto_collect_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_collect_limit: Mapped[int] = mapped_column(Integer, default=1000)
     revision: Mapped[int] = mapped_column(Integer, default=1)

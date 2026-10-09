@@ -313,7 +313,7 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `name` | `VARCHAR(200)` | 否 | - | - |
 | `version` | `VARCHAR(50)` | 否 | - | 应用默认值 |
 | `status` | `VARCHAR(30)` | 否 | INDEX | 应用默认值 |
-| `execution_mode` | `VARCHAR(30)` | 否 | INDEX | `'INSPECT'` |
+| `execution_mode` | `VARCHAR(30)` | 否 | INDEX | INSPECT |
 | `skip_reason` | `VARCHAR(500)` | 是 | - | - |
 | `project_name` | `VARCHAR(200)` | 是 | - | - |
 | `product_id` | `INTEGER` | 否 | FK → products.id | - |
@@ -369,6 +369,8 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `annotation_type` | `VARCHAR(30)` | 否 | - | 应用默认值 |
 | `label_schema_json` | `JSON` | 否 | - | 应用默认值 |
 | `collection_scenario_version_id` | `INTEGER` | 是 | INDEX；FK → inspection_scenario_versions.id | - |
+| `collection_scope` | `VARCHAR(30)` | 否 | INDEX | ROI |
+| `collection_recipe_id` | `INTEGER` | 是 | INDEX；FK → recipes.id | - |
 | `auto_collect_enabled` | `BOOL` | 否 | - | 应用默认值 |
 | `auto_collect_limit` | `INTEGER` | 否 | - | 应用默认值 |
 | `revision` | `INTEGER` | 否 | - | 应用默认值 |
@@ -377,7 +379,7 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `updated_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `is_deleted` | `BOOL` | 否 | - | 应用默认值 |
 
-索引：`ix_datasets_code` (code)；`ix_datasets_collection_scenario_version_id` (collection_scenario_version_id)；`ix_datasets_purpose` (purpose)
+索引：`ix_datasets_code` (code)；`ix_datasets_collection_recipe_id` (collection_recipe_id)；`ix_datasets_collection_scenario_version_id` (collection_scenario_version_id)；`ix_datasets_collection_scope` (collection_scope)；`ix_datasets_purpose` (purpose)
 
 ## `detection_tasks`
 

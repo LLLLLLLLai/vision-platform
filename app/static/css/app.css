@@ -1574,12 +1574,14 @@ button, input, select { font: inherit; }
   inset: 0 auto auto 0;
   transform-origin: 0 0;
   will-change: transform;
+  image-rendering: auto;
 }
 
 .visual-canvas img {
   display: block;
   max-width: none;
   max-height: none;
+  image-rendering: auto;
   user-select: none;
   pointer-events: none;
 }

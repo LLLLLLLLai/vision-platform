@@ -48,6 +48,28 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
         ):
             self.assertIn(implementation_marker, script)
 
+    def test_annotation_canvas_uses_color_frames_and_keeps_names_in_object_list(self) -> None:
+        template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="detectionAnnotationList"', template)
+        self.assertIn("annotationColor(box.label)", script)
+        self.assertIn("已标注对象", template)
+        self.assertNotIn('class="annotation-svg-label"', script)
+
+    def test_recipe_canvas_keeps_native_resolution_for_zoom(self) -> None:
+        script = (PROJECT_ROOT / "app" / "static" / "js" / "workspace.js").read_text(encoding="utf-8")
+
+        for implementation_marker in (
+            "fitScale: 1",
+            "const sourceWidth = baseImage.naturalWidth",
+            "canvas.width = sourceWidth",
+            "const renderedScale = Math.max(0.01, (view.fitScale || 1) * view.scale)",
+            "function canvasVisualUnit()",
+            "state.imageView.maxScale = Math.max(1, Math.min(6, 1 / fitScale));",
+        ):
+            self.assertIn(implementation_marker, script)
+
     def test_dataset_supports_offline_yolo_label_package_import(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
@@ -56,6 +78,26 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
         self.assertIn('id="offlineYoloArchive"', template)
         self.assertIn("function importOfflineYoloArchive()", script)
         self.assertIn("/imports/yolo", script)
+
+    def test_dataset_supports_separate_roi_and_camera_original_collection(self) -> None:
+        template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
+
+        for element_id in (
+            "datasetCollectionScope",
+            "datasetCollectionScenarioField",
+            "datasetCollectionRecipeField",
+            "datasetCollectionRecipe",
+        ):
+            self.assertIn(f'id="{element_id}"', template)
+        for marker in (
+            "AUTO_ORIGINAL",
+            "function loadPublishedRecipes()",
+            "function syncDatasetCollectionMode()",
+            "collection_recipe_id",
+            "相机原图采集",
+        ):
+            self.assertIn(marker, script)
 
     def test_annotation_workspace_exposes_safe_ai_preannotation(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")

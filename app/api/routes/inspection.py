@@ -38,6 +38,9 @@ from app.models.intelligence import (
 from app.models.recipe import Recipe, RegionOfInterest
 from app.models.system import Product, Station
 from app.services.image_processing import crop_roi
+from app.services.dataset_collection_service import (
+    try_collect_original_image_for_matching_datasets,
+)
 from app.services.inspection_engine import InspectionEngine, load_recipe_for_execution
 from app.services.smb_storage import SmbStorage, SmbStorageError
 
@@ -1045,6 +1048,30 @@ async def execute_filename_routed_inspection(
             }
             continue
         result = outcome["result"]
+        task_id = result.get("task_id")
+        collected_original_ids: list[int] = []
+        if task_id:
+            for image_index, (local_path, source_path) in enumerate(
+                zip(group["local_paths"], group["source_paths"]),
+                start=1,
+            ):
+                collected_original_ids.extend(
+                    try_collect_original_image_for_matching_datasets(
+                        database=database,
+                        recipe_id=int(group["recipe"].id),
+                        detection_task_id=int(task_id),
+                        image_index=image_index,
+                        source="PRODUCTION",
+                        image_path=str(local_path),
+                        source_image_path=str(source_path),
+                        inspection_result=str(result.get("result") or "ERROR"),
+                    )
+                )
+        if collected_original_ids:
+            database.commit()
+            result["collected_original_dataset_item_ids"] = collected_original_ids
+            for image_result in result.get("image_results") or []:
+                image_result["collected_original_dataset_item_ids"] = collected_original_ids
         result_image_paths = list(result.get("image_paths") or [])
         result_paths_by_source_index[source_index] = str(
             result_image_paths[0] if result_image_paths else source_path

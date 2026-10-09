@@ -325,6 +325,7 @@ class InspectionEngine:
             "code": 0,
             "message": "success",
             "request_id": request_id,
+            "task_id": task.id,
             "sn": sn,
             "result": overall_status,
             "recipe_code": recipe.code,

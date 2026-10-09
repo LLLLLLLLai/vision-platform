@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import Index, inspect, select, text
 
 from app.core.config import PROJECT_ROOT, settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.recipe import RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceObjectType
+from app.models.intelligence import Dataset
 
 
 DEFAULT_REFERENCE_OBJECT_TYPES = (
@@ -115,6 +116,8 @@ def _upgrade_sqlite_schema() -> None:
         dataset_additions = {
             "label_schema_json": "JSON NOT NULL DEFAULT '[]'",
             "collection_scenario_version_id": "INTEGER",
+            "collection_scope": "VARCHAR(30) NOT NULL DEFAULT 'ROI'",
+            "collection_recipe_id": "INTEGER",
             "auto_collect_enabled": "BOOLEAN NOT NULL DEFAULT 0",
             "auto_collect_limit": "INTEGER NOT NULL DEFAULT 1000",
         }
@@ -132,6 +135,13 @@ def _upgrade_sqlite_schema() -> None:
                     "CREATE INDEX IF NOT EXISTS "
                     "ix_datasets_collection_scenario_version_id "
                     "ON datasets (collection_scenario_version_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_datasets_collection_recipe_id "
+                    "ON datasets (collection_recipe_id)"
                 )
             )
 
@@ -214,6 +224,30 @@ def _upgrade_sqlite_schema() -> None:
         )
 
 
+def _upgrade_dataset_collection_schema() -> None:
+    inspector = inspect(engine)
+    if "datasets" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("datasets")}
+    additions = {
+        "collection_scope": "VARCHAR(30) NOT NULL DEFAULT 'ROI'",
+        "collection_recipe_id": "INTEGER",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in additions.items():
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE datasets "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
+                )
+    Index(
+        "ix_datasets_collection_recipe_id",
+        Dataset.__table__.c.collection_recipe_id,
+    ).create(bind=engine, checkfirst=True)
+
+
 def init_database() -> None:
     for directory in (
         "data",
@@ -230,6 +264,7 @@ def init_database() -> None:
     embedding_root.mkdir(parents=True, exist_ok=True)
 
     _upgrade_sqlite_schema()
+    _upgrade_dataset_collection_schema()
     Base.metadata.create_all(bind=engine)
     _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()

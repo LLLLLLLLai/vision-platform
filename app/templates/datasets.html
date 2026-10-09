@@ -57,7 +57,7 @@
       </section>
 
       <section class="dataset-collection-card">
-        <div class="section-heading"><div><strong>自动采集 ROI</strong><small>关联场景的生产素材。</small></div></div>
+        <div class="section-heading"><div><strong>生产素材自动采集</strong><small>可采集检测后的 ROI 局部图，或按工艺配方采集完整相机原图。</small></div></div>
         <div class="dataset-collection-summary" id="datasetCollectionSummary"></div>
       </section>
 
@@ -80,8 +80,10 @@
           <div class="dataset-create-hint" id="datasetCreateHint"></div>
           <label id="annotationTypeField"><span>训练标注方式</span><select class="form-select" id="datasetAnnotationType" name="annotation_type"><option value="DETECTION">目标检测（画检测框）</option><option value="SEGMENTATION">目标分割（轮廓标注）</option><option value="CLASSIFICATION">图片分类</option><option value="NONE">无需标注</option></select></label>
           <label><span>初始类别（可选）</span><input class="form-control" id="datasetInitialLabels" placeholder="用英文逗号分隔，例如 harness, connector"></label>
-          <label class="dataset-collection-create"><span>自动采集关联场景（可选）</span><select class="form-select" id="datasetCollectionScenario"><option value="">不自动采集</option></select><small>仅可选择已发布场景；生产 ROI 会进入本数据集，后续仍需标注。</small></label>
-          <label class="dataset-collection-toggle"><input id="datasetAutoCollectEnabled" type="checkbox"><span>启用自动采集 ROI</span></label>
+          <label class="dataset-collection-create"><span>自动采集来源</span><select class="form-select" id="datasetCollectionScope"><option value="ROI">检测区域（ROI）</option><option value="ORIGINAL">相机原图</option></select><small id="datasetCollectionScopeHint">关联已发布场景后，生产检测的 ROI 局部图会进入本数据集。</small></label>
+          <label class="dataset-collection-create" id="datasetCollectionScenarioField"><span>关联已发布场景</span><select class="form-select" id="datasetCollectionScenario"><option value="">请选择场景</option></select><small>同一场景执行的每个 ROI 会独立采集，后续仍需标注。</small></label>
+          <label class="dataset-collection-create" id="datasetCollectionRecipeField" hidden><span>关联已发布工艺配方</span><select class="form-select" id="datasetCollectionRecipe"><option value="">请选择工艺配方</option></select><small>同一配方的整张相机原图按内容去重采集，不与 ROI 局部图混放。</small></label>
+          <label class="dataset-collection-toggle"><input id="datasetAutoCollectEnabled" type="checkbox"><span id="datasetAutoCollectEnabledLabel">启用自动采集 ROI</span></label>
           <label class="dataset-collection-limit"><span>最多采集数量</span><input class="form-control" id="datasetAutoCollectLimit" type="number" min="1" max="100000" value="1000"></label>
           <label><span>用途说明</span><textarea class="form-control" name="description" rows="3"></textarea></label>
         </form>

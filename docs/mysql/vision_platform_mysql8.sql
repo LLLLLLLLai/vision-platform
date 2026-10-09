@@ -310,6 +310,8 @@ CREATE TABLE datasets (
 	annotation_type VARCHAR(30) NOT NULL,
 	label_schema_json JSON NOT NULL,
 	collection_scenario_version_id INTEGER,
+	collection_scope VARCHAR(30) NOT NULL DEFAULT 'ROI',
+	collection_recipe_id INTEGER,
 	auto_collect_enabled BOOL NOT NULL,
 	auto_collect_limit INTEGER NOT NULL,
 	revision INTEGER NOT NULL,
@@ -318,10 +320,13 @@ CREATE TABLE datasets (
 	updated_at DATETIME NOT NULL,
 	is_deleted BOOL NOT NULL,
 	CONSTRAINT pk_datasets PRIMARY KEY (id),
-	CONSTRAINT fk_datasets_collection_scenario_version_id_inspection_sc_f0cf FOREIGN KEY(collection_scenario_version_id) REFERENCES inspection_scenario_versions (id)
+	CONSTRAINT fk_datasets_collection_scenario_version_id_inspection_sc_f0cf FOREIGN KEY(collection_scenario_version_id) REFERENCES inspection_scenario_versions (id),
+	CONSTRAINT fk_datasets_collection_recipe_id_recipes FOREIGN KEY(collection_recipe_id) REFERENCES recipes (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE UNIQUE INDEX ix_datasets_code ON datasets (code);
+CREATE INDEX ix_datasets_collection_recipe_id ON datasets (collection_recipe_id);
 CREATE INDEX ix_datasets_collection_scenario_version_id ON datasets (collection_scenario_version_id);
+CREATE INDEX ix_datasets_collection_scope ON datasets (collection_scope);
 CREATE INDEX ix_datasets_purpose ON datasets (purpose);
 
 -- detection_tasks: 一次工艺配方检测任务的总记录。

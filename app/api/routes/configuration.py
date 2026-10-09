@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import PROJECT_ROOT
 from app.db.session import get_db
 from app.models.inspection import InspectionItem
-from app.models.intelligence import InspectionScenarioVersion, RoiScenarioBinding
+from app.models.intelligence import Dataset, InspectionScenarioVersion, RoiScenarioBinding
 from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObjectType
 from app.models.system import Product, Station
@@ -1579,6 +1579,10 @@ def publish_recipe(
     ) + 1
     recipe.version_no = next_version_no
     recipe.version = f"V{next_version_no}"
+    database.query(Dataset).filter(
+        Dataset.collection_scope == "ORIGINAL",
+        Dataset.collection_recipe_id.in_([item.id for item in all_family_versions]),
+    ).update({"collection_recipe_id": recipe.id}, synchronize_session=False)
     if recipe.execution_mode != "PASS_THROUGH":
         sync_recipe_world_model(database, recipe)
     recipe.status = "PUBLISHED"
