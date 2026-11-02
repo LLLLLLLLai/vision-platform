@@ -116,11 +116,28 @@ Copy-Item .env.example .env
 Linux：
 
 ```bash
+# 方案一：项目 .venv（优先使用）
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
+chmod +x start.sh stop.sh
 ./start.sh
+# 需要停止服务时再执行
+./stop.sh
 ```
+
+如果项目没有 `.venv/bin/python`，可复用 Conda 环境：
+
+```bash
+conda activate vision-platform
+python -m pip install -r requirements.txt
+test -f .env || cp .env.example .env
+chmod +x start.sh stop.sh
+./start.sh
+# 需要停止服务时再执行 ./stop.sh
+```
+
+非交互式终端可先设置 `VISION_CONDA_PREFIX=/opt/miniconda3/envs/vision-platform`。脚本启动前初始化数据库，后台运行服务，PID 和日志分别保存在 `logs/platform.pid`、`logs/platform.log`；重复启动不会创建第二个进程，`stop.sh` 只停止该 PID 对应的本项目进程。若 `.venv` 存在，它始终优先于 Conda。拆分为控制端和检测端的生产部署仍建议使用 `deploy/application-server/` 中的 systemd 单元；这两个脚本只管理当前项目的一份服务进程，不启动外部 VLM 或 YOLO 服务。
 
 访问地址：
 

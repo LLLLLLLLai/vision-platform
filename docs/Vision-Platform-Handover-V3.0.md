@@ -337,11 +337,13 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
-chmod +x start.sh
+chmod +x start.sh stop.sh
 ./start.sh
+# 需要停止服务时再执行
+./stop.sh
 ```
 
-直接运行时，`start.sh` 会先初始化数据库再启动 Uvicorn。正式生产不要使用 `APP_DEBUG=true`；应由 systemd 或容器负责重启、日志轮转、权限和健康检查。
+`start.sh` 优先使用项目 `.venv/bin/python`；不存在时使用当前激活的 Conda 环境 `$CONDA_PREFIX/bin/python`，或通过 `VISION_CONDA_PREFIX` 指定 Conda 环境目录。请先在选中的环境内安装项目依赖。脚本先初始化数据库，再后台启动 Uvicorn；`stop.sh` 读取 `logs/platform.pid`，验证进程归属后发送优雅停止信号。启动日志在 `logs/platform.log`；健康检查地址由 `.env` 中的 `APP_PORT` 决定。两个脚本只管理一个单体进程，不负责外部 VLM/YOLO 服务；拆分部署仍使用 systemd 单元，并按实际 Conda 路径调整其 `ExecStart`。正式生产不要使用 `APP_DEBUG=true`；应由 systemd 或容器负责重启、日志轮转、权限和健康检查。
 
 ### 6.3 VLM 与 YOLO 运行方式
 
