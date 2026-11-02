@@ -1,0 +1,17 @@
+# CUDA-enabled PyTorch runtime.  Keep this image tag aligned with the NVIDIA
+# driver installed on the 160 GPU server.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /srv/vision-platform
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    YOLO_CONFIG_DIR=/tmp/ultralytics
+
+COPY deploy/model-server/requirements.yolo.txt /tmp/requirements.yolo.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.yolo.txt
+
+# Only the inference adapter and its configuration are needed at runtime.
+COPY app /srv/vision-platform/app
+
+EXPOSE 8091
+CMD ["python", "-m", "uvicorn", "app.inference_server.main:app", "--host", "0.0.0.0", "--port", "8091"]

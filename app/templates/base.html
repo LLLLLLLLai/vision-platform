@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link href="{{ url_for('static', path='/vendor/bootstrap/5.3.7/css/bootstrap.min.css') }}" rel="stylesheet">
+  <link href="{{ url_for('static', path='/css/app.css') }}?v=20261008-02" rel="stylesheet">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="app-sidebar" aria-label="系统导航">
+      <a class="brand-lockup" href="/recipes/library" aria-label="进入工艺配方库">
+        <span class="brand-mark">V</span>
+        <span class="brand-copy">
+          <strong>{{ app_name }}</strong>
+          <small>工业视觉检测平台</small>
+        </span>
+      </a>
+
+      <nav class="sidebar-navigation">
+        {% block sidebar_navigation %}
+        {% include "sidebar_navigation.html" %}
+        {% endblock %}
+      </nav>
+
+      <div class="sidebar-footer">
+        <span class="sidebar-footer-dot"></span>
+        <span class="sidebar-footer-copy">本地服务</span>
+      </div>
+    </aside>
+
+    <div class="app-page">
+      <main class="app-main">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  <script src="{{ url_for('static', path='/vendor/bootstrap/5.3.7/js/bootstrap.bundle.min.js') }}"></script>
+  <script src="{{ url_for('static', path='/js/app.js') }}"></script>
+</body>
+</html>

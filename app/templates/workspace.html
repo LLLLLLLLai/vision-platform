@@ -1,0 +1,392 @@
+{% extends "base.html" %}
+
+{% block title %}视觉配置中心 · {{ app_name }}{% endblock %}
+
+{% block sidebar_navigation %}
+{% include "sidebar_navigation.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="workspace-shell" data-active-workspace-view="{{ active_workspace_view | default('libraryView') }}">
+  <header class="workspace-hero">
+    <div>
+      <div class="eyebrow">PRODUCT WORLD MODEL</div>
+      <h1>{{ workspace_page_title | default('产品世界模型与检测配方') }}</h1>
+      <p>{{ workspace_page_description | default('把产品对象、相机视图、ROI、检测能力和质量规则组织成可复用的数字产品地图。') }}</p>
+    </div>
+    <div class="hero-actions"><a class="btn btn-light" href="/docs">接口文档</a></div>
+  </header>
+
+  <div id="workspaceAlert"></div>
+
+  <section class="workspace-view {% if active_workspace_view == 'editorView' %}active{% endif %}" id="editorView">
+    <section class="recipe-composer">
+      <div class="composer-title">
+        <div>
+          <span class="step-number">01</span>
+          <div><strong>规则配方命名</strong><small>项目只用于查看；配方编码由拉线、物料、工序、相机和拍照次数自动生成</small></div>
+        </div>
+        <div class="composer-actions">
+          <span class="recipe-editor-mode-hint" id="recipeEditorModeHint" hidden>只读详情</span>
+          <button class="btn btn-outline-secondary" type="button" id="backToRecipeLibrary">返回工艺配方库</button>
+          <button class="btn save-recipe-button" type="button" id="saveRecipe">保存草稿</button>
+          <button class="btn btn-primary" type="button" id="publishRecipe">发布配方</button>
+        </div>
+      </div>
+
+      <form id="recipeForm" class="recipe-fields">
+        <label><span>项目</span><input class="form-control recipe-name-source" name="project_name" placeholder="例如：储能柜项目"></label>
+        <label><span>拉线</span><input class="form-control recipe-name-source" name="line_code" placeholder="LINE01" required></label>
+        <label><span>物料</span><input class="form-control recipe-name-source" name="material_code" placeholder="PDU001" required></label>
+        <label><span>工序</span><input class="form-control recipe-name-source" name="process_code" placeholder="OP20" required></label>
+        <label><span>相机</span><input class="form-control recipe-name-source" name="camera_code" placeholder="CAM01" required></label>
+        <label><span>第几次拍照</span><input class="form-control recipe-name-source" name="capture_index" type="number" value="1" min="1" required></label>
+        <label><span>执行方式</span><select class="form-select" name="execution_mode" id="recipeExecutionMode"><option value="INSPECT">ROI 检测</option><option value="PASS_THROUGH">无需检测，原图透传</option></select></label>
+        <label id="recipeSkipReasonField" hidden><span>透传原因</span><input class="form-control" name="skip_reason" placeholder="例如：该相机仅留存图片，不参与质检"></label>
+        <label><span>版本</span><input class="form-control" name="version" value="草稿（首次发布 V1）" readonly></label>
+      </form>
+
+      <div class="generated-recipe-row">
+        <div>
+          <small>自动生成的规则配置名称</small>
+          <strong id="generatedRecipeName">请填写上方配方信息</strong>
+        </div>
+        <div id="recipeStatus" class="status-pill draft"><span class="status-dot draft"></span>未保存</div>
+      </div>
+    </section>
+
+    <section class="alert alert-info mt-3" id="passThroughRecipeNotice" hidden>
+      <strong>当前为无需检测配方。</strong>
+      <span id="passThroughRecipeReason"></span>
+      该相机图片会按配方匹配后直接原图返回，不会下载 SMB 文件、裁剪 ROI 或调用模型服务。
+    </section>
+
+    <section class="configuration-workbench">
+      <div class="image-config-column">
+        <div class="workbench-heading">
+          <div>
+            <span class="step-number">02</span>
+            <div><strong>上传图片并配置检测区域</strong><small>选择绘制模式后，按住 Ctrl 从起点拖动鼠标绘制 ROI 或图像定位特征点；单击不会创建框。特征点须来自与生产图片同一相机、同一完整视野的基准图</small></div>
+          </div>
+          <div class="canvas-actions">
+            <div class="btn-group" role="group" aria-label="绘制模式">
+              <button class="btn btn-outline-primary active" type="button" id="selectRoiDrawMode" disabled>绘制 ROI</button>
+              <button class="btn btn-outline-success" type="button" id="selectFeatureAnchorDrawMode" disabled>绘制特征点</button>
+            </div>
+            <label class="upload-button" id="baseImageUploadLabel">
+              <input type="file" id="baseImageInput" accept="image/*" hidden>
+              上传 / 更换图片
+            </label>
+          </div>
+        </div>
+
+        <div class="visual-canvas" id="imageStage">
+          <div class="upload-empty" id="emptyStage">
+            <div class="upload-illustration">↑</div>
+            <h3>上传产品检测图片</h3>
+            <p>填写配方信息后上传图片。上传完成后，选择绘制 ROI 或绘制特征点，再按住 Ctrl 拖动鼠标画框。</p>
+            <label class="btn btn-primary btn-lg" id="emptyImageUploadLabel">
+              <input type="file" id="emptyImageInput" accept="image/*" hidden>
+              选择图片
+            </label>
+          </div>
+          <div class="image-transform-surface" id="imageTransformSurface" hidden>
+            <img id="baseImage" alt="规则配置图片" draggable="false">
+            <canvas id="roiCanvas"></canvas>
+          </div>
+          <div class="image-navigation-hint" id="imageNavigationHint" hidden>按住鼠标拖动图片 · Ctrl + 左键拖动画框 · Ctrl + 滚轮缩放 · 双击恢复</div>
+        </div>
+
+      </div>
+
+      <aside class="rule-config-column">
+        <div class="workbench-heading">
+          <div>
+            <span class="step-number">03</span>
+            <div><strong>已配置规则明细</strong><small>选择检测区域进行编辑、查看规则或删除</small></div>
+          </div>
+        </div>
+        <div class="feature-anchor-status" id="featureAnchorStatus"></div>
+        <div id="configuredObjectList" class="configured-object-list"></div>
+      </aside>
+    </section>
+  </section>
+
+  <div class="modal fade" id="objectConfigModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content object-config-modal">
+        <div class="modal-header">
+          <div>
+            <small>检测区域配置</small>
+            <h2 class="modal-title" id="selectedObjectTitle">检测物体</h2>
+          </div>
+          <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-info object-config-readonly-hint" id="objectConfigReadOnlyHint" hidden>当前为只读详情，仅可查看 ROI、特征点、关联场景和校验值。</div>
+          <section class="roi-information">
+            <div class="roi-information-heading">
+              <div><strong>检测区域</strong><small>区域位置和大小可在图片中按住 Ctrl 拖动或调整</small></div>
+              <span class="auto-save-label">坐标自动保存</span>
+            </div>
+            <div class="roi-information-layout">
+              <div class="roi-reference-panel">
+                <span>标准参考图</span>
+                <div class="roi-reference-preview">
+                  <img id="roiReferenceImage" alt="当前 ROI 标准参考图">
+                  <div id="roiReferenceEmpty">根据当前坐标自动截取 ROI 区域</div>
+                </div>
+                <small>由当前配方基准图片按 ROI 坐标裁剪，仅用于前台对比。</small>
+              </div>
+              <div class="roi-information-grid">
+                <label class="roi-scenario-binding-field"><span>检测场景</span>
+                  <select class="form-select" id="roiScenarioVersion">
+                    <option value="">请选择已发布场景</option>
+                  </select>
+                  <small id="roiScenarioBindingHint">只能选择已发布的 VLM 或流程检测场景。</small>
+                </label>
+                <section class="roi-scenario-inputs-field">
+                  <div class="roi-scenario-inputs-heading"><span>场景字段与校验值</span><button class="btn btn-sm btn-outline-primary" id="addRoiScenarioInput" type="button">＋ 添加字段</button></div>
+                  <div id="roiScenarioInputRows" class="roi-scenario-input-rows"></div>
+                  <small id="roiScenarioInputHint">图片字段由系统自动传入；可为场景声明的多个业务字段分别配置校验值。</small>
+                </section>
+                <label><span>X 点位</span><input class="form-control" id="roiPointX" readonly></label>
+                <label><span>Y 点位</span><input class="form-control" id="roiPointY" readonly></label>
+                <label><span>区域宽度</span><input class="form-control" id="roiPointWidth" readonly></label>
+                <label><span>区域高度</span><input class="form-control" id="roiPointHeight" readonly></label>
+              </div>
+            </div>
+          </section>
+
+          <section class="rules-section modal-rules-section">
+            <div class="rules-section-heading">
+              <div><strong>场景调用配置</strong><small>场景提示词或流程开始节点可使用 <code>{% raw %}{{ input.字段名 }}{% endraw %}</code>，运行时会替换为这里的校验值。</small></div>
+            </div>
+            <div class="modal-save-bar">
+              <div>
+                <span>ROI 不再单独配置模型或复核模型，执行逻辑全部由关联场景管理。</span>
+                <strong id="roiRuleStatus" class="roi-rule-status" aria-live="polite"></strong>
+              </div>
+              <div class="modal-save-actions">
+                <button class="btn btn-outline-primary" type="button" id="testRoiRules">测试当前 ROI</button>
+                <button class="btn btn-primary" type="button" id="saveRoiRules">保存场景关联</button>
+              </div>
+            </div>
+            <section class="roi-inline-test-panel" id="roiInlineTestPanel" hidden aria-live="polite">
+              <div class="roi-inline-test-heading">
+                <div>
+                  <small>当前 ROI 即时测试</small>
+                  <strong id="roiInlineTestTitle">等待测试</strong>
+                  <span id="roiInlineTestSummary">测试不会保存规则，也不会离开当前配置页面。</span>
+                </div>
+                <span class="result-badge waiting" id="roiInlineTestBadge">WAITING</span>
+              </div>
+              <div class="roi-inline-test-overview" id="roiInlineTestOverview"></div>
+              <div class="roi-inline-test-body">
+                <div class="roi-inline-test-preview">
+                  <div class="roi-test-image-comparison">
+                    <figure>
+                      <figcaption>标准 ROI 图</figcaption>
+                      <img id="roiInlineReferenceImage" alt="标准 ROI 图">
+                      <div class="comparison-image-empty" id="roiInlineReferenceEmpty">当前区域还没有标准图</div>
+                    </figure>
+                    <figure>
+                      <figcaption>实测 ROI 图</figcaption>
+                      <img id="roiInlineTestImage" alt="实测 ROI 图">
+                    </figure>
+                  </div>
+                </div>
+                <div class="roi-inline-rule-results" id="roiInlineRuleResults"></div>
+              </div>
+            </section>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="workspace-view {% if active_workspace_view == 'libraryView' %}active{% endif %}" id="libraryView">
+    <div class="library-toolbar">
+      <div>
+        <span class="step-number">⌕</span>
+        <div><strong>工艺配方库</strong><small>选择规则配方进行测试，或重新打开编辑修改</small></div>
+      </div>
+      <div class="library-toolbar-actions">
+        <div class="library-search"><input id="librarySearch" class="form-control" placeholder="搜索配方名称、编码或业务字段"></div>
+        <button class="btn btn-primary" type="button" id="newRecipeFromLibrary">创建工艺配方</button>
+      </div>
+    </div>
+    <div class="library-filter-bar">
+      <select class="form-select" id="libraryStatusFilter"><option value="">全部状态</option><option value="PUBLISHED">已发布</option><option value="SAVED">已保存</option><option value="DRAFT">草稿</option></select>
+      <select class="form-select" id="libraryLineFilter"><option value="">全部拉线</option></select>
+      <select class="form-select" id="libraryMaterialFilter"><option value="">全部物料</option></select>
+      <select class="form-select" id="libraryProcessFilter"><option value="">全部工序</option></select>
+      <select class="form-select" id="libraryCameraFilter"><option value="">全部相机</option></select>
+      <select class="form-select" id="librarySort"><option value="UPDATED_DESC">最近更新</option><option value="NAME_ASC">名称升序</option><option value="MATERIAL_ASC">物料升序</option></select>
+      <button class="btn btn-outline-secondary" type="button" id="clearLibraryFilters">清除筛选</button>
+    </div>
+    <div class="library-results-meta" id="libraryResultsMeta"></div>
+    <div class="recipe-library-table-wrap">
+      <table class="recipe-library-table">
+        <thead><tr><th>项目</th><th>配方名称 / 编码</th><th>拉线</th><th>物料</th><th>工序</th><th>相机 / 拍照</th><th>执行方式</th><th>ROI</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="configurationLibrary"></tbody>
+      </table>
+    </div>
+    <div class="library-pagination" id="libraryPagination"></div>
+  </section>
+
+  <div class="modal fade" id="createRecipeModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <form class="modal-content" id="createRecipeForm">
+        <div class="modal-header"><div><small>工艺配方库</small><h2 class="modal-title">创建工艺配方</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+        <div class="modal-body stack-form">
+          <label><span>项目（仅展示）</span><input class="form-control" name="project_name" placeholder="例如：储能柜项目"></label>
+          <label><span>拉线</span><input class="form-control" name="line_code" placeholder="L04" required></label>
+          <label><span>物料号</span><input class="form-control" name="material_code" placeholder="CN000798" required></label>
+          <label><span>工序</span><input class="form-control" name="process_code" placeholder="AS15" required></label>
+          <label><span>相机</span><input class="form-control" name="camera_code" placeholder="CAMERA1" required></label>
+          <label><span>第几次拍照</span><input class="form-control" name="capture_index" type="number" min="1" value="1" required></label>
+          <label><span>执行方式</span><select class="form-select" name="execution_mode" id="createRecipeExecutionMode"><option value="INSPECT">ROI 检测</option><option value="PASS_THROUGH">无需检测，原图透传</option></select></label>
+          <label id="createRecipeSkipReasonField" hidden><span>透传原因</span><input class="form-control" name="skip_reason" placeholder="例如：该相机仅留存图片，不参与质检"></label>
+          <div class="dataset-create-code"><span>版本</span><strong>发布时自动递增</strong><small>保存仅保留草稿，生产检测始终使用已发布版本。</small></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit">创建并进入配置</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal fade" id="recipeHistoryModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content recipe-history-modal">
+        <div class="modal-header">
+          <div>
+            <small>工艺配方版本</small>
+            <h2 class="modal-title" id="recipeHistoryTitle">历史版本与回滚</h2>
+          </div>
+          <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body">
+          <p class="recipe-history-intro" id="recipeHistoryIntro">选择一个历史版本，系统会将其复制为新的待发布草稿；已经发布的生产版本不会被覆盖。</p>
+          <div id="recipeHistoryList" class="recipe-history-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="workspace-view {% if active_workspace_view == 'recordsView' %}active{% endif %}" id="recordsView">
+    <div class="detection-records-toolbar">
+      <div>
+        <span class="step-number">≡</span>
+        <div><strong>第三方检测调用记录</strong><small>记录接口参数、返回结果及每个 ROI 的主模型/VLM 处理明细</small></div>
+      </div>
+      <div class="record-filter-actions">
+        <input class="form-control" id="detectionRecordSnFilter" placeholder="按产品条码筛选">
+        <button class="btn btn-outline-primary" type="button" id="refreshDetectionRecords">查询 / 刷新</button>
+      </div>
+    </div>
+    <div class="detection-records-summary" id="detectionRecordsSummary"></div>
+    <div class="detection-records-table-wrap">
+      <table class="detection-records-table">
+        <thead>
+          <tr>
+            <th>调用时间</th>
+            <th>调用方 IP</th>
+            <th>产品条码</th>
+            <th>工序</th>
+            <th>接口状态</th>
+            <th>检测结果</th>
+            <th>模型处理</th>
+            <th>耗时</th>
+            <th>调用详情</th>
+          </tr>
+        </thead>
+        <tbody id="detectionRecordsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="modal fade" id="detectionRecordDetailModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content detection-record-detail-modal">
+        <div class="modal-header">
+          <div>
+            <small>生产检测追溯</small>
+            <h2 class="modal-title" id="detectionRecordDetailTitle">检测记录详情</h2>
+          </div>
+          <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body" id="detectionRecordDetailContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="workspace-view {% if active_workspace_view == 'reportsView' %}active{% endif %}" id="reportsView">
+    <div class="detection-records-toolbar">
+      <div>
+        <span class="step-number">▥</span>
+        <div><strong>生产场景统计报表</strong><small>按所选时间范围查看各场景的人工真值、漏判、误判、执行异常与耗时。</small></div>
+      </div>
+      <div class="record-filter-actions">
+        <input class="form-control" id="reportStartDate" type="date" aria-label="报表开始日期">
+        <span class="report-date-separator">至</span>
+        <input class="form-control" id="reportEndDate" type="date" aria-label="报表结束日期">
+        <button class="btn btn-outline-primary" type="button" id="refreshInspectionReports">刷新报表</button>
+      </div>
+    </div>
+    <div class="report-notice" id="inspectionReportNote"></div>
+    <div class="report-dimension-grid" id="inspectionReportDimensions"></div>
+  </section>
+
+  <section class="workspace-view" id="testView">
+    <div class="test-page-header">
+      <button class="btn btn-light" type="button" id="backToLibrary">← 返回工艺配方库</button>
+      <div>
+        <small>规则配方测试</small>
+        <h2 id="testRecipeName">-</h2>
+      </div>
+      <button class="btn btn-outline-primary" type="button" id="editTestRecipe">编辑此配方</button>
+    </div>
+
+    <div class="test-workbench">
+      <section class="test-image-column">
+        <div class="workbench-heading">
+          <div><strong>上传待检测图片</strong><small>执行后显示带 ROI 和 OK/NG 标记的结果图</small></div>
+        </div>
+        <label class="test-upload-stage" id="testUploadStage">
+          <input type="file" id="testFile" accept="image/*" hidden>
+          <span>↑</span>
+          <strong>选择检测后的产品图片</strong>
+          <small>支持 JPG、PNG、BMP、WEBP</small>
+        </label>
+        <div class="test-image-comparison" id="testImageComparison" hidden>
+          <figure>
+            <figcaption>配方标准图</figcaption>
+            <img id="testReferenceImage" class="test-preview-image" alt="配方标准图">
+            <div class="comparison-image-empty" id="testReferenceEmpty">当前配方还没有标准图</div>
+          </figure>
+          <figure>
+            <figcaption id="testActualImageLabel">实测图</figcaption>
+            <img id="testPreviewImage" class="test-preview-image" alt="实测图片">
+          </figure>
+        </div>
+        <button class="btn btn-primary btn-lg w-100 mt-3" type="button" id="runRecipeTest" disabled>开始执行全部规则</button>
+      </section>
+
+      <aside class="test-detail-column">
+        <div class="test-overview" id="testOverview">
+          <div><small>检测状态</small><strong>等待上传图片</strong></div>
+          <span class="result-badge pending">WAITING</span>
+        </div>
+        <div id="testObjectResults" class="test-object-results">
+          <div class="no-object-selected"><span>◎</span><strong>检测明细将在这里展示</strong><p>每个检测物体及其多条规则会分别显示结果。</p></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+</div>
+
+<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20261102-01"></script>
+{% endblock %}

@@ -1,0 +1,1243 @@
+import asyncio
+import re
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.core.config import PROJECT_ROOT, settings
+from app.models.inspection import DetectionItemResult, DetectionTask, InspectionItem
+from app.models.intelligence import (
+    AutomationJob,
+    InspectionScenarioVersion,
+    RoiScenarioBinding,
+)
+from app.models.recipe import Recipe, RecipeFeatureAnchor, RegionOfInterest
+from app.models.reference import ReferenceGroup
+from app.services.algorithm_client import AlgorithmServiceClient
+from app.services.image_processing import (
+    alignment_roi_offset_for_source,
+    align_image_with_anchor,
+    align_image_to_reference,
+    annotate_image,
+    color_ratio,
+    crop_roi,
+)
+from app.services.reference_embedding_service import (
+    load_reference_vectors,
+    rank_reference_vectors,
+)
+from app.services.scenario_runtime import scenario_runtime
+
+
+def similarity_review_band(
+    rule: dict[str, Any],
+    minimum: float,
+) -> tuple[float, float]:
+    lower = float(rule.get("vlm_review_lower", max(0.0, minimum - 0.05)))
+    upper = float(rule.get("vlm_review_upper", min(1.0, minimum + 0.03)))
+    return max(0.0, min(lower, upper)), min(1.0, max(lower, upper))
+
+
+def should_run_vlm_review(
+    score: float | None,
+    rule: dict[str, Any],
+    minimum: float,
+    force: bool = False,
+) -> bool:
+    if not bool(rule.get("vlm_review_enabled", False)):
+        return False
+    if force:
+        return True
+    if str(rule.get("vlm_review_mode", "LOW_CONFIDENCE")).upper() == "ALWAYS":
+        return True
+    if score is None:
+        return False
+    lower, upper = similarity_review_band(rule, minimum)
+    return lower <= score <= upper
+
+
+def vlm_review_status(
+    payload: dict[str, Any],
+    fallback: str,
+) -> tuple[str, dict[str, Any] | None]:
+    result = payload.get("result")
+    parsed = result.get("parsed") if isinstance(result, dict) else None
+    if not isinstance(parsed, dict):
+        return fallback, None
+    verdict = str(parsed.get("result", "UNCERTAIN")).upper()
+    if verdict in {"OK", "NG"}:
+        return verdict, parsed
+    return fallback, parsed
+
+
+class InspectionEngine:
+    def __init__(self) -> None:
+        self.algorithms = AlgorithmServiceClient()
+
+    async def execute(
+        self,
+        database: Session,
+        recipe: Recipe,
+        sn: str,
+        image_paths: list[str],
+        request_id: str | None = None,
+        force_vlm_review: bool = False,
+        roi_ids: set[int] | None = None,
+        artifact_root: str | Path | None = None,
+        roi_parallelism: int | None = None,
+        source_image_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if source_image_paths is not None and len(source_image_paths) != len(image_paths):
+            raise ValueError("原始图片路径数量必须与待检测图片数量一致。")
+        started = time.perf_counter()
+        request_id = request_id or uuid.uuid4().hex
+        task = DetectionTask(
+            request_id=request_id,
+            sn=sn,
+            recipe_id=recipe.id,
+            recipe_version=recipe.version,
+            original_image_paths=image_paths,
+        )
+        database.add(task)
+        database.commit()
+        database.refresh(task)
+        scenario_bindings = self._load_roi_scenario_bindings(database, recipe)
+        task_root = (
+            Path(artifact_root)
+            if artifact_root is not None
+            else Path(PROJECT_ROOT / "detection_results" / request_id)
+        )
+        result_url_prefix = self._result_url_prefix(task_root)
+        configured_roi_parallelism = max(
+            1,
+            int(roi_parallelism or settings.production_roi_parallelism),
+        )
+        result_image_paths: list[str] = []
+        image_results: list[dict[str, Any]] = []
+        overall_status = "OK"
+
+        try:
+            for image_index, image_path in enumerate(image_paths, start=1):
+                image_file = Path(image_path).expanduser().resolve()
+                if not image_file.is_file():
+                    raise FileNotFoundError(f"Image does not exist: {image_file}")
+                inspection_image = image_file
+                alignment_image_path: Path | None = None
+                roi_offset_x = 0.0
+                roi_offset_y = 0.0
+                alignment: dict[str, Any] = {
+                    "status": "DISABLED" if not settings.image_alignment_enabled else "NOT_CONFIGURED"
+                }
+                feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
+                legacy_anchor = next(
+                    (
+                        roi
+                        for roi in recipe.rois
+                        if roi.enabled and roi.alignment_anchor
+                    ),
+                    None,
+                )
+                anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
+                anchor_configured = anchor_roi is not None
+                if settings.image_alignment_enabled and recipe.base_image_path:
+                    base_image = Path(recipe.base_image_path).expanduser()
+                    if base_image.is_file():
+                        if anchor_roi is not None:
+                            aligned_path, alignment = align_image_with_anchor(
+                                str(image_file),
+                                str(base_image),
+                                anchor_roi,
+                                task_root / f"image_{image_index}" / "aligned_source.jpg",
+                                max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                                search_margin_ratio=settings.image_alignment_anchor_search_margin_ratio,
+                                minimum_inliers=settings.image_alignment_anchor_min_inliers,
+                                minimum_inlier_ratio=settings.image_alignment_anchor_min_inlier_ratio,
+                                maximum_rotation_degrees=settings.image_alignment_anchor_max_rotation_degrees,
+                                minimum_template_score=settings.image_alignment_anchor_min_template_score,
+                                minimum_template_margin=settings.image_alignment_anchor_min_template_margin,
+                            )
+                        else:
+                            aligned_path, alignment = align_image_to_reference(
+                                str(image_file),
+                                str(base_image),
+                                task_root / f"image_{image_index}" / "aligned_source.jpg",
+                                max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                                minimum_response=settings.image_alignment_min_response,
+                                max_dimension=settings.image_alignment_max_dimension,
+                            )
+                        if aligned_path is not None:
+                            alignment_image_path = aligned_path
+                            roi_offset_x, roi_offset_y = alignment_roi_offset_for_source(alignment)
+                            affine_aligned = alignment.get("source_to_reference_transform") is not None
+                            alignment["roi_correction"] = {
+                                "mode": "SOURCE_ROI_AFFINE" if affine_aligned else "SOURCE_ROI_OFFSET",
+                                "offset_x": round(roi_offset_x, 3),
+                                "offset_y": round(roi_offset_y, 3),
+                                "description": (
+                                    "已将参考图 ROI 映射到原图后裁剪"
+                                    if affine_aligned
+                                    else "已根据定位偏移在原图上移动 ROI 后裁剪"
+                                ),
+                            }
+                    else:
+                        alignment = {
+                            "status": "SKIPPED",
+                            "reason": "配方基准图不存在，保留原图检测",
+                        }
+                elif settings.image_alignment_enabled and anchor_configured:
+                    alignment = {
+                        "status": "SKIPPED",
+                        "reason": "已配置定位特征点但未配置可用的配方基准图",
+                    }
+
+                # A configured anchor is an explicit promise that every ROI
+                # must be registered before inference.  Continuing with the
+                # original coordinates after a failed registration turns a
+                # camera-position issue into a misleading product NG.
+                if (
+                    settings.image_alignment_enabled
+                    and anchor_configured
+                    and alignment.get("status") != "APPLIED"
+                ):
+                    alignment["status"] = "FAILED"
+                    alignment["crop_mode"] = "BLOCKED"
+                    alignment["reason"] = (
+                        f"{alignment.get('reason') or '定位特征点未能可靠匹配'}；"
+                        "已停止 ROI 裁剪，避免使用错误区域进行场景检测。"
+                    )
+                    result_path = task_root / f"result_{image_index}.jpg"
+                    annotate_image(str(image_file), [], result_path)
+                    result_image_paths.append(str(result_path))
+                    image_results.append(
+                        {
+                            "image_path": str(image_file),
+                            "inspection_image_path": str(image_file),
+                            "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                            "alignment": alignment,
+                            "result_image_path": str(result_path),
+                            "result": "ERROR",
+                            "inspection_items": [
+                                {
+                                    "roi_code": "IMAGE_ALIGNMENT",
+                                    "roi_name": "图像定位特征点",
+                                    "item_code": "IMAGE_ALIGNMENT_REQUIRED",
+                                    "item_name": "图像定位失败",
+                                    "inspection_type": "IMAGE_ALIGNMENT",
+                                    "capability": "FEATURE_ANCHOR",
+                                    "primary_model": "OpenCV 特征点定位",
+                                    "vlm_review_enabled": False,
+                                    "status": "ERROR",
+                                    "raw_status": "ERROR",
+                                    "actual": alignment,
+                                    "score": None,
+                                    "message": alignment["reason"],
+                                    "elapsed_ms": 0,
+                                }
+                            ],
+                        }
+                    )
+                    overall_status = "ERROR"
+                    continue
+                item_results: list[dict[str, Any]] = []
+                annotations: list[dict[str, Any]] = []
+                image_status = "OK"
+
+                roi_jobs: list[tuple[RegionOfInterest, Path, tuple[int, int, int, int]]] = []
+                for roi in sorted(recipe.rois, key=lambda value: value.sort_order):
+                    if not roi.enabled:
+                        continue
+                    if roi_ids is not None and roi.id not in roi_ids:
+                        continue
+                    roi_file = task_root / f"image_{image_index}" / f"{roi.code}.jpg"
+                    _, box = crop_roi(
+                        str(inspection_image),
+                        roi,
+                        roi_file,
+                        offset_x=roi_offset_x,
+                        offset_y=roi_offset_y,
+                        alignment=alignment,
+                    )
+                    roi_jobs.append((roi, roi_file, box))
+
+                roi_semaphore = asyncio.Semaphore(configured_roi_parallelism)
+
+                async def execute_roi_job(
+                    roi: RegionOfInterest,
+                    roi_file: Path,
+                    box: tuple[int, int, int, int],
+                ) -> dict[str, Any]:
+                    async with roi_semaphore:
+                        return await self._execute_roi(
+                            database,
+                            recipe,
+                            task,
+                            roi,
+                            roi_file,
+                            image_file,
+                            scenario_bindings,
+                            image_index=image_index,
+                            result_url_prefix=result_url_prefix,
+                            sn=sn,
+                            force_vlm_review=force_vlm_review,
+                            box=box,
+                            alignment=alignment,
+                            source_image_path=(
+                                source_image_paths[image_index - 1]
+                                if source_image_paths is not None
+                                else image_path
+                            ),
+                        )
+
+                roi_runs = await asyncio.gather(
+                    *(execute_roi_job(roi, roi_file, box) for roi, roi_file, box in roi_jobs)
+                )
+                for roi_run in roi_runs:
+                    roi_status = roi_run["status"]
+                    item_results.extend(roi_run["items"])
+                    annotations.append(roi_run["annotation"])
+                    if roi_status == "ERROR":
+                        overall_status = image_status = "ERROR"
+                    elif roi_status == "NG" and image_status != "ERROR":
+                        if overall_status != "ERROR":
+                            overall_status = "NG"
+                        image_status = "NG"
+
+                result_path = task_root / f"result_{image_index}.jpg"
+                annotate_image(str(inspection_image), annotations, result_path)
+                result_image_paths.append(str(result_path))
+                image_results.append(
+                    {
+                        "image_path": str(image_file),
+                        "inspection_image_path": str(inspection_image),
+                        "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                        "alignment": alignment,
+                        "result_image_path": str(result_path),
+                        "result": image_status,
+                        "inspection_items": item_results,
+                    }
+                )
+
+            task.status = overall_status
+            task.result_image_paths = result_image_paths
+            task.elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            task.completed_at = datetime.utcnow()
+            database.commit()
+        except Exception as exc:
+            task.status = "ERROR"
+            task.error_message = str(exc)
+            task.elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            task.completed_at = datetime.utcnow()
+            database.commit()
+            raise
+
+        return {
+            "code": 0,
+            "message": "success",
+            "request_id": request_id,
+            "task_id": task.id,
+            "sn": sn,
+            "result": overall_status,
+            "recipe_code": recipe.code,
+            "recipe_version": recipe.version,
+            "image_paths": result_image_paths,
+            "image_results": image_results,
+            "elapsed_ms": task.elapsed_ms,
+        }
+
+    @staticmethod
+    def _load_roi_scenario_bindings(
+        database: Session,
+        recipe: Recipe,
+    ) -> dict[int, RoiScenarioBinding]:
+        roi_ids = [roi.id for roi in recipe.rois if roi.enabled]
+        if not roi_ids:
+            return {}
+        bindings = database.scalars(
+            select(RoiScenarioBinding)
+            .options(
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.scenario
+                ),
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.nodes
+                ),
+                selectinload(RoiScenarioBinding.scenario_version).selectinload(
+                    InspectionScenarioVersion.edges
+                ),
+            )
+            .where(
+                RoiScenarioBinding.roi_id.in_(roi_ids),
+                RoiScenarioBinding.enabled.is_(True),
+            )
+            .join(
+                InspectionScenarioVersion,
+                RoiScenarioBinding.scenario_version_id
+                == InspectionScenarioVersion.id,
+            )
+        ).all()
+
+        resolved: dict[int, RoiScenarioBinding] = {}
+        healed_binding = False
+        for binding in bindings:
+            version = binding.scenario_version
+            if version.status != "PUBLISHED":
+                # Older releases may still exist in a recipe created before
+                # the automatic rebind was introduced.  Heal the binding on
+                # first use by resolving the scenario's current published
+                # version.  This makes historical data safe without changing
+                # the immutable execution records that were already written.
+                scene = version.scenario
+                published_id = scene.published_version_id if scene else None
+                current = (
+                    database.scalar(
+                        select(InspectionScenarioVersion)
+                        .options(
+                            selectinload(InspectionScenarioVersion.scenario),
+                            selectinload(InspectionScenarioVersion.nodes),
+                            selectinload(InspectionScenarioVersion.edges),
+                        )
+                        .where(
+                            InspectionScenarioVersion.id == published_id,
+                            InspectionScenarioVersion.status == "PUBLISHED",
+                        )
+                    )
+                    if published_id
+                    else None
+                )
+                if current is None:
+                    continue
+                if binding.scenario_version_id != current.id:
+                    binding.scenario_version = current
+                    healed_binding = True
+            resolved[binding.roi_id] = binding
+        if healed_binding:
+            database.flush()
+        return resolved
+
+    @staticmethod
+    def _result_url_prefix(task_root: Path) -> str:
+        results_root = (PROJECT_ROOT / "detection_results").resolve()
+        try:
+            relative_path = task_root.resolve().relative_to(results_root)
+        except ValueError:
+            return "/results"
+        return f"/results/{relative_path.as_posix()}"
+
+    async def _execute_roi(
+        self,
+        database: Session,
+        recipe: Recipe,
+        task: DetectionTask,
+        roi: RegionOfInterest,
+        roi_file: Path,
+        image_file: Path,
+        scenario_bindings: dict[int, RoiScenarioBinding],
+        *,
+        image_index: int,
+        result_url_prefix: str,
+        sn: str,
+        force_vlm_review: bool,
+        box: tuple[int, int, int, int],
+        alignment: dict[str, Any],
+        source_image_path: str,
+    ) -> dict[str, Any]:
+        roi_status = "OK"
+        item_results: list[dict[str, Any]] = []
+        roi_image_url = f"{result_url_prefix}/image_{image_index}/{roi.code}.jpg"
+        crop_metadata = {
+            "actual_box": list(box),
+            "coordinate_space": "SOURCE_IMAGE",
+            "alignment": alignment.get("roi_correction"),
+        }
+        scenario_binding = scenario_bindings.get(roi.id)
+        if scenario_binding is not None:
+            scenario_version = scenario_binding.scenario_version
+            execution = await scenario_runtime.execute(
+                database,
+                scenario_version,
+                image_path=str(roi_file),
+                source="PRODUCTION",
+                detection_task_id=task.id,
+                roi_id=roi.id,
+                context={
+                    "sn": sn,
+                    "recipe_code": recipe.code,
+                    "recipe_version": recipe.version,
+                    "roi_code": roi.code,
+                    "roi_name": roi.name,
+                    "object_type": roi.object_type,
+                    # The binding stores static validation values selected by
+                    # the operator.  Exposing them at the top level makes
+                    # {{ input.<field> }} work in both direct VLM prompts and
+                    # workflow start-node expressions.
+                    **dict(scenario_binding.input_mapping_json or {}),
+                    # Preserve the former nested mapping for existing
+                    # workflow definitions while new scenes use direct fields.
+                    "input_mapping": dict(scenario_binding.input_mapping_json or {}),
+                    "roi_binding": dict(scenario_binding.input_mapping_json or {}),
+                    "original_image_path": str(image_file),
+                    "source_image_path": source_image_path,
+                    "roi_bbox": list(box),
+                },
+            )
+            result_status = str(execution.result or "ERROR").upper()
+            if result_status == "ERROR":
+                roi_status = "ERROR"
+            elif result_status in {"NG", "UNCERTAIN"}:
+                roi_status = "NG"
+            if scenario_version.review_vlm_model_id:
+                database.add(
+                    AutomationJob(
+                        job_type="VLM_REVIEW",
+                        scenario_version_id=scenario_version.id,
+                        config_json={"execution_id": execution.id},
+                        input_snapshot_json={
+                            "execution_id": execution.id,
+                            "detection_task_id": task.id,
+                            "roi_id": roi.id,
+                        },
+                    )
+                )
+            actual = dict(execution.output_json or {})
+            actual["roi_crop"] = crop_metadata
+            item_results.append(
+                {
+                    "roi_code": roi.code,
+                    "roi_name": roi.name,
+                    "roi_image_url": roi_image_url,
+                    "item_code": scenario_version.scenario.code,
+                    "item_name": scenario_version.scenario.name,
+                    "inspection_type": "SCENARIO",
+                    "capability": scenario_version.scenario.mode,
+                    "scene_type": scenario_version.scenario.category,
+                    "scenario_version_id": scenario_version.id,
+                    "scenario_version": scenario_version.version,
+                    "scenario_execution_id": execution.id,
+                    "primary_model": "场景运行时",
+                    "vlm_review_enabled": bool(scenario_version.review_vlm_model_id),
+                    "status": "NG" if result_status == "UNCERTAIN" else result_status,
+                    "raw_status": result_status,
+                    "actual": actual,
+                    "score": execution.score,
+                    "message": execution.error_message,
+                    "elapsed_ms": execution.elapsed_ms,
+                }
+            )
+            return {
+                "status": roi_status,
+                "items": item_results,
+                "annotation": {"box": box, "code": roi.code, "status": roi_status},
+            }
+
+        message = (
+            "检测区域未关联已发布场景；本地 DINOv2 / PaddleOCR / Qwen3-VL 服务已下线。"
+            "请在工艺配方中绑定一个已发布检测场景后再发布配方。"
+        )
+        item_results.append(
+            {
+                "roi_code": roi.code,
+                "roi_name": roi.name,
+                "roi_image_url": roi_image_url,
+                "item_code": "SCENARIO_BINDING_REQUIRED",
+                "item_name": "需绑定已发布检测场景",
+                "inspection_type": "SCENARIO",
+                "capability": "SCENARIO",
+                "primary_model": "场景运行时",
+                "vlm_review_enabled": False,
+                "status": "ERROR",
+                "raw_status": "ERROR",
+                "actual": {"roi_crop": crop_metadata},
+                "score": None,
+                "message": message,
+                "elapsed_ms": 0,
+            }
+        )
+        return {
+            "status": "ERROR",
+            "items": item_results,
+            "annotation": {"box": box, "code": roi.code, "status": "ERROR"},
+        }
+
+    async def _execute_item(
+        self,
+        database: Session,
+        item: InspectionItem,
+        roi_path: str,
+        force_vlm_review: bool = False,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            if item.capability.upper() == "REFERENCE_SIMILARITY":
+                result = await self._reference_similarity(
+                    database,
+                    item,
+                    roi_path,
+                    force_vlm_review=force_vlm_review,
+                )
+            elif item.capability.upper() == "COLOR_RATIO":
+                result = self._color(item, roi_path)
+                result = await self._apply_vlm_review(
+                    item,
+                    roi_path,
+                    result,
+                    primary_model="OpenCV",
+                    minimum=float(item.rule_json.get("min_ratio", 0.15)),
+                    force_vlm_review=force_vlm_review,
+                )
+            elif item.capability.upper() == "OCR_TEXT":
+                result = await self._ocr(item, roi_path)
+                primary_model = str(result.pop("primary_model", "PaddleOCR"))
+                result = await self._apply_vlm_review(
+                    item,
+                    roi_path,
+                    result,
+                    primary_model=primary_model,
+                    minimum=0.0,
+                    force_vlm_review=force_vlm_review,
+                )
+            elif item.capability.upper() == "VLM_JUDGEMENT":
+                result = await self._vlm_judgement(item, roi_path)
+            else:
+                raise ValueError(f"Unsupported capability: {item.capability}")
+        except Exception as exc:
+            result = {
+                "status": "ERROR",
+                "actual": {},
+                "score": None,
+                "message": str(exc),
+            }
+            if (
+                force_vlm_review
+                and item.capability.upper() != "VLM_JUDGEMENT"
+                and bool(item.rule_json.get("vlm_review_enabled", False))
+            ):
+                primary_models = {
+                    "REFERENCE_SIMILARITY": "DINOv2",
+                    "COLOR_RATIO": "OpenCV",
+                    "OCR_TEXT": "PaddleOCR",
+                }
+                result = await self._apply_vlm_review(
+                    item,
+                    roi_path,
+                    result,
+                    primary_model=primary_models.get(
+                        item.capability.upper(),
+                        item.capability,
+                    ),
+                    minimum=0.0,
+                    force_vlm_review=True,
+                )
+        result["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return result
+
+    async def test_draft_roi(
+        self,
+        database: Session,
+        recipe: Recipe,
+        roi: RegionOfInterest,
+        image_path: str,
+        rules: list[dict[str, Any]],
+        review: dict[str, Any],
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        request_id = f"draft-{uuid.uuid4().hex}"
+        task_root = Path(PROJECT_ROOT / "detection_results" / request_id)
+        inspection_image = Path(image_path).expanduser().resolve()
+        alignment_image_path: Path | None = None
+        roi_offset_x = 0.0
+        roi_offset_y = 0.0
+        alignment: dict[str, Any] = {
+            "status": "DISABLED" if not settings.image_alignment_enabled else "NOT_CONFIGURED"
+        }
+        feature_anchor: RecipeFeatureAnchor | RegionOfInterest | None = recipe.feature_anchor
+        legacy_anchor = next(
+            (
+                candidate
+                for candidate in recipe.rois
+                if candidate.enabled and candidate.alignment_anchor
+            ),
+            None,
+        )
+        anchor_roi = feature_anchor if feature_anchor and feature_anchor.enabled else legacy_anchor
+        if (
+            settings.image_alignment_enabled
+            and anchor_roi is not None
+            and recipe.base_image_path
+        ):
+            base_image = Path(recipe.base_image_path).expanduser()
+            if base_image.is_file():
+                alignment_image_path, alignment = align_image_with_anchor(
+                    str(inspection_image),
+                    str(base_image),
+                    anchor_roi,
+                    task_root / "aligned_source.jpg",
+                    max_shift_ratio=settings.image_alignment_max_shift_ratio,
+                    search_margin_ratio=settings.image_alignment_anchor_search_margin_ratio,
+                    minimum_inliers=settings.image_alignment_anchor_min_inliers,
+                    minimum_inlier_ratio=settings.image_alignment_anchor_min_inlier_ratio,
+                    maximum_rotation_degrees=settings.image_alignment_anchor_max_rotation_degrees,
+                    minimum_template_score=settings.image_alignment_anchor_min_template_score,
+                    minimum_template_margin=settings.image_alignment_anchor_min_template_margin,
+                )
+                if alignment_image_path is not None:
+                    roi_offset_x, roi_offset_y = alignment_roi_offset_for_source(alignment)
+                    affine_aligned = alignment.get("source_to_reference_transform") is not None
+                    alignment["roi_correction"] = {
+                        "mode": "SOURCE_ROI_AFFINE" if affine_aligned else "SOURCE_ROI_OFFSET",
+                        "offset_x": round(roi_offset_x, 3),
+                        "offset_y": round(roi_offset_y, 3),
+                        "description": (
+                            "已将参考图 ROI 映射到原图后裁剪"
+                            if affine_aligned
+                            else "已根据定位偏移在原图上移动 ROI 后裁剪"
+                        ),
+                    }
+            else:
+                alignment = {"status": "SKIPPED", "reason": "配方基准图不存在"}
+
+        if (
+            settings.image_alignment_enabled
+            and anchor_roi is not None
+            and alignment.get("status") != "APPLIED"
+        ):
+            alignment["status"] = "FAILED"
+            alignment["crop_mode"] = "BLOCKED"
+            alignment["reason"] = (
+                f"{alignment.get('reason') or '定位特征点未能可靠匹配'}；"
+                "已停止 ROI 裁剪，避免使用错误区域进行测试。"
+            )
+            result_path = task_root / "result_1.jpg"
+            annotate_image(str(inspection_image), [], result_path)
+            return {
+                "code": 0,
+                "message": "图像定位失败，未执行场景检测",
+                "request_id": request_id,
+                "sn": "DRAFT_TEST",
+                "result": "ERROR",
+                "recipe_code": recipe.code,
+                "recipe_version": recipe.version,
+                "image_paths": [str(result_path)],
+                "image_results": [
+                    {
+                        "image_path": str(inspection_image),
+                        "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                        "alignment": alignment,
+                        "result_image_path": str(result_path),
+                        "roi_image_path": None,
+                        "result": "ERROR",
+                        "inspection_items": [
+                            {
+                                "roi_code": "IMAGE_ALIGNMENT",
+                                "item_code": "IMAGE_ALIGNMENT_REQUIRED",
+                                "item_name": "图像定位失败",
+                                "inspection_type": "IMAGE_ALIGNMENT",
+                                "capability": "FEATURE_ANCHOR",
+                                "status": "ERROR",
+                                "raw_status": "ERROR",
+                                "actual": alignment,
+                                "score": None,
+                                "message": alignment["reason"],
+                                "elapsed_ms": 0,
+                            }
+                        ],
+                    }
+                ],
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+        roi_path = task_root / f"{roi.code}.jpg"
+        _, box = crop_roi(
+            str(inspection_image),
+            roi,
+            roi_path,
+            offset_x=roi_offset_x,
+            offset_y=roi_offset_y,
+            alignment=alignment,
+        )
+        item_results: list[dict[str, Any]] = []
+        roi_status = "OK"
+
+        for index, rule in enumerate(rules, start=1):
+            rule_type = str(rule.get("type", "")).upper()
+            value = str(rule.get("value", "")).strip()
+            scene_type = str(rule.get("scene", "OBJECT_EXISTENCE"))
+            common_rule = {
+                "scene_type": scene_type,
+                "vlm_review_enabled": bool(review.get("enabled", False)),
+                "vlm_review_mode": str(review.get("mode", "ALWAYS")),
+                "vlm_review_lower": float(review.get("lower", 0.85)),
+                "vlm_review_upper": float(review.get("upper", 0.93)),
+                "vlm_prompt": str(review.get("prompt", "")),
+                "vlm_prompt_auto": bool(review.get("prompt_auto", True)),
+                "vlm_uncertain_result": "NG",
+            }
+            if rule_type == "EXISTENCE":
+                item = InspectionItem(
+                    roi_id=roi.id,
+                    code=f"{roi.code}_EXISTENCE_{index}",
+                    name=f"存在校验 {index}",
+                    inspection_type="EXISTENCE",
+                    capability="REFERENCE_SIMILARITY",
+                    reference_group_id=int(rule["reference_group_id"]),
+                    expected_json={
+                        "exists": True,
+                        "class_code": str(rule.get("class_code", roi.code)),
+                    },
+                    rule_json={
+                        **common_rule,
+                        "min_similarity": float(value),
+                        "primary_model": "DINOv2",
+                    },
+                )
+            elif rule_type == "COLOR":
+                item = InspectionItem(
+                    roi_id=roi.id,
+                    code=f"{roi.code}_COLOR_{index}",
+                    name=f"颜色校验 {index}",
+                    inspection_type="COLOR",
+                    capability="COLOR_RATIO",
+                    expected_json={"color": value.upper()},
+                    rule_json={
+                        **common_rule,
+                        "min_ratio": 0.15,
+                        "max_ratio": 1.0,
+                        "primary_model": "OpenCV",
+                    },
+                )
+            elif rule_type == "TEXT":
+                item = InspectionItem(
+                    roi_id=roi.id,
+                    code=f"{roi.code}_TEXT_{index}",
+                    name=f"OCR文字校验 {index}",
+                    inspection_type="TEXT",
+                    capability="OCR_TEXT",
+                    expected_json={"text": value},
+                    rule_json={
+                        **common_rule,
+                        "operator": "CONTAINS",
+                        "case_sensitive": False,
+                        "primary_model": "PaddleOCR",
+                    },
+                )
+            else:
+                raise ValueError(f"Unsupported draft rule type: {rule_type}")
+
+            result = await self._execute_item(
+                database,
+                item,
+                str(roi_path),
+                force_vlm_review=True,
+            )
+            if result["status"] == "ERROR":
+                roi_status = "ERROR"
+            elif result["status"] == "NG" and roi_status != "ERROR":
+                roi_status = "NG"
+            item_results.append(
+                {
+                    "roi_code": roi.code,
+                    "item_code": item.code,
+                    "item_name": item.name,
+                    "inspection_type": item.inspection_type,
+                    "capability": item.capability,
+                    "scene_type": scene_type,
+                    "primary_model": (
+                        result.get("actual", {})
+                        .get("primary_result", {})
+                        .get("model")
+                        or item.rule_json.get("primary_model")
+                    ),
+                    "vlm_review_enabled": bool(review.get("enabled", False)),
+                    **result,
+                }
+            )
+
+        result_path = task_root / "result_1.jpg"
+        annotate_image(
+            str(inspection_image),
+            [{"box": box, "code": roi.code, "status": roi_status}],
+            result_path,
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        return {
+            "code": 0,
+            "message": "success",
+            "request_id": request_id,
+            "sn": "DRAFT_TEST",
+            "result": roi_status,
+            "recipe_code": recipe.code,
+            "recipe_version": recipe.version,
+            "image_paths": [str(result_path)],
+            "image_results": [
+                {
+                    "image_path": str(inspection_image),
+                    "alignment_image_path": str(alignment_image_path) if alignment_image_path else None,
+                    "alignment": alignment,
+                    "result_image_path": str(result_path),
+                    "roi_image_path": str(roi_path),
+                    "roi_image_url": f"/results/{request_id}/{roi_path.name}",
+                    "result": roi_status,
+                    "inspection_items": item_results,
+                }
+            ],
+            "elapsed_ms": elapsed_ms,
+        }
+
+    async def _reference_similarity(
+        self,
+        database: Session,
+        item: InspectionItem,
+        roi_path: str,
+        force_vlm_review: bool = False,
+    ) -> dict[str, Any]:
+        if item.reference_group_id is None:
+            raise ValueError("Reference group is not configured.")
+        group = database.scalar(
+            select(ReferenceGroup)
+            .options(selectinload(ReferenceGroup.images))
+            .where(ReferenceGroup.id == item.reference_group_id)
+        )
+        if group is None:
+            raise ValueError("Reference group does not exist.")
+        active_references = [
+            image
+            for image in group.images
+            if image.enabled and not image.is_deleted
+        ]
+        reference_paths = [image.image_path for image in active_references]
+        if not reference_paths:
+            raise ValueError("Reference group has no enabled images.")
+        reference_vectors = load_reference_vectors(active_references)
+        configured_top_k = max(
+            1,
+            int(
+                item.rule_json.get(
+                    "similarity_top_k",
+                    settings.reference_similarity_top_k,
+                )
+            ),
+        )
+        if reference_vectors:
+            query_response = await self.algorithms.embedding(roi_path)
+            response = rank_reference_vectors(
+                query_response["embedding"],
+                reference_vectors,
+                top_k=min(configured_top_k, len(reference_vectors)),
+            )
+            response["model"] = query_response.get("model", "dinov2-base")
+            response["embedding_cache_used"] = True
+        else:
+            response = await self.algorithms.similarity(
+                roi_path,
+                reference_paths,
+                top_k=min(configured_top_k, len(reference_paths)),
+            )
+            response["embedding_cache_used"] = False
+        top1_similarity = float(response["top1_similarity"])
+        top_k_mean = float(response.get("top_k_mean", top1_similarity))
+        top1_weight = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    item.rule_json.get(
+                        "similarity_top1_weight",
+                        settings.reference_similarity_top1_weight,
+                    )
+                ),
+            ),
+        )
+        scoring_mode = str(
+            item.rule_json.get(
+                "similarity_scoring_mode",
+                settings.reference_similarity_scoring_mode,
+            )
+        ).upper()
+        if scoring_mode == "TOP1":
+            score = top1_similarity
+        elif scoring_mode == "TOP_K_MEAN":
+            score = top_k_mean
+        else:
+            scoring_mode = "ROBUST_TOP_K"
+            score = float(
+                response.get(
+                    "robust_similarity",
+                    top1_similarity
+                    if int(response.get("selected_count", 1)) == 1
+                    else top1_weight * top1_similarity
+                    + (1.0 - top1_weight) * top_k_mean,
+                )
+            )
+        minimum = float(item.rule_json.get("min_similarity", 0.85))
+        primary_status = "OK" if score >= minimum else "NG"
+        selected_candidates = response.get("candidates", [])
+        passing_reference_count = sum(
+            1
+            for candidate in selected_candidates
+            if float(candidate.get("similarity", 0.0)) >= minimum
+        )
+        actual = {
+            "matched_class": group.class_code,
+            "matched_reference": response["candidates"][0]["reference_path"],
+            "similarity": score,
+            "top1_similarity": top1_similarity,
+            "top_k_mean": top_k_mean,
+            "top_k_median": response.get("top_k_median"),
+            "top_k_std": response.get("top_k_std"),
+            "scoring_mode": scoring_mode,
+            "top1_weight": top1_weight,
+            "selected_count": response.get(
+                "selected_count",
+                len(selected_candidates),
+            ),
+            "passing_reference_count": passing_reference_count,
+            "reference_count": response.get("reference_count", len(reference_paths)),
+            "embedding_cache_used": response.get("embedding_cache_used", False),
+            "primary_status": primary_status,
+        }
+        return await self._apply_vlm_review(
+            item,
+            roi_path,
+            {
+                "status": primary_status,
+                "actual": actual,
+                "score": score,
+                "message": (
+                    f"Robust similarity {score:.4f} "
+                    f"(Top1 {top1_similarity:.4f}, Top-K mean {top_k_mean:.4f}), "
+                    f"required >= {minimum:.4f}"
+                ),
+            },
+            primary_model="DINOv2",
+            minimum=minimum,
+            force_vlm_review=force_vlm_review,
+            default_prompt=(
+                f"Verify whether the ROI contains the expected "
+                f"{group.class_code} component and whether it is correctly installed. "
+                "Judge only this component."
+            ),
+        )
+
+    async def _apply_vlm_review(
+        self,
+        item: InspectionItem,
+        roi_path: str,
+        primary_result: dict[str, Any],
+        *,
+        primary_model: str,
+        minimum: float,
+        default_prompt: str | None = None,
+        force_vlm_review: bool = False,
+    ) -> dict[str, Any]:
+        result = {
+            "status": primary_result["status"],
+            "actual": dict(primary_result.get("actual") or {}),
+            "score": primary_result.get("score"),
+            "message": str(primary_result.get("message") or ""),
+        }
+        result["actual"]["primary_status"] = primary_result["status"]
+        result["actual"]["primary_result"] = {
+            "model": primary_model,
+            "status": primary_result["status"],
+            "score": primary_result.get("score"),
+            "details": primary_result.get("actual") or {},
+            "message": primary_result.get("message"),
+        }
+        if not should_run_vlm_review(
+            primary_result.get("score"),
+            item.rule_json,
+            minimum,
+            force=force_vlm_review,
+        ):
+            return result
+
+        fallback = str(item.rule_json.get("vlm_uncertain_result", "NG")).upper()
+        if fallback not in {"OK", "NG"}:
+            fallback = "NG"
+        prompt = str(
+            item.rule_json.get("vlm_prompt")
+            or default_prompt
+            or (
+                f"Review the inspection result for {item.name}. "
+                "Judge only the visible ROI and return OK, NG, or UNCERTAIN."
+            )
+        )
+        try:
+            review_response = await self.algorithms.vlm_judge(
+                roi_path,
+                prompt,
+                expected={
+                    **item.expected_json,
+                    "primary_model": primary_model,
+                    "primary_status": primary_result["status"],
+                    "primary_score": primary_result.get("score"),
+                },
+                max_new_tokens=120,
+            )
+            review_status, parsed = vlm_review_status(review_response, fallback)
+            result["status"] = review_status
+            result["actual"]["vlm_review"] = {
+                "status": review_status,
+                "parsed": parsed,
+                "model": review_response.get("model") or "Qwen3-VL-4B-Instruct",
+                "elapsed_ms": review_response.get("elapsed_ms"),
+                "prompt": prompt,
+                "expected": item.expected_json,
+            }
+            result["message"] += f"; Qwen review => {review_status}"
+        except Exception as exc:
+            result["status"] = fallback
+            result["actual"]["vlm_review"] = {
+                "status": fallback,
+                "model": "Qwen3-VL-4B-Instruct",
+                "error": str(exc),
+                "prompt": prompt,
+                "expected": item.expected_json,
+            }
+            result["message"] += f"; Qwen review failed => {fallback}"
+        return result
+
+    async def _vlm_judgement(
+        self,
+        item: InspectionItem,
+        roi_path: str,
+    ) -> dict[str, Any]:
+        prompt = str(
+            item.rule_json.get("prompt")
+            or item.expected_json.get("requirement")
+            or f"Inspect {item.name}. Return OK, NG, or UNCERTAIN."
+        )
+        response = await self.algorithms.vlm_judge(
+            roi_path,
+            prompt,
+            expected=item.expected_json,
+            max_new_tokens=160,
+        )
+        status, parsed = vlm_review_status(response, "NG")
+        score = None
+        if isinstance(parsed, dict) and parsed.get("confidence") is not None:
+            try:
+                score = float(parsed["confidence"])
+            except (TypeError, ValueError):
+                score = None
+        return {
+            "status": status,
+            "actual": {
+                "primary_status": status,
+                "primary_result": {
+                    "model": response.get("model") or "Qwen3-VL-4B-Instruct",
+                    "status": status,
+                    "score": score,
+                    "details": parsed or {},
+                    "message": (parsed or {}).get("reason") if isinstance(parsed, dict) else None,
+                },
+            },
+            "score": score,
+            "message": (
+                str((parsed or {}).get("reason") or f"Qwen judgement => {status}")
+                if isinstance(parsed, dict)
+                else f"Qwen judgement => {status}"
+            ),
+        }
+
+    def _color(self, item: InspectionItem, roi_path: str) -> dict[str, Any]:
+        expected_color = str(item.expected_json.get("color", "")).upper()
+        minimum = float(item.rule_json.get("min_ratio", 0.15))
+        maximum = float(item.rule_json.get("max_ratio", 1.0))
+        ratio, color_details = color_ratio(
+            roi_path,
+            expected_color,
+            item.rule_json.get("color_profile"),
+        )
+        return {
+            "status": "OK" if minimum <= ratio <= maximum else "NG",
+            "actual": {
+                "color": expected_color,
+                "ratio": ratio,
+                "color_profile": item.rule_json.get("color_profile"),
+                **color_details,
+            },
+            "score": ratio,
+            "message": (
+                f"{expected_color} ratio {ratio:.4f}, "
+                f"required {minimum:.4f}-{maximum:.4f}"
+            ),
+        }
+
+    async def _ocr(self, item: InspectionItem, roi_path: str) -> dict[str, Any]:
+        expected_text = str(item.expected_json.get("text", ""))
+        payload = await self.algorithms.ocr(roi_path, expected_text=expected_text)
+        actual_text = self._extract_ocr_text(payload)
+        operator = str(item.rule_json.get("operator", "CONTAINS")).upper()
+        case_sensitive = bool(item.rule_json.get("case_sensitive", False))
+        actual = actual_text if case_sensitive else actual_text.upper()
+        expected = expected_text if case_sensitive else expected_text.upper()
+        if operator == "EQUALS":
+            passed = actual == expected
+        elif operator == "REGEX":
+            passed = re.search(expected_text, actual_text) is not None
+        elif operator == "STARTS_WITH":
+            passed = actual.startswith(expected)
+        else:
+            passed = expected in actual
+        return {
+            "status": "OK" if passed else "NG",
+            "actual": {
+                "text": actual_text,
+                "lines": payload.get("lines", []),
+                "confidence": payload.get("confidence"),
+                "preprocessing": payload.get("preprocessing", {}),
+            },
+            "score": payload.get("confidence"),
+            "message": f'OCR text "{actual_text}", operator {operator}',
+            "primary_model": payload.get("model") or "PP-OCRv5-mobile",
+        }
+
+    @staticmethod
+    def _extract_ocr_text(payload: dict[str, Any]) -> str:
+        if isinstance(payload.get("text"), str):
+            return payload["text"]
+        result = payload.get("result")
+        if isinstance(result, dict) and isinstance(result.get("text"), str):
+            return result["text"]
+        if isinstance(result, list):
+            values = [
+                item["text"]
+                for item in result
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ]
+            return " ".join(values)
+        raise ValueError("OCR service response does not contain text.")
+
+
+def load_recipe_for_execution(
+    database: Session,
+    *,
+    recipe_id: int | None = None,
+    recipe_code: str | None = None,
+    product_code: str | None = None,
+    station_code: str | None = None,
+    require_published: bool = True,
+) -> Recipe | None:
+    from app.models.system import Product, Station
+
+    statement = select(Recipe).options(
+        selectinload(Recipe.feature_anchor),
+        selectinload(Recipe.rois).selectinload(
+            RegionOfInterest.inspection_items
+        )
+    )
+    if recipe_id is not None:
+        statement = statement.where(Recipe.id == recipe_id)
+    if recipe_code:
+        statement = statement.where(Recipe.code == recipe_code)
+    if product_code:
+        statement = statement.join(Product).where(Product.code == product_code)
+    if station_code:
+        statement = statement.join(Station).where(Station.code == station_code)
+    if require_published:
+        statement = statement.where(Recipe.status == "PUBLISHED")
+    return database.scalars(statement.order_by(Recipe.id.desc())).first()
