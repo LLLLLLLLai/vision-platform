@@ -8,7 +8,7 @@
     <div>
       <span class="eyebrow">DATASET MANAGEMENT</span>
       <h1>数据集维护</h1>
-      <p>评测数据集只需为每张图片标记 OK 或 NG；YOLO 训练数据集既可在线框选，也可导入已离线标注的图片与标签包。</p>
+      <p>集中管理训练、评测素材与标注。</p>
     </div>
     <div class="management-hero-actions">
       <button class="btn btn-outline-primary" id="reloadDatasets" type="button">刷新</button>
@@ -43,24 +43,27 @@
             <button class="btn btn-outline-secondary" id="selectDatasetFolder" type="button">选择文件夹</button>
             <div id="datasetUploadTruthWrap"><select id="datasetUploadTruth" class="form-select" aria-label="上传真值"><option value="">真值：未标注</option><option value="OK">真值：OK</option><option value="NG">真值：NG</option></select></div>
             <button class="btn btn-primary" id="uploadDatasetItems" type="submit" disabled>开始上传</button>
+            <div class="dataset-offline-import" id="offlineYoloImportActions" hidden>
+              <input id="offlineYoloArchive" class="visually-hidden" type="file" accept=".zip,application/zip">
+              <button class="btn btn-outline-primary" id="selectOfflineYoloArchive" type="button">导入离线标注包</button>
+              <button class="btn btn-link btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#offlineYoloFormatModal">格式说明</button>
+            </div>
           </div>
         </form>
         <div id="datasetUploadFeedback" class="dataset-upload-feedback" role="status" aria-live="polite" hidden></div>
-        <div class="dataset-offline-import" id="offlineYoloImportActions" hidden>
-          <input id="offlineYoloArchive" class="visually-hidden" type="file" accept=".zip,application/zip">
-          <button class="btn btn-outline-primary" id="selectOfflineYoloArchive" type="button" title="导入 images、labels 与类别文件的 ZIP">导入离线标注包</button>
-        </div>
       </section>
 
+      <div class="dataset-settings-grid">
       <section class="dataset-label-card">
-        <div class="section-heading"><div><strong>类别</strong><small>训练标注使用的类别。</small></div></div>
+        <div class="section-heading"><div><strong>类别</strong></div></div>
         <div class="dataset-label-editor"><div id="datasetLabelList" class="dataset-label-list"></div><div class="dataset-label-add"><input id="datasetLabelInput" class="form-control" placeholder="例如：harness、connector"><button class="btn btn-outline-primary" id="addDatasetLabel" type="button">＋ 添加类别</button></div></div>
       </section>
 
       <section class="dataset-collection-card">
-        <div class="section-heading"><div><strong>生产素材自动采集</strong><small>可采集 ROI 局部图或相机原图。</small></div><div class="dataset-collection-actions"><label class="form-check form-switch mb-0"><input class="form-check-input" id="datasetAutoCollectToggle" type="checkbox"><span class="form-check-label" id="datasetAutoCollectState">关闭</span></label><button class="btn btn-sm btn-outline-primary" id="openDatasetCollectionSettings" type="button">设置来源</button></div></div>
+        <div class="section-heading"><div><strong>生产素材自动采集</strong></div><div class="dataset-collection-actions"><label class="form-check form-switch mb-0"><input class="form-check-input" id="datasetAutoCollectToggle" type="checkbox"><span class="form-check-label" id="datasetAutoCollectState">关闭</span></label><button class="btn btn-sm btn-outline-primary" id="openDatasetCollectionSettings" type="button">设置来源</button></div></div>
         <div class="dataset-collection-summary" id="datasetCollectionSummary"></div>
       </section>
+      </div>
 
       <section>
         <div class="section-heading"><div><strong id="datasetItemsTitle">素材与真值</strong><small id="datasetItemsHint">选择素材后进行维护。</small></div><button class="btn btn-sm btn-primary" id="openDatasetBatchAnnotation" type="button" hidden>一键 AI 标注全部原图</button></div>
@@ -242,7 +245,7 @@
     <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
       <div class="modal-header"><div><small class="text-primary">TRAINING DATA AUGMENTATION</small><h2 class="modal-title fs-5" id="datasetAugmentationTitle">生成增强训练素材</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
       <div class="modal-body stack-form">
-          <div class="alert alert-info mb-0"><strong>安全策略：</strong>仅使用已完成标注的原始训练素材；平台先固定 70% / 20% / 10% 分组，仅为训练集生成同源副本，避免验证与测试数据泄漏。每次最多选择 100 张原图、生成 200 张新图。</div>
+          <div class="alert alert-info mb-0"><strong>安全策略：</strong>仅增强已标注训练原图；平台自动分批处理，整次操作不再限制为 200 张。验证集和测试集不参与增强，处理中请勿关闭页面。</div>
           <div class="alert alert-warning mb-0">文字、颜色和安装方向需要保持真实：这类素材请谨慎选择翻转、旋转与颜色变化，生成后抽查图片和标注。</div>
         <form id="datasetAugmentationForm" class="stack-form">
           <div class="row g-3">
@@ -250,6 +253,8 @@
             <label class="col-md-6"><span>随机种子（可选）</span><input id="augmentationSeed" class="form-control" type="number" min="0" max="2147483647" placeholder="留空由平台生成"></label>
           </div>
           <div><span>来源素材</span><div class="d-flex flex-wrap gap-3 mt-2"><label class="form-check"><input class="form-check-input" name="augmentationSourceMode" type="radio" value="ALL" checked><span class="form-check-label">全部已标注原图</span></label><label class="form-check"><input id="augmentationSelectedSourceMode" class="form-check-input" name="augmentationSourceMode" type="radio" value="SELECTED"><span class="form-check-label" id="augmentationSelectedCount">已选择 0 张</span></label></div></div>
+          <div id="augmentationEstimate" class="dataset-augmentation-estimate" role="status"></div>
+          <div id="augmentationProgress" class="dataset-augmentation-progress" role="status" aria-live="polite" hidden><span id="augmentationProgressText"></span><div class="progress" role="progressbar" aria-label="数据增强进度" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" id="augmentationProgressBar" style="width: 0%"></div></div></div>
           <section class="dataset-augmentation-options">
             <div class="section-heading"><div><strong>几何增强</strong><small>会同步更新目标检测框和分割轮廓。</small></div></div>
             <div class="row g-3">
@@ -270,7 +275,21 @@
           </section>
         </form>
       </div>
-      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="runDatasetAugmentation" type="button">生成增强素材</button></div>
+      <div class="modal-footer"><button class="btn btn-outline-danger" id="stopDatasetAugmentation" type="button" hidden>停止后续批次</button><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="runDatasetAugmentation" type="button">生成增强素材</button></div>
+    </div></div>
+  </div>
+
+  <div class="modal fade" id="offlineYoloFormatModal" tabindex="-1" aria-labelledby="offlineYoloFormatTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+      <div class="modal-header"><h2 class="modal-title fs-5" id="offlineYoloFormatTitle">离线标注包格式</h2><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body dataset-format-guide">
+        <p>上传 <code>.zip</code> 压缩包。三种训练任务都要包含图片，但标签格式不同；单包最多 2000 张图片，解压后不超过 1 GB。</p>
+        <div><strong>目标检测</strong><p><code>images/train/a.jpg</code> 对应 <code>labels/train/a.txt</code>；每行：<code>类别编号 中心X 中心Y 宽 高</code>。坐标为 0～1 的比例值；无目标可留空标签或不放标签文件。</p></div>
+        <div><strong>目标分割</strong><p>图片和标签路径同上；每行：<code>类别编号 X1 Y1 X2 Y2 X3 Y3 ...</code>，至少 3 个轮廓点，坐标也为 0～1 的比例值。</p></div>
+        <div><strong>图片分类</strong><p>将图片放在类别文件夹中，例如 <code>images/train/FU5/a.jpg</code>；也可用与图片同名的 <code>.txt</code>，文件内仅写一个类别编号或名称。分类不使用检测框。</p></div>
+        <p>类别编号从 0 开始。请在包内放 <code>classes.txt</code> 或 <code>data.yaml</code>，也可先在数据集里维护类别；已存在类别时，压缩包中的类别名称和顺序必须一致，避免训练类别错位。</p>
+      </div>
+      <div class="modal-footer"><button class="btn btn-primary" type="button" data-bs-dismiss="modal">明白了</button></div>
     </div></div>
   </div>
 
@@ -297,6 +316,6 @@
   </div>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261102-3" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261102-3"></script>
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261102-5" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261102-5"></script>
 {% endblock %}

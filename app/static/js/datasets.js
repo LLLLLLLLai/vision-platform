@@ -1,6 +1,7 @@
 (() => {
   const api = "/api/v1";
   const itemPageSize = 48;
+  const augmentationBatchImageLimit = 200;
   const state = {
     datasets: [],
     selectedId: null,
@@ -10,6 +11,8 @@
     publishedRecipes: [],
     publishedVisionModels: [],
     augmentationSelectedIds: new Set(),
+    augmentationRunning: false,
+    augmentationCancelRequested: false,
     batchJob: null,
     batchJobDatasetId: null,
     batchPollTimer: null,
@@ -272,20 +275,22 @@
       : items.filter((item) => item.ground_truth).length;
     const pendingAiCount = items.filter((item) => item.annotation_status === "AI_SUGGESTED").length;
     const splits = dataset.split_counts || {};
-    const summary = [
-      ["用途", purposeLabel(dataset)],
-      ["标注方式", isTraining(dataset) ? annotationTypeLabel(annotationType(dataset)) : "OK / NG"],
-      ["素材数", dataset.item_count || 0],
-      ["增强素材", dataset.augmented_count || 0],
-      [isTraining(dataset) ? "已完成标注" : "已标记真值", markedCount],
-      ...(isTraining(dataset) ? [["AI 待复核", pendingAiCount]] : []),
-      ["训练 / 验证 / 测试", `${splits.TRAIN || 0} / ${splits.VAL || 0} / ${splits.TEST || 0}`],
-      ["未切分", splits.UNASSIGNED || 0],
-      ["修订", `r${dataset.revision}`],
-    ];
+    const summary = isTraining(dataset)
+      ? [
+        ["素材", dataset.item_count || 0],
+        ["已标注", markedCount],
+        ["AI 待复核", pendingAiCount],
+        ["增强素材", dataset.augmented_count || 0],
+        ["训练 / 验证 / 测试", `${splits.TRAIN || 0} / ${splits.VAL || 0} / ${splits.TEST || 0}${splits.UNASSIGNED ? ` · 未切分 ${splits.UNASSIGNED}` : ""}`],
+      ]
+      : [
+        ["素材", dataset.item_count || 0],
+        ["已标记真值", markedCount],
+        ["待标记", Math.max(0, items.length - markedCount)],
+      ];
     byId("datasetDetailCode").textContent = dataset.code;
     byId("datasetDetailName").textContent = dataset.name;
-    byId("datasetDetailMeta").textContent = isTraining(dataset) ? "YOLO 训练" : "场景评测";
+    byId("datasetDetailMeta").textContent = purposeLabel(dataset);
     byId("datasetDetailMeta").className = `status-pill ${isTraining(dataset) ? "draft" : "published"}`;
     byId("openDatasetAugmentation").hidden = !supportsDatasetAugmentation(dataset);
     byId("datasetSummary").innerHTML = summary.map(([label, value]) => `<div class="summary-metric"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("");
@@ -357,6 +362,45 @@
     };
   }
 
+  function augmentationSourceIds(dataset, selectedOnly) {
+    return (dataset?.items || [])
+      .filter((item) => item.media_type === "IMAGE"
+        && item.annotation_status === "LABELED"
+        && String(item.source || "").toUpperCase() !== "AUGMENTED"
+        && (!selectedOnly || state.augmentationSelectedIds.has(item.id)))
+      .map((item) => item.id);
+  }
+
+  function syncAugmentationEstimate() {
+    const count = augmentationSourceIds(selected(), byId("augmentationSelectedSourceMode").checked).length;
+    const copies = Number(byId("augmentationCopiesPerItem").value);
+    byId("augmentationEstimate").textContent = Number.isInteger(copies) && copies > 0
+      ? `预计处理 ${count} 张来源，最多生成 ${count * copies} 张图片；验证/测试集会自动跳过，实际数量可能更少。`
+      : "请填写每张原图生成数量。";
+  }
+
+  function setAugmentationRunning(running) {
+    state.augmentationRunning = running;
+    const modal = byId("datasetAugmentationModal");
+    modal.querySelectorAll("#datasetAugmentationForm input, [data-bs-dismiss='modal']").forEach((element) => {
+      element.disabled = running;
+    });
+    if (!running) {
+      byId("augmentationSelectedSourceMode").disabled = state.augmentationSelectedIds.size === 0;
+      syncAugmentationControls();
+    }
+    byId("runDatasetAugmentation").disabled = running;
+    byId("stopDatasetAugmentation").hidden = !running;
+  }
+
+  function updateAugmentationProgress(processed, total, created, batchesCompleted, batchCount) {
+    const percentage = total ? Math.round((processed / total) * 100) : 0;
+    byId("augmentationProgress").hidden = false;
+    byId("augmentationProgressText").textContent = `已处理 ${processed} / ${total} 张来源 · ${batchesCompleted} / ${batchCount} 批 · 已生成 ${created} 张`;
+    byId("augmentationProgressBar").style.width = `${percentage}%`;
+    byId("augmentationProgress").querySelector(".progress").setAttribute("aria-valuenow", String(percentage));
+  }
+
   function openDatasetAugmentation() {
     const dataset = selected();
     if (!supportsDatasetAugmentation(dataset)) {
@@ -372,19 +416,19 @@
     state.augmentationSelectedIds = new Set([...state.augmentationSelectedIds].filter((id) => eligibleIds.has(id)));
     byId("augmentationSelectedSourceMode").disabled = state.augmentationSelectedIds.size === 0;
     byId("augmentationSelectedCount").textContent = `已选择 ${state.augmentationSelectedIds.size} 张`;
+    byId("augmentationProgress").hidden = true;
+    syncAugmentationEstimate();
     syncAugmentationControls();
     openModal("datasetAugmentationModal");
   }
 
   async function runDatasetAugmentation() {
+    if (state.augmentationRunning) return;
     const dataset = selected();
     if (!supportsDatasetAugmentation(dataset)) return;
     let payload;
     try {
       payload = buildAugmentationPayload();
-      if (byId("augmentationSelectedSourceMode").checked) {
-        payload.source_item_ids = [...state.augmentationSelectedIds];
-      }
     } catch (error) {
       notify(error.message, "warning");
       return;
@@ -401,29 +445,63 @@
       notify("请至少选择一种会改变图片的增强方式。", "warning");
       return;
     }
+    const sourceIds = augmentationSourceIds(dataset, byId("augmentationSelectedSourceMode").checked);
+    if (!sourceIds.length) {
+      notify("请先选择已标注的原始图片；增强图不能再次作为来源。", "warning");
+      return;
+    }
+    const plannedCount = sourceIds.length * payload.copies_per_item;
+    if (plannedCount > 2000 && !window.confirm(`本次最多生成 ${plannedCount} 张图片，可能占用较多磁盘空间。确认继续？`)) return;
+    if (payload.seed === null) payload.seed = Math.floor(Math.random() * 2_147_483_648);
+    const batchSize = Math.max(1, Math.floor(augmentationBatchImageLimit / payload.copies_per_item));
+    const batchCount = Math.ceil(sourceIds.length / batchSize);
     const button = byId("runDatasetAugmentation");
-    button.disabled = true;
+    state.augmentationCancelRequested = false;
+    setAugmentationRunning(true);
     button.textContent = "生成中…";
+    let processed = 0;
+    let created = 0;
+    let skipped = 0;
+    let duplicate = 0;
+    let batchesCompleted = 0;
+    let failure = null;
+    updateAugmentationProgress(processed, sourceIds.length, created, batchesCompleted, batchCount);
     try {
-      const result = await request(`${api}/datasets/${dataset.id}/augmentations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      for (let offset = 0; offset < sourceIds.length; offset += batchSize) {
+        if (state.augmentationCancelRequested) break;
+        const batchIds = sourceIds.slice(offset, offset + batchSize);
+        const result = await request(`${api}/datasets/${dataset.id}/augmentations`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, source_item_ids: batchIds }),
+        });
+        processed += batchIds.length;
+        created += Number(result.created_count || 0);
+        skipped += Number(result.skipped_non_training_count || 0);
+        duplicate += Number(result.skipped_duplicate_count || 0);
+        batchesCompleted += 1;
+        updateAugmentationProgress(processed, sourceIds.length, created, batchesCompleted, batchCount);
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      setAugmentationRunning(false);
+      button.textContent = "生成增强素材";
+      byId("stopDatasetAugmentation").disabled = false;
+      byId("stopDatasetAugmentation").textContent = "停止后续批次";
       closeModal("datasetAugmentationModal");
-      await selectDataset(dataset.id);
-      const skipped = Number(result.skipped_non_training_count || 0);
-      const duplicate = Number(result.skipped_duplicate_count || 0);
+      try {
+        await selectDataset(dataset.id);
+      } catch (error) {
+        failure = failure || error;
+      }
       const notes = [
         skipped ? `${skipped} 张验证/测试素材未增强` : "",
         duplicate ? `跳过 ${duplicate} 张重复图片` : "",
       ].filter(Boolean).join("；");
-      notify(`已生成 ${result.created_count || 0} 张增强训练素材。${notes ? ` ${notes}。` : ""}`);
-    } catch (error) {
-      notify(error.message, "danger");
-    } finally {
-      button.disabled = false;
-      button.textContent = "生成增强素材";
+      if (failure) notify(`已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源；第 ${batchesCompleted + 1} 批失败：${failure.message}。${notes}`, "danger");
+      else if (state.augmentationCancelRequested) notify(`已停止后续批次；已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源。${notes}`, "warning");
+      else notify(`已生成 ${created} 张增强训练素材。${notes}`, created ? "success" : "warning");
     }
   }
 
@@ -1746,6 +1824,18 @@
     byId("collectionSettingsScope").addEventListener("change", syncCollectionSettingsMode);
     byId("saveDatasetCollectionSettings").addEventListener("click", saveCollectionSettings);
     byId("runDatasetAugmentation").addEventListener("click", runDatasetAugmentation);
+    byId("stopDatasetAugmentation").addEventListener("click", () => {
+      state.augmentationCancelRequested = true;
+      byId("stopDatasetAugmentation").disabled = true;
+      byId("stopDatasetAugmentation").textContent = "等待当前批次完成…";
+    });
+    byId("augmentationCopiesPerItem").addEventListener("input", syncAugmentationEstimate);
+    document.querySelectorAll("[name='augmentationSourceMode']").forEach((input) => {
+      input.addEventListener("change", syncAugmentationEstimate);
+    });
+    byId("datasetAugmentationModal").addEventListener("hide.bs.modal", (event) => {
+      if (state.augmentationRunning) event.preventDefault();
+    });
     byId("datasetAugmentationForm").addEventListener("submit", (event) => {
       event.preventDefault();
       runDatasetAugmentation();

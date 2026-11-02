@@ -49,8 +49,8 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 OFFLINE_YOLO_MAX_IMAGES = 2000
 OFFLINE_YOLO_MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 OFFLINE_YOLO_MAX_LABEL_BYTES = 5 * 1024 * 1024
-AUGMENTATION_MAX_SOURCE_ITEMS = 100
-AUGMENTATION_MAX_CREATED_ITEMS = 200
+AUGMENTATION_MAX_SOURCE_ITEMS = 500
+AUGMENTATION_MAX_CREATED_ITEMS = 500
 
 
 class DatasetCreate(BaseModel):
@@ -796,31 +796,22 @@ def augment_dataset_images(
     if not source_candidates:
         raise HTTPException(status_code=400, detail="没有可增强的已标注原始素材。")
 
-    source_paths: dict[int, Path] = {}
-    unreadable_sources: list[str] = []
-    for item in source_candidates:
-        _validate_training_annotation(dataset, item.annotation_json or {})
-        source_path = Path(item.media_path)
-        if not source_path.is_absolute():
-            source_path = Path(PROJECT_ROOT) / source_path
-        if not source_path.is_file():
-            unreadable_sources.append(item.original_name)
-        else:
-            source_paths[item.id] = source_path
-    if unreadable_sources:
-        preview = "、".join(unreadable_sources[:3])
-        suffix = " 等" if len(unreadable_sources) > 3 else ""
-        raise HTTPException(status_code=400, detail=f"以下来源图片不存在或不可读取：{preview}{suffix}")
-
-    assign_training_splits(active_items, seed=f"{dataset.code}:augmentation")
+    initial_split_summary = assign_training_splits(active_items, seed=f"{dataset.code}:augmentation")
     training_sources = [item for item in source_candidates if str(item.split or "").upper() == "TRAIN"]
     skipped_non_training = len(source_candidates) - len(training_sources)
     if not training_sources:
-        database.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail="所选素材当前位于验证或测试集；为避免数据泄漏，平台只增强训练集素材。",
-        )
+        if initial_split_summary["changed"]:
+            dataset.revision += 1
+        database.commit()
+        return {
+            "dataset_id": dataset.id,
+            "created_count": 0,
+            "source_count": 0,
+            "skipped_non_training_count": skipped_non_training,
+            "skipped_duplicate_count": 0,
+            "split_summary": initial_split_summary,
+            "message": "所选素材均属于验证集或测试集，未生成增强图。",
+        }
     expected_count = len(training_sources) * payload.copies_per_item
     if expected_count > AUGMENTATION_MAX_CREATED_ITEMS:
         database.rollback()
@@ -828,6 +819,27 @@ def augment_dataset_images(
             status_code=400,
             detail=f"本次最多生成 {AUGMENTATION_MAX_CREATED_ITEMS} 张增强图片，请减少来源素材或生成倍数。",
         )
+
+    source_paths: dict[int, Path] = {}
+    unreadable_sources: list[str] = []
+    try:
+        for item in training_sources:
+            _validate_training_annotation(dataset, item.annotation_json or {})
+            source_path = Path(item.media_path)
+            if not source_path.is_absolute():
+                source_path = Path(PROJECT_ROOT) / source_path
+            if not source_path.is_file():
+                unreadable_sources.append(item.original_name)
+            else:
+                source_paths[item.id] = source_path
+    except HTTPException:
+        database.rollback()
+        raise
+    if unreadable_sources:
+        database.rollback()
+        preview = "、".join(unreadable_sources[:3])
+        suffix = " 等" if len(unreadable_sources) > 3 else ""
+        raise HTTPException(status_code=400, detail=f"以下来源图片不存在或不可读取：{preview}{suffix}")
 
     configuration_key = repr(sorted(options.items()))
     base_seed = payload.seed
@@ -866,7 +878,8 @@ def augment_dataset_images(
                 target = target_dir / f"{source.id}_{copy_index}_{generated_id}{suffix}"
                 created_paths.append(target)
                 save_augmented_image(image, target)
-                content_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+                with target.open("rb") as image_file:
+                    content_hash = hashlib.file_digest(image_file, "sha256").hexdigest()
                 if content_hash in existing_hashes:
                     target.unlink(missing_ok=True)
                     created_paths.pop()
@@ -898,14 +911,17 @@ def augment_dataset_images(
                 )
                 database.add(item)
                 created_items.append(item)
-        if not created_items:
-            raise DatasetAugmentationError("未生成新图片；当前配置可能与已有素材完全重复。")
-        database.flush()
-        split_summary = assign_training_splits(
-            [*active_items, *created_items],
-            seed=f"{dataset.code}:augmentation",
-        )
-        dataset.revision += 1
+        if created_items:
+            database.flush()
+            split_summary = assign_training_splits(
+                [*active_items, *created_items],
+                seed=f"{dataset.code}:augmentation",
+            )
+            dataset.revision += 1
+        else:
+            split_summary = initial_split_summary
+            if initial_split_summary["changed"]:
+                dataset.revision += 1
         database.commit()
     except DatasetAugmentationError as exc:
         database.rollback()
@@ -925,7 +941,10 @@ def augment_dataset_images(
         "skipped_non_training_count": skipped_non_training,
         "skipped_duplicate_count": skipped_duplicates,
         "split_summary": split_summary,
-        "message": "已生成训练集增强素材；验证集和测试集未添加同源副本。",
+        "message": (
+            "已生成训练集增强素材；验证集和测试集未添加同源副本。"
+            if created_items else "未生成新图片；当前配置可能与已有素材完全重复。"
+        ),
     }
 
 

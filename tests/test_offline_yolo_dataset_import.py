@@ -109,6 +109,64 @@ class OfflineYoloDatasetImportTests(unittest.TestCase):
         self.assertEqual(second["created_count"], 0)
         self.assertEqual(second["skipped_count"], 2)
 
+    def test_imports_segmentation_polygons(self) -> None:
+        dataset = create_dataset(
+            DatasetCreate(
+                name="线束分割训练集",
+                purpose="TRAIN",
+                media_type="IMAGE",
+                annotation_type="SEGMENTATION",
+                labels=["harness"],
+            ),
+            database=self.database,
+        )
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("classes.txt", "harness\n")
+            archive.writestr("images/train/wire.png", self._png_bytes((20, 100, 20)))
+            archive.writestr("labels/train/wire.txt", "0 0.1 0.1 0.8 0.1 0.8 0.9\n")
+        payload.seek(0)
+
+        result = import_offline_yolo_dataset(
+            dataset["id"],
+            archive=UploadFile(filename="segmentation.zip", file=payload),
+            database=self.database,
+        )
+        self.assertEqual(result["created_count"], 1)
+        item = get_dataset(dataset["id"], database=self.database)["items"][0]
+        self.assertEqual(item["annotation_json"]["segments"], [{
+            "label": "harness", "points": [[0.1, 0.1], [0.8, 0.1], [0.8, 0.9]],
+        }])
+
+    def test_imports_classification_folders_and_single_value_labels(self) -> None:
+        dataset = create_dataset(
+            DatasetCreate(
+                name="保险丝分类训练集",
+                purpose="TRAIN",
+                media_type="IMAGE",
+                annotation_type="CLASSIFICATION",
+                labels=["FU5", "FU6"],
+            ),
+            database=self.database,
+        )
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("classes.txt", "FU5\nFU6\n")
+            archive.writestr("images/train/FU5/first.png", self._png_bytes((20, 100, 20)))
+            archive.writestr("images/train/FU6/second.png", self._png_bytes((100, 20, 20)))
+            archive.writestr("labels/train/FU6/second.txt", "1\n")
+        payload.seek(0)
+
+        result = import_offline_yolo_dataset(
+            dataset["id"],
+            archive=UploadFile(filename="classification.zip", file=payload),
+            database=self.database,
+        )
+        self.assertEqual(result["created_count"], 2)
+        items = {item["original_name"]: item for item in get_dataset(dataset["id"], database=self.database)["items"]}
+        self.assertEqual(items["first.png"]["annotation_json"], {"label": "FU5"})
+        self.assertEqual(items["second.png"]["annotation_json"], {"label": "FU6"})
+
 
 if __name__ == "__main__":
     unittest.main()

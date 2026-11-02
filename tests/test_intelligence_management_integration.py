@@ -481,6 +481,17 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["created_count"], 2)
         self.assertEqual(response["source_count"], 2)
         self.assertEqual(response["skipped_non_training_count"], 2)
+        non_training_id = next(
+            item["id"] for item in get_dataset(dataset["id"], database=self.database)["items"]
+            if item["id"] in original_ids and item["split"] in {"VAL", "TEST"}
+        )
+        skipped_response = augment_dataset_images(
+            dataset["id"],
+            DatasetAugmentationRequest(source_item_ids=[non_training_id], horizontal_flip=True),
+            database=self.database,
+        )
+        self.assertEqual(skipped_response["created_count"], 0)
+        self.assertEqual(skipped_response["skipped_non_training_count"], 1)
         saved = get_dataset(dataset["id"], database=self.database)
         augmented_items = [item for item in saved["items"] if item["source"] == "AUGMENTED"]
         self.assertEqual(len(augmented_items), response["created_count"])
@@ -500,6 +511,18 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["applied"]["horizontal_flip"], True)
 
         source_id = augmented_items[0]["annotation_json"]["_meta"]["augmentation"]["source_item_id"]
+        duplicate_response = augment_dataset_images(
+            dataset["id"],
+            DatasetAugmentationRequest(
+                source_item_ids=[source_id],
+                copies_per_item=2,
+                seed=20261031,
+                horizontal_flip=True,
+            ),
+            database=self.database,
+        )
+        self.assertEqual(duplicate_response["created_count"], 0)
+        self.assertEqual(duplicate_response["skipped_duplicate_count"], 2)
         changed = update_dataset_item(
             dataset["id"],
             source_id,
@@ -547,6 +570,49 @@ class IntelligenceManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 database=self.database,
             )
         self.assertEqual(rejected.exception.status_code, 400)
+
+    async def test_augmentation_request_can_generate_more_than_two_hundred_images(self) -> None:
+        dataset = create_dataset(
+            DatasetCreate(
+                code="LARGE_AUGMENTATION_SET",
+                name="批量增强训练集",
+                purpose="TRAIN",
+                media_type="IMAGE",
+                annotation_type="CLASSIFICATION",
+                labels=["FU5"],
+            ),
+            database=self.database,
+        )
+        for index in range(17):
+            buffer = BytesIO()
+            Image.new("RGB", (16, 16), (60 + index, 90, 120)).save(buffer, format="PNG")
+            buffer.seek(0)
+            item = upload_dataset_item(
+                dataset["id"],
+                file=UploadFile(filename=f"source-{index}.png", file=buffer),
+                ground_truth=None,
+                split=None,
+                database=self.database,
+            )
+            update_dataset_item(
+                dataset["id"],
+                item["id"],
+                DatasetItemUpdate(annotation_json={"label": "FU5"}),
+                database=self.database,
+            )
+
+        response = augment_dataset_images(
+            dataset["id"],
+            DatasetAugmentationRequest(
+                copies_per_item=20,
+                seed=20261102,
+                gaussian_noise_std_min=20,
+                gaussian_noise_std_max=20,
+            ),
+            database=self.database,
+        )
+        self.assertGreater(response["created_count"], 200)
+        self.assertEqual(get_dataset(dataset["id"], database=self.database)["augmented_count"], response["created_count"])
 
     async def test_scene_maintenance_evaluation_and_optimization(self) -> None:
         scene = create_scenario(
