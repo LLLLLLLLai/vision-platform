@@ -245,12 +245,15 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _label_for(class_id: int, result_names: Any, labels: tuple[str, ...]) -> str:
-    if class_id < len(labels):
-        return labels[class_id]
     if isinstance(result_names, dict):
-        return str(result_names.get(class_id, class_id))
+        name = result_names.get(class_id, result_names.get(str(class_id)))
+        if name is not None:
+            return str(name)
     if isinstance(result_names, (list, tuple)) and class_id < len(result_names):
-        return str(result_names[class_id])
+        if class_id >= 0:
+            return str(result_names[class_id])
+    if 0 <= class_id < len(labels):
+        return labels[class_id]
     return str(class_id)
 
 

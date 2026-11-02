@@ -188,6 +188,63 @@ class VisionModelRuntimeTests(unittest.TestCase):
         self.assertEqual(output["predicted_label"], "FU5")
         self.assertEqual(output["classification"]["top1_confidence"], 0.999992)
 
+    def test_classification_uses_checkpoint_names_when_card_order_differs(self) -> None:
+        fake_result = SimpleNamespace(
+            names={0: "FU5", 1: "FU6", 2: "FU7"},
+            boxes=None,
+            masks=None,
+            probs=SimpleNamespace(
+                top1=0,
+                top1conf=0.98,
+                top5=[0, 2, 1],
+                top5conf=[0.98, 0.01, 0.01],
+            ),
+        )
+        runtime._load_yolo = lambda _weights: SimpleNamespace(
+            predict=lambda **_kwargs: [fake_result]
+        )
+        spec = runtime.PublishedVisionModelSpec(
+            version_id=7,
+            model_id=2,
+            model_code="AI_HARNESS_CLASSIFICATION",
+            model_name="AI 检测线束分类",
+            task_type="YOLO_CLASSIFICATION",
+            labels=("FU7", "FU6", "FU5"),
+            weights_path=self.weights,
+        )
+
+        output = runtime.run_yolo_inference(spec, str(self.image))
+
+        self.assertEqual(output["classification"]["top1_class_id"], 0)
+        self.assertEqual(output["classification"]["top1_label"], "FU5")
+        self.assertEqual(output["classification"]["top5"][1]["label"], "FU7")
+        self.assertEqual(output["predicted_label"], "FU5")
+
+    def test_detection_uses_checkpoint_names_when_card_order_differs(self) -> None:
+        fake_result = SimpleNamespace(
+            names={0: "FU5", 1: "FU7"},
+            boxes=SimpleNamespace(xyxy=[[1, 2, 30, 34]], conf=[0.9], cls=[0]),
+            masks=None,
+            probs=None,
+        )
+        runtime._load_yolo = lambda _weights: SimpleNamespace(
+            predict=lambda **_kwargs: [fake_result]
+        )
+        spec = runtime.PublishedVisionModelSpec(
+            version_id=8,
+            model_id=3,
+            model_code="AI_HARNESS_DETECTION",
+            model_name="AI 检测线束",
+            task_type="YOLO_DETECTION",
+            labels=("FU7", "FU5"),
+            weights_path=self.weights,
+        )
+
+        output = runtime.run_yolo_inference(spec, str(self.image))
+
+        self.assertEqual(output["objects"][0]["class_id"], 0)
+        self.assertEqual(output["objects"][0]["label"], "FU5")
+
     def test_classification_profile_does_not_advertise_bbox(self) -> None:
         profile = runtime.task_output_profile("YOLO_CLASSIFICATION")
 
