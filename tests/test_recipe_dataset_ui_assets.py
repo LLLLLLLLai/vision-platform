@@ -12,13 +12,27 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
 
         for status in ("ALL", "PENDING", "AI_SUGGESTED", "LABELED"):
             self.assertIn(f'data-item-filter="{status}"', template)
-        for element_id in ("datasetItemSearch", "datasetItemFilterSummary", "datasetLoadMore"):
+        for element_id in (
+            "datasetItemSearch",
+            "datasetItemSourceFilter",
+            "datasetItemSplitFilter",
+            "datasetItemSort",
+            "datasetItemFilterSummary",
+            "datasetItemPagination",
+            "datasetItemPageSize",
+            "datasetPagePrevious",
+            "datasetPageNumber",
+            "datasetPageGo",
+            "datasetPageNext",
+            "datasetLoadMore",
+        ):
             self.assertIn(f'id="{element_id}"', template)
         for marker in (
             "function filteredDatasetItems(",
             "function renderItemFilters(",
             "function resetItemFilters(",
             "items.slice(0, state.visibleItemCount)",
+            "items.slice(start, start + state.itemPageSize)",
             "return filteredDatasetItems(dataset).filter(",
         ):
             self.assertIn(marker, script)

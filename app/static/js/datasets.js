@@ -6,6 +6,8 @@
     datasets: [],
     selectedId: null,
     itemFilter: "ALL",
+    itemPage: 1,
+    itemPageSize: 24,
     visibleItemCount: itemPageSize,
     publishedScenarios: [],
     publishedRecipes: [],
@@ -188,19 +190,34 @@
     const items = dataset?.items || [];
     if (!isTraining(dataset)) return items;
     const query = byId("datasetItemSearch").value.trim().toLowerCase();
-    return items.filter((item) => (
+    const sourceFilter = byId("datasetItemSourceFilter").value;
+    const splitFilter = byId("datasetItemSplitFilter").value;
+    const sort = byId("datasetItemSort").value;
+    const filtered = items.filter((item) => (
       (state.itemFilter === "ALL" || itemAnnotationGroup(item) === state.itemFilter)
+      && (sourceFilter === "ALL" || (sourceFilter === "AUTO"
+        ? ["AUTO_COLLECTION", "AUTO_ROI", "AUTO_ORIGINAL"].includes(String(item.source || "").toUpperCase())
+        : String(item.source || "UPLOAD").toUpperCase() === sourceFilter))
+      && (splitFilter === "ALL" || String(item.split || "UNASSIGNED").toUpperCase() === splitFilter)
       && (!query || String(item.original_name || "").toLowerCase().includes(query))
     ));
+    if (sort === "NAME") return filtered.sort((left, right) => String(left.original_name || "").localeCompare(String(right.original_name || ""), "zh-CN", { numeric: true }));
+    return filtered.sort((left, right) => sort === "OLDEST" ? left.id - right.id : right.id - left.id);
   }
 
   function resetItemFilters() {
     state.itemFilter = "ALL";
+    state.itemPage = 1;
+    state.itemPageSize = 24;
     state.visibleItemCount = itemPageSize;
     byId("datasetItemSearch").value = "";
+    byId("datasetItemSourceFilter").value = "ALL";
+    byId("datasetItemSplitFilter").value = "ALL";
+    byId("datasetItemSort").value = "NEWEST";
+    byId("datasetItemPageSize").value = "24";
   }
 
-  function renderItemFilters(dataset, matchingCount) {
+  function renderItemFilters(dataset, matchingCount, firstVisible, lastVisible) {
     const training = isTraining(dataset);
     byId("datasetItemFilters").hidden = !training;
     const counts = { ALL: 0, PENDING: 0, AI_SUGGESTED: 0, LABELED: 0 };
@@ -217,16 +234,28 @@
       element.textContent = counts[element.dataset.filterCount];
     });
     byId("datasetItemFilterSummary").textContent = training
-      ? `显示 ${Math.min(state.visibleItemCount, matchingCount)} / ${matchingCount} 张，数据集共 ${counts.ALL} 张`
+      ? `显示 ${matchingCount ? `${firstVisible}–${lastVisible}` : "0"} / ${matchingCount} 张，数据集共 ${counts.ALL} 张`
       : `显示 ${Math.min(state.visibleItemCount, matchingCount)} / ${matchingCount} 张`;
   }
 
   function renderItems(dataset) {
     const items = filteredDatasetItems(dataset);
-    renderItemFilters(dataset, items.length);
-    byId("datasetLoadMore").hidden = items.length <= state.visibleItemCount;
+    const training = isTraining(dataset);
+    const totalPages = Math.max(1, Math.ceil(items.length / state.itemPageSize));
+    state.itemPage = Math.min(Math.max(1, state.itemPage), totalPages);
+    const start = training ? (state.itemPage - 1) * state.itemPageSize : 0;
+    const visibleItems = training ? items.slice(start, start + state.itemPageSize) : items.slice(0, state.visibleItemCount);
+    renderItemFilters(dataset, items.length, start + 1, start + visibleItems.length);
+    byId("datasetItemPagination").hidden = !training;
+    byId("datasetPageNumber").value = state.itemPage;
+    byId("datasetPageNumber").max = totalPages;
+    byId("datasetPageTotal").textContent = `/ ${totalPages} 页`;
+    byId("datasetPagePrevious").disabled = state.itemPage <= 1;
+    byId("datasetPageNext").disabled = state.itemPage >= totalPages;
+    byId("datasetLoadMore").hidden = training || items.length <= state.visibleItemCount;
+    byId("datasetItems").classList.toggle("training-paged", training);
     byId("datasetItems").innerHTML = items.length
-      ? items.slice(0, state.visibleItemCount).map((item) => {
+      ? visibleItems.map((item) => {
         const media = item.media_type === "VIDEO"
           ? `<video controls src="${escapeHtml(item.file_url || "")}"></video>`
           : `<button class="dataset-item-preview" data-item-preview="${item.id}" type="button" title="点击查看原图"><img src="${escapeHtml(item.file_url || "")}" alt="${escapeHtml(item.original_name)}"><span>点击查看原图</span></button>`;
@@ -505,13 +534,27 @@
     }
   }
 
+  function itemAnnotationLabels(item) {
+    const annotation = item.annotation_json || {};
+    if (Array.isArray(annotation.boxes)) return annotation.boxes.map((box) => box.label);
+    if (Array.isArray(annotation.segments)) return annotation.segments.map((segment) => segment.label);
+    return annotation.label ? [annotation.label] : [];
+  }
+
+  function datasetLabelUsage(dataset = selected()) {
+    const counts = new Map();
+    for (const item of dataset?.items || []) {
+      if (item.annotation_status !== "LABELED") continue;
+      const labels = new Set(itemAnnotationLabels(item).map((label) => String(label || "").trim().toLocaleLowerCase()).filter(Boolean));
+      for (const label of labels) counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    return counts;
+  }
+
   function datasetLabels(dataset = selected()) {
-    const annotationLabels = (dataset?.items || []).flatMap((item) => {
-      const annotation = item.annotation_json || {};
-      if (Array.isArray(annotation.boxes)) return annotation.boxes.map((box) => box.label);
-      if (Array.isArray(annotation.segments)) return annotation.segments.map((segment) => segment.label);
-      return annotation.label ? [annotation.label] : [];
-    });
+    const annotationLabels = (dataset?.items || [])
+      .filter((item) => item.annotation_status === "LABELED")
+      .flatMap(itemAnnotationLabels);
     return [...new Set([...(dataset?.labels || []), ...annotationLabels]
       .map((label) => String(label || "").trim())
       .filter(Boolean))].sort((left, right) => left.localeCompare(right));
@@ -545,8 +588,12 @@
 
   function renderDatasetLabels(dataset) {
     const labels = datasetLabels(dataset);
+    const usage = datasetLabelUsage(dataset);
     byId("datasetLabelList").innerHTML = labels.length
-      ? labels.map((label) => `<span class="dataset-label-chip">${escapeHtml(label)}<button type="button" data-dataset-label-remove="${escapeHtml(label)}" aria-label="删除 ${escapeHtml(label)}">×</button></span>`).join("")
+      ? labels.map((label) => {
+        const count = usage.get(label.toLocaleLowerCase()) || 0;
+        return `<span class="dataset-label-chip">${escapeHtml(label)}${count ? `<small>${count} 张使用中</small>` : ""}<button type="button" data-dataset-label-remove="${escapeHtml(label)}" aria-label="删除 ${escapeHtml(label)}" title="${count ? `已被 ${count} 张素材使用，请先修改标注` : "删除类别"}">×</button></span>`;
+      }).join("")
       : '<span class="muted-copy">尚未维护类别。可在这里先添加，也可在标注时输入新类别。</span>';
     renderLabelOptions();
   }
@@ -1853,13 +1900,50 @@
       const button = event.target.closest("[data-item-filter]");
       if (!button || !isTraining(selected())) return;
       state.itemFilter = button.dataset.itemFilter;
-      state.visibleItemCount = itemPageSize;
+      state.itemPage = 1;
       renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
     });
     byId("datasetItemSearch").addEventListener("input", () => {
-      state.visibleItemCount = itemPageSize;
+      state.itemPage = 1;
       renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
     });
+    ["datasetItemSourceFilter", "datasetItemSplitFilter", "datasetItemSort"].forEach((id) => {
+      byId(id).addEventListener("change", () => {
+        state.itemPage = 1;
+        renderItems(selected());
+        byId("datasetItems").scrollTop = 0;
+      });
+    });
+    byId("datasetItemPageSize").addEventListener("change", (event) => {
+      state.itemPageSize = Number(event.target.value);
+      state.itemPage = 1;
+      renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
+    });
+    byId("datasetPagePrevious").addEventListener("click", () => {
+      state.itemPage -= 1;
+      renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
+    });
+    byId("datasetPageNext").addEventListener("click", () => {
+      state.itemPage += 1;
+      renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
+    });
+    const jumpToItemPage = () => {
+      state.itemPage = Number(byId("datasetPageNumber").value) || 1;
+      renderItems(selected());
+      byId("datasetItems").scrollTop = 0;
+    };
+    byId("datasetPageNumber").addEventListener("change", jumpToItemPage);
+    byId("datasetPageNumber").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      jumpToItemPage();
+    });
+    byId("datasetPageGo").addEventListener("click", jumpToItemPage);
     byId("datasetLoadMore").addEventListener("click", () => {
       state.visibleItemCount += itemPageSize;
       renderItems(selected());
@@ -1911,6 +1995,11 @@
       const button = event.target.closest("[data-dataset-label-remove]");
       if (!button) return;
       const label = button.dataset.datasetLabelRemove;
+      const usage = datasetLabelUsage().get(label.toLocaleLowerCase()) || 0;
+      if (usage) {
+        notify(`类别“${label}”已用于 ${usage} 张素材。请先修改或删除这些素材的标注，再删除类别。`, "warning");
+        return;
+      }
       const remaining = datasetLabels().filter((item) => item !== label);
       saveDatasetLabels(remaining);
     });

@@ -187,7 +187,8 @@
             </dl>
             <div class="model-card-actions">
               <button class="btn btn-sm btn-outline-secondary" data-edit-vision="${model.id}" type="button">编辑</button>
-              <button class="btn btn-sm btn-outline-secondary" data-toggle-vision-versions="${model.id}" type="button" aria-haspopup="dialog">查看版本</button>
+              <button class="btn btn-sm btn-outline-secondary" data-guide-vision="${model.id}" type="button">模型说明</button>
+              <button class="btn btn-sm btn-outline-secondary" data-toggle-vision-versions="${model.id}" type="button" aria-haspopup="dialog">版本管理</button>
               <button class="btn btn-sm btn-outline-primary" data-import-vision="${model.id}" type="button">导入已训练模型</button>
               <button class="btn btn-sm btn-outline-primary" data-train-vision="${model.id}" type="button">创建训练任务</button>
               ${publishableVersion ? `<button class="btn btn-sm btn-primary" data-publish-vision-version="${publishableVersion.id}" data-model-id="${model.id}" type="button">发布 V${escapeHtml(publishableVersion.version)}</button>` : ""}
@@ -196,6 +197,44 @@
           </article>`;
       }).join("")
       : `<div class="empty-state catalog-empty"><span>◉</span><strong>还没有训练模型</strong><p>先创建 YOLO 模型卡片，再在模型训练页关联数据集训练版本。</p><button class="btn btn-primary btn-sm" type="button" data-create-model="vision">创建训练模型</button></div>`;
+  }
+
+  function openVisionModelGuide(modelId) {
+    const model = state.visionModels.find((item) => item.id === modelId);
+    if (!model) return;
+    const configuredLabels = model.labels_json || [];
+    const published = (model.versions || []).find((version) => version.status === "PUBLISHED");
+    const checkpointLabels = published?.artifact_paths_json?.validation?.class_names || [];
+    const sampleLabel = checkpointLabels[0] || configuredLabels[0] || "目标类别";
+    const guides = {
+      YOLO_DETECTION: {
+        annotation: "逐个框出完整可见的目标，并为每个框选择正确类别；没有目标的图片可以不画框。保持同一类别的标注范围一致。模型只输出目标、数量和位置，OK/NG 由后续规则节点判断。",
+        example: { task_type: "YOLO_DETECTION", object_count: 1, objects: [{ label: sampleLabel, confidence: 0.94, bbox: [120, 80, 310, 240], bbox_format: "XYXY_PIXEL" }] },
+      },
+      YOLO_SEGMENTATION: {
+        annotation: "沿每个目标的可见轮廓绘制多边形，并选择正确类别；遮挡部分不应凭空补画。输出的 bbox 是外接框，mask 是归一化轮廓点；不要把外接框当作精确分割结果。",
+        example: { task_type: "YOLO_SEGMENTATION", object_count: 1, objects: [{ label: sampleLabel, confidence: 0.93, bbox: [120, 80, 310, 240], bbox_format: "XYXY_PIXEL", mask: [[0.12, 0.15], [0.28, 0.16], [0.26, 0.34]], mask_format: "POLYGON_NORMALIZED" }] },
+      },
+      YOLO_CLASSIFICATION: {
+        annotation: "每张图片只选一个整体类别，不需要画框或掩码；多物体图片请先裁剪成待分类区域。训练、验证、测试集应保持相同类别顺序；类别 ID 以权重内的类别顺序为准。",
+        example: { task_type: "YOLO_CLASSIFICATION", predicted_label: sampleLabel, confidence: 0.97, classification: { top1_label: sampleLabel, top1_confidence: 0.97, top5: [{ label: sampleLabel, confidence: 0.97 }] } },
+      },
+    };
+    const guide = guides[model.task_type];
+    const labelList = (labels) => labels.length
+      ? `<div class="vision-guide-labels">${labels.map((label, index) => `<span class="vision-guide-label"><small>${index}</small>${escapeHtml(label)}</span>`).join("")}</div>`
+      : '<p class="muted-copy mb-0">未配置类别。</p>';
+    byId("visionModelGuideModalTitle").textContent = `${model.name} · 模型说明`;
+    byId("visionModelGuideContent").innerHTML = `
+      <div class="vision-guide-layout">
+        <section class="vision-guide-section"><h3>模型用途</h3><p>${escapeHtml(model.description || "暂无详细说明，可在编辑模型中补充。")}</p>
+          <p class="muted-copy mb-0">${escapeHtml(taskLabel(model.task_type))} · 基础权重：${escapeHtml(model.base_model || "未设置")} · 当前生产版本：${escapeHtml(published?.version || "未发布")}</p></section>
+        <section class="vision-guide-section"><h3>模型卡片配置的类别</h3>${labelList(configuredLabels)}</section>
+        ${checkpointLabels.length ? `<section class="vision-guide-section"><h3>当前权重中的实际类别</h3>${labelList(checkpointLabels)}<p class="muted-copy mb-0">推理时优先使用权重内的类别名称；若与卡片不同，请核对标注和训练数据。</p></section>` : '<p class="muted-copy mb-0">推理类别名称以实际权重为准，导入权重时可核对版本校验信息。</p>'}
+        <section class="vision-guide-section"><h3>如何标注</h3><p>${escapeHtml(guide?.annotation || "请根据模型任务类型准备对应标注。")}</p></section>
+        <section class="vision-guide-section"><h3>输出示例</h3><p class="muted-copy">${escapeHtml(model.output_profile?.summary || "通用模型输出结构。")} 以下仅展示核心字段，数值并非实际推理结果；完整结果还包含模型版本、图片和执行参数。</p><pre class="vision-guide-example">${escapeHtml(JSON.stringify(guide?.example || {}, null, 2))}</pre></section>
+      </div>`;
+    modal("visionModelGuideModal").show();
   }
 
   function versionMetricSummary(model, version) {
@@ -237,6 +276,11 @@
         const datasetName = dataset?.name || (version.dataset_id ? `数据集 #${version.dataset_id}` : "未关联数据集");
         const weightsPath = String(version.weights_path || "");
         const weightsName = weightsPath.split(/[\\/]/).pop() || "未生成";
+        const actions = [
+          weightsPath ? `<a class="btn btn-sm btn-outline-primary" href="${api}/vision-models/${model.id}/versions/${version.id}/export" download>导出权重</a>` : "",
+          version.status === "ARCHIVED" && weightsPath ? `<button class="btn btn-sm btn-outline-secondary" data-rollback-vision-version="${version.id}" data-model-id="${model.id}" type="button">回退启用</button>` : "",
+          version.status === "DRAFT" && weightsPath ? `<button class="btn btn-sm btn-primary" data-publish-vision-version="${version.id}" data-model-id="${model.id}" type="button">发布</button>` : "",
+        ].filter(Boolean).join("");
         return `<tr>
           <td><strong>V${escapeHtml(version.version)}</strong></td>
           <td><span class="status-pill ${status[1]}">${escapeHtml(status[0])}</span></td>
@@ -244,9 +288,10 @@
           <td>${versionMetricSummary(model, version)}</td>
           <td>${escapeHtml(formatDateTime(version.published_at))}</td>
           <td><span class="small text-break" title="${escapeHtml(weightsPath)}">${escapeHtml(weightsName)}</span></td>
+          <td><div class="vision-version-actions">${actions || "—"}</div></td>
         </tr>`;
       }).join("")
-      : '<tr><td colspan="6" class="text-center text-muted py-4">暂无版本，训练或导入权重后会显示在这里。</td></tr>';
+      : '<tr><td colspan="7" class="text-center text-muted py-4">暂无版本，训练或导入权重后会显示在这里。</td></tr>';
     modal("visionVersionsModal").show();
   }
 
@@ -617,7 +662,7 @@
     if (!artifacts.length) {
       return '<div class="artifact-empty-state">训练图表将在任务完成且训练框架产出相应文件后显示。等待 GPU、训练中或历史任务未保留图表时，此处会保持为空。</div>';
     }
-    return `<div class="training-artifact-grid">${artifacts.map(([key, title, description]) => `<figure class="training-artifact-card"><img class="training-artifact-image" src="${escapeHtml(artifactUrls[key])}" alt="${escapeHtml(title)}" loading="lazy"><figcaption><strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span></figcaption></figure>`).join("")}</div>`;
+    return `<div class="training-artifact-grid">${artifacts.map(([key, title, description]) => `<figure class="training-artifact-card"><button class="training-artifact-open" type="button" data-training-image="${escapeHtml(artifactUrls[key])}" data-training-image-title="${escapeHtml(title)}" aria-label="放大查看${escapeHtml(title)}"><img class="training-artifact-image" src="${escapeHtml(artifactUrls[key])}" alt="${escapeHtml(title)}" loading="lazy"></button><figcaption><strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span></figcaption></figure>`).join("")}</div>`;
   }
 
   function trainingMetricsMarkup(metrics) {
@@ -685,6 +730,20 @@
     modal("trainingJobDetailModal").show();
   }
 
+  function closeTrainingImage() {
+    const viewer = byId("trainingImageViewer");
+    viewer.hidden = true;
+    byId("trainingImageViewerImage").removeAttribute("src");
+  }
+
+  function openTrainingImage(button) {
+    byId("trainingImageViewerImage").src = button.dataset.trainingImage;
+    byId("trainingImageViewerImage").alt = button.dataset.trainingImageTitle;
+    byId("trainingImageViewerCaption").textContent = button.dataset.trainingImageTitle;
+    byId("trainingImageViewer").hidden = false;
+    byId("trainingImageViewerClose").focus();
+  }
+
   async function deleteVision(id) {
     if (!confirm("删除后不能再新建训练任务，已有训练记录仍会保留。确认删除吗？")) return;
     try {
@@ -700,7 +759,20 @@
     try {
       await request(`${api}/vision-models/${modelId}/versions/${versionId}/publish`, { method: "POST" });
       await loadData();
+      if (byId("visionVersionsModal").classList.contains("show")) openVisionVersions(modelId);
       notify("模型版本已发布，可在流程节点中选择。");
+    } catch (error) {
+      notify(error.message, "danger");
+    }
+  }
+
+  async function rollbackVisionVersion(modelId, versionId) {
+    if (!confirm("将此历史版本重新设为当前发布版本？已发布流程固定引用的模型版本不会自动改变；如需切换生产流程，请另行更新并发布场景。")) return;
+    try {
+      await request(`${api}/vision-models/${modelId}/versions/${versionId}/rollback`, { method: "POST" });
+      await loadData();
+      openVisionVersions(modelId);
+      notify("历史版本已重新启用；已发布流程的固定版本引用未改变。", "success");
     } catch (error) {
       notify(error.message, "danger");
     }
@@ -779,6 +851,7 @@
 
     byId("visionModelList").addEventListener("click", (event) => {
       const versions = event.target.closest("[data-toggle-vision-versions]");
+      const guide = event.target.closest("[data-guide-vision]");
       const train = event.target.closest("[data-train-vision]");
       const edit = event.target.closest("[data-edit-vision]");
       const importVersion = event.target.closest("[data-import-vision]");
@@ -787,6 +860,7 @@
       if (versions) {
         openVisionVersions(Number(versions.dataset.toggleVisionVersions));
       }
+      if (guide) openVisionModelGuide(Number(guide.dataset.guideVision));
       if (train) openTrainingForModel(Number(train.dataset.trainVision));
       if (edit) openVisionModal(state.visionModels.find((item) => item.id === Number(edit.dataset.editVision)));
       if (importVersion) openImportVisionVersion(Number(importVersion.dataset.importVision));
@@ -794,11 +868,29 @@
       if (publish) publishVisionVersion(Number(publish.dataset.modelId), Number(publish.dataset.publishVisionVersion));
     });
 
+    byId("visionVersionsList").addEventListener("click", (event) => {
+      const publish = event.target.closest("[data-publish-vision-version]");
+      const rollback = event.target.closest("[data-rollback-vision-version]");
+      if (publish) publishVisionVersion(Number(publish.dataset.modelId), Number(publish.dataset.publishVisionVersion));
+      if (rollback) rollbackVisionVersion(Number(rollback.dataset.modelId), Number(rollback.dataset.rollbackVisionVersion));
+    });
+
     byId("automationJobList").addEventListener("click", (event) => {
       const detail = event.target.closest("[data-training-job-detail]");
       const button = event.target.closest("[data-cancel-job]");
       if (detail) openTrainingJobDetail(Number(detail.dataset.trainingJobDetail));
       if (button) cancelJob(Number(button.dataset.cancelJob));
+    });
+
+    byId("trainingJobDetailContent").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-training-image]");
+      if (button) openTrainingImage(button);
+    });
+    byId("trainingImageViewer").addEventListener("click", closeTrainingImage);
+    byId("trainingImageViewerClose").addEventListener("click", closeTrainingImage);
+    byId("trainingJobDetailModal").addEventListener("hidden.bs.modal", closeTrainingImage);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !byId("trainingImageViewer").hidden) closeTrainingImage();
     });
 
     byId("trainingVisionModel").addEventListener("change", updateTrainingSelectionHint);

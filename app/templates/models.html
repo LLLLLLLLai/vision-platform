@@ -113,11 +113,20 @@
     <div class="modal-header"><div><small class="text-primary">模型版本</small><h2 class="modal-title fs-5" id="visionVersionsModalTitle">版本列表</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
     <div class="modal-body">
       <p class="muted-copy" id="visionVersionsSummary"></p>
+      <p class="muted-copy">导出会下载所选版本的 .pt 权重；回退仅切换模型卡片的当前发布版本，不会更改已发布场景中固定引用的模型版本。</p>
       <div class="table-responsive"><table class="table table-hover align-middle mb-0">
-        <thead><tr><th scope="col">版本</th><th scope="col">状态</th><th scope="col">训练数据集</th><th scope="col">关键指标</th><th scope="col">发布时间</th><th scope="col">权重文件</th></tr></thead>
+        <thead><tr><th scope="col">版本</th><th scope="col">状态</th><th scope="col">训练数据集</th><th scope="col">关键指标</th><th scope="col">最近启用时间</th><th scope="col">权重文件</th><th scope="col">操作</th></tr></thead>
         <tbody id="visionVersionsList"></tbody>
       </table></div>
     </div>
+    <div class="modal-footer"><button class="btn btn-primary" type="button" data-bs-dismiss="modal">关闭</button></div>
+  </div></div>
+</div>
+
+<div class="modal fade" id="visionModelGuideModal" tabindex="-1" aria-labelledby="visionModelGuideModalTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header"><div><small class="text-primary">MODEL GUIDE</small><h2 class="modal-title fs-5" id="visionModelGuideModalTitle">模型说明</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+    <div class="modal-body" id="visionModelGuideContent"></div>
     <div class="modal-footer"><button class="btn btn-primary" type="button" data-bs-dismiss="modal">关闭</button></div>
   </div></div>
 </div>
@@ -177,6 +186,12 @@
   </div></div>
 </div>
 
-<link href="{{ url_for('static', path='/css/management.css') }}?v=20260928-02" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/models.js') }}?v=20261102-02"></script>
+<div class="training-image-viewer" id="trainingImageViewer" role="dialog" aria-modal="true" aria-label="查看训练图片" hidden>
+  <button class="training-image-viewer-close" id="trainingImageViewerClose" type="button" aria-label="关闭图片查看">×</button>
+  <img id="trainingImageViewerImage" alt="训练图片">
+  <span id="trainingImageViewerCaption"></span>
+</div>
+
+<link href="{{ url_for('static', path='/css/management.css') }}?v=20261103-06" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20261103-06"></script>
 {% endblock %}

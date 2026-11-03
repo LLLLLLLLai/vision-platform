@@ -1,3 +1,29 @@
+#vlmModelModal .modal-content > form,
+#visionModelModal .modal-content > form,
+#importVisionVersionModal .modal-content > form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#vlmModelModal .modal-content > form > .modal-body,
+#visionModelModal .modal-content > form > .modal-body,
+#importVisionVersionModal .modal-content > form > .modal-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.vision-version-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 180px; }
+.vision-guide-layout { display: grid; gap: 12px; }
+.vision-guide-section { min-width: 0; padding: 14px 16px; border: 1px solid #e2e9f2; border-radius: 12px; background: #fff; }
+.vision-guide-section h3 { margin: 0 0 8px; color: #294564; font-size: .95rem; }
+.vision-guide-section p { margin: 0 0 8px; color: #43546c; line-height: 1.6; overflow-wrap: anywhere; }
+.vision-guide-labels { display: flex; flex-wrap: wrap; gap: 7px; }
+.vision-guide-label { display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 8px; background: #edf4ff; color: #244d89; font-size: .82rem; }
+.vision-guide-label small { color: #6b85a9; }
+.vision-guide-example { max-height: 300px; margin: 0; padding: 12px; overflow: auto; border-radius: 9px; background: #10213a; color: #e2edff; font-size: .78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* Detail drawers stay inside the viewport even when prompts or diagnostics are long. */
 #taskDetailModal .modal-dialog,
 #trainingJobDetailModal .modal-dialog {
@@ -289,6 +315,14 @@
   aspect-ratio: 4 / 3;
   object-fit: contain;
 }
+
+.training-artifact-open { display: block; width: 100%; padding: 0; border: 0; background: #f3f6fa; cursor: zoom-in; }
+.training-artifact-open:focus-visible { outline: 3px solid #3376d7; outline-offset: -3px; }
+.training-image-viewer[hidden] { display: none; }
+.training-image-viewer { position: fixed; inset: 0; z-index: 2000; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 44px 20px 20px; background: rgba(9, 18, 34, .9); cursor: zoom-out; }
+.training-image-viewer img { display: block; max-width: 100%; max-height: calc(100dvh - 100px); object-fit: contain; }
+.training-image-viewer span { color: #fff; font-weight: 700; }
+.training-image-viewer-close { position: absolute; top: 12px; right: 20px; border: 0; background: transparent; color: #fff; font-size: 32px; line-height: 1; cursor: pointer; }
 
 @media (max-width: 820px) {
   #taskDetailModal .modal-dialog,

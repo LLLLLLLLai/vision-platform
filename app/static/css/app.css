@@ -4575,3 +4575,217 @@ button, input, select { font: inherit; }
   border: 1px dashed #cdd8e4;
   border-radius: .5rem;
 }
+
+.management-page .task-table-wrap,
+.management-page .model-card-list,
+.management-page .model-card-grid,
+.management-page .job-list,
+.management-page .entity-list-card,
+.management-page .dataset-item-grid,
+.recipe-library-table-wrap,
+.detection-records-table-wrap,
+.report-table-wrap {
+  max-height: min(70vh, 780px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.management-page .task-table-wrap .task-table th,
+.recipe-library-table-wrap th,
+.detection-records-table-wrap th,
+.report-table-wrap th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f7f9fc;
+}
+
+#detectionRecordDetailModal .modal-dialog {
+  width: calc(100% - 24px);
+  max-width: min(1380px, calc(100vw - 24px));
+  margin: 12px auto;
+}
+
+#detectionRecordDetailModal .modal-body {
+  min-width: 0;
+  max-height: calc(100dvh - 116px);
+  overflow: auto;
+}
+
+.record-recipe-detail,
+.record-image-detail,
+.record-roi-detail {
+  min-width: 0;
+}
+
+.record-recipe-detail h3 { font-size: 15px; line-height: 1.45; }
+.record-roi-detail > header strong { font-size: 14px; }
+.record-detail-image figcaption { font-size: 11px; }
+.record-roi-detail dt,
+.record-roi-detail dd { font-size: 12px; line-height: 1.5; }
+
+.record-image-detail > header strong,
+.record-recipe-detail h3 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.record-image-open {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: #172033;
+  cursor: zoom-in;
+}
+
+.record-image-open img {
+  width: 100%;
+}
+
+.record-image-open span {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(12, 25, 44, .78);
+  font-size: 11px;
+}
+
+.record-image-lightbox[hidden],
+.record-processing-json[hidden] {
+  display: none;
+}
+
+.record-image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  place-items: center;
+  gap: 10px;
+  padding: 54px 24px 22px;
+  background: rgba(10, 18, 32, .94);
+}
+
+.record-image-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  cursor: zoom-out;
+}
+
+.record-image-lightbox p {
+  margin: 0;
+  color: #e7eef9;
+  font-size: 13px;
+}
+
+.record-image-lightbox-close {
+  position: absolute;
+  top: 12px;
+  right: 18px;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(255, 255, 255, .3);
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(255, 255, 255, .1);
+  font-size: 25px;
+  line-height: 1;
+}
+
+.record-processing {
+  min-width: 0;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d8e5f4;
+  border-radius: 10px;
+  background: #f7fbff;
+}
+
+.record-processing > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.record-processing > header strong {
+  color: #294969;
+  font-size: 12px;
+}
+
+.record-processing-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+  margin-top: 10px;
+}
+
+.record-processing-facts div {
+  min-width: 0;
+}
+
+.record-processing-facts span {
+  display: block;
+  color: #77889c;
+  font-size: 10px;
+}
+
+.record-processing-facts b {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: #2e4662;
+  font-size: 12px;
+}
+
+.record-processing-traces {
+  display: grid;
+  gap: 5px;
+  max-height: 180px;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.record-processing-traces > div {
+  display: grid;
+  grid-template-columns: minmax(90px, .8fr) minmax(0, 1.5fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 11px;
+}
+
+.record-processing-traces span { color: #6f8198; }
+.record-processing-traces b { min-width: 0; overflow-wrap: anywhere; color: #2f4e73; }
+.record-processing-traces small { white-space: nowrap; }
+
+.record-processing-json {
+  max-height: 280px;
+  margin: 10px 0 0;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 8px;
+  color: #dbeafe;
+  background: #172033;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .record-roi-image-row,
+  .record-recipe-image-row,
+  .record-processing-facts {
+    grid-template-columns: 1fr;
+  }
+}

@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.models.intelligence import AutomationJob, Dataset, VisionModel, VisionModelVersion
 from app.services.dataset_split import assign_training_splits
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.services.vision_model_runtime import (
     VisionModelRuntimeError,
     resolve_weights_path,
@@ -155,6 +156,33 @@ def _version_payload(version: VisionModelVersion) -> dict[str, Any]:
         "artifact_paths_json": version.artifact_paths_json,
         "published_at": version.published_at.isoformat() if version.published_at else None,
     }
+
+
+def _model_version_or_404(database: Session, model_id: int, version_id: int) -> VisionModelVersion:
+    version = database.get(VisionModelVersion, version_id)
+    if version is None or version.vision_model_id != model_id or version.is_deleted:
+        raise HTTPException(status_code=404, detail="模型版本不存在。")
+    return version
+
+
+def _exportable_weights_path(version: VisionModelVersion) -> Path:
+    weights_path = resolve_weights_path(version.weights_path)
+    if weights_path is None or weights_path.suffix.lower() != ".pt":
+        raise HTTPException(status_code=400, detail="该版本没有可导出的 .pt 权重文件。")
+    resolved = weights_path.resolve()
+    configured_roots = (
+        Path(settings.vision_model_storage_root),
+        Path(settings.training_artifacts_root),
+    )
+    allowed_roots = (_weights_root().resolve(),) + tuple(
+        (root if root.is_absolute() else PROJECT_ROOT / root).resolve()
+        for root in configured_roots
+    )
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(status_code=400, detail="权重文件不在允许导出的模型或训练目录中。")
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail="权重文件不存在，请检查该版本的训练产物。")
+    return resolved
 
 
 def _model_payload(model: VisionModel) -> dict[str, Any]:
@@ -434,11 +462,9 @@ def publish_model_version(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     model = database.get(VisionModel, model_id)
-    version = database.get(VisionModelVersion, version_id)
     if model is None or model.is_deleted or not model.enabled:
         raise HTTPException(status_code=404, detail="视觉模型不存在或已停用。")
-    if version is None or version.vision_model_id != model_id or version.is_deleted:
-        raise HTTPException(status_code=404, detail="模型版本不存在。")
+    version = _model_version_or_404(database, model_id, version_id)
     if not version.weights_path:
         raise HTTPException(status_code=400, detail="模型版本尚未上传或产出权重文件。")
     weights_path = resolve_weights_path(version.weights_path)
@@ -451,11 +477,38 @@ def publish_model_version(
         VisionModelVersion.vision_model_id == model_id,
         VisionModelVersion.id != version.id,
         VisionModelVersion.status == "PUBLISHED",
-    ).update({"status": "ARCHIVED"}, synchronize_session=False)
+    ).update({"status": "ARCHIVED"}, synchronize_session="fetch")
     version.status = "PUBLISHED"
     version.published_at = datetime.utcnow()
     database.commit()
     return _version_payload(version)
+
+
+@router.post("/{model_id}/versions/{version_id}/rollback")
+def rollback_model_version(
+    model_id: int,
+    version_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    version = _model_version_or_404(database, model_id, version_id)
+    if version.status != "ARCHIVED":
+        raise HTTPException(status_code=409, detail="只能回退到曾发布过的归档版本。")
+    return publish_model_version(model_id, version_id, database)
+
+
+@router.get("/{model_id}/versions/{version_id}/export")
+def export_model_version(
+    model_id: int,
+    version_id: int,
+    database: Session = Depends(get_db),
+) -> FileResponse:
+    model = database.get(VisionModel, model_id)
+    if model is None or model.is_deleted:
+        raise HTTPException(status_code=404, detail="视觉模型不存在。")
+    version = _model_version_or_404(database, model_id, version_id)
+    weights_path = _exportable_weights_path(version)
+    filename = f"{_safe_path_component(model.code)}_{_safe_path_component(version.version)}.pt"
+    return FileResponse(weights_path, media_type="application/octet-stream", filename=filename)
 
 
 @router.post("/{model_id}/training-jobs")

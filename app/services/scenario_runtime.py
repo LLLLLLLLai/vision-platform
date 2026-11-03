@@ -41,6 +41,7 @@ from app.services.openai_compatible_vlm import (
     vlm_client,
 )
 from app.services.dataset_collection_service import try_collect_roi_for_matching_datasets
+from app.services.loop_body_graph import loop_body_connections
 from app.services.remote_yolo_inference import run_remote_yolo_inference
 from app.services.scene_s3_storage import SceneS3Storage, SceneS3StorageError
 from app.services.vision_model_runtime import (
@@ -342,7 +343,7 @@ def _select_published_vision_model(
         .options(selectinload(VisionModelVersion.vision_model))
         .where(VisionModelVersion.id == version_id)
     )
-    if version is None or version.is_deleted or version.status != "PUBLISHED":
+    if version is None or version.is_deleted or version.status not in {"PUBLISHED", "ARCHIVED"}:
         raise ScenarioRuntimeError(
             f"模型节点 {node.name} 引用的模型版本不存在或尚未发布。"
         )
@@ -1483,27 +1484,19 @@ class ScenarioRuntime:
             id=len(body) + 1, node_key="loop_end", name="循环结束", node_type="END",
             sort_order=len(body) + 1, config_json={"output": config.get("body_output") or {}}, enabled=True,
         ))
-        body_edges = [ScenarioEdge(
-            source_node_key="loop_start", target_node_key=body_nodes[1].node_key, mapping_json={},
-        )]
-        for position, entry in enumerate(body):
-            source_key = body_nodes[position + 1].node_key
-            default_target = body_nodes[position + 2].node_key
-            if entry["node_type"] == "IF":
-                true_target = str(entry.get("true_next_node_key") or default_target)
-                false_target = str(entry.get("false_next_node_key") or "loop_end")
-                destinations = [(true_target, "true"), (false_target, "false")]
-                if true_target == false_target:
-                    destinations = [(true_target, None)]
-            else:
-                destinations = [(str(entry.get("next_node_key") or default_target), None)]
-            for target_key, branch in destinations:
-                if target_key not in keys:
-                    raise ScenarioRuntimeError(f"循环体节点 {source_key} 指向不存在的节点 {target_key}。")
-                body_edges.append(ScenarioEdge(
-                    source_node_key=source_key, target_node_key=target_key,
-                    mapping_json={"branch": branch} if branch else {},
-                ))
+        body_edges = []
+        for connection in loop_body_connections(body, config.get("body_edges")):
+            if not isinstance(connection, dict):
+                raise ScenarioRuntimeError("循环体连线格式无效。")
+            source_key = str(connection.get("source_node_key") or "")
+            target_key = str(connection.get("target_node_key") or "")
+            if source_key not in keys or target_key not in keys:
+                raise ScenarioRuntimeError(f"循环体连线 {source_key} → {target_key} 指向不存在的节点。")
+            branch = str(connection.get("branch") or "").lower()
+            body_edges.append(ScenarioEdge(
+                source_node_key=source_key, target_node_key=target_key,
+                mapping_json={"branch": branch} if branch else {},
+            ))
         body_version = SimpleNamespace(
             nodes=body_nodes, edges=body_edges, scenario=scenario_version.scenario,
             primary_vlm_model_id=scenario_version.primary_vlm_model_id,

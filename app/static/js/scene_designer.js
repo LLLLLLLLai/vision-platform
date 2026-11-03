@@ -2,10 +2,12 @@
   const api = "/api/v1";
   const canvasWidth = 2200;
   const canvasHeight = 1320;
-  const subflowWidth = 1280;
-  const subflowHeight = 620;
+  const subflowWidth = 1380;
+  const subflowHeight = 720;
   const nodeWidth = 224;
   const nodeHeight = 96;
+  const loopGraphNodeWidth = 190;
+  const loopGraphNodeHeight = 86;
   const byId = (id) => document.getElementById(id);
   const sceneId = Number(byId("sceneDesigner").dataset.sceneId);
   const state = {
@@ -32,8 +34,15 @@
     directTestValues: {},
     pendingNodeKeys: new Set(),
     loopBodyDraft: null,
+    loopBodyEdges: null,
+    loopBodyLayout: null,
     loopBodyNodeId: null,
+    loopBodySelectedKey: null,
+    loopBodySelectedEdge: null,
+    loopBodyConnecting: null,
+    loopBodyDrag: null,
     subflowNodeId: null,
+    subflowPreviousZoom: null,
   };
 
   const escapeHtml = (value) => String(value ?? "")
@@ -777,8 +786,7 @@
     const parent = nodes.find((node) => node.id === state.subflowNodeId);
     if (!parent) return { positions, subflow: null, container: null, expandedNodeId: null, width: canvasWidth, height: canvasHeight };
     const parentPosition = positions.get(parent.id);
-    const viewportWidth = byId("workflowCanvasViewport")?.clientWidth || subflowWidth * state.zoom + 32;
-    const containerWidth = Math.min(subflowWidth, Math.max(850, Math.floor((viewportWidth - 32) / state.zoom)));
+    const containerWidth = subflowWidth;
     const container = { x: parentPosition.x, y: parentPosition.y, width: containerWidth, height: nodeHeight + subflowHeight + 12 };
     const subflow = { x: container.x + 12, y: container.y + nodeHeight, width: container.width - 24, height: subflowHeight };
     for (const node of nodes) {
@@ -1865,7 +1873,29 @@
     syncLoopBodyEditor();
     const body = deepCopy(state.loopBodyDraft);
     if (!body.length) throw new Error("请先在子流程中添加处理节点。");
-    body.forEach((child) => {
+    const byKey = new Map(body.map((entry) => [entry.node_key, entry]));
+    const indegree = new Map(body.map((entry) => [entry.node_key, 0]));
+    const outgoing = new Map(body.map((entry) => [entry.node_key, []]));
+    (state.loopBodyEdges || []).forEach((edge) => {
+      if (!byKey.has(edge.source_node_key) || !byKey.has(edge.target_node_key)) return;
+      outgoing.get(edge.source_node_key).push(edge.target_node_key);
+      indegree.set(edge.target_node_key, indegree.get(edge.target_node_key) + 1);
+    });
+    const ordered = [];
+    const ready = body.filter((entry) => indegree.get(entry.node_key) === 0);
+    while (ready.length) {
+      const entry = ready.shift();
+      ordered.push(entry);
+      outgoing.get(entry.node_key).forEach((target) => {
+        indegree.set(target, indegree.get(target) - 1);
+        if (indegree.get(target) === 0) ready.push(byKey.get(target));
+      });
+    }
+    if (ordered.length !== body.length) throw new Error("循环体内存在闭环，请删除回连的连线。");
+    ordered.forEach((child) => {
+      delete child.next_node_key;
+      delete child.true_next_node_key;
+      delete child.false_next_node_key;
       if (child.node_type !== "WEB_API") return;
       const config = child.config_json || {};
       config.headers = parseJson(config.headers, `${child.name} 请求头`, {});
@@ -1873,7 +1903,20 @@
         config.body = parseJson(config.body, `${child.name} 请求体`, {});
       }
     });
-    return body;
+    return ordered;
+  }
+
+  function legacyLoopBodyEdges(nodes) {
+    if (!nodes.length) return [];
+    const edges = [{ source_node_key: "loop_start", target_node_key: nodes[0].node_key }];
+    nodes.forEach((entry, index) => {
+      const next = nodes[index + 1]?.node_key || "loop_end";
+      if (entry.node_type === "IF") {
+        edges.push({ source_node_key: entry.node_key, target_node_key: entry.true_next_node_key || next, branch: "true" });
+        edges.push({ source_node_key: entry.node_key, target_node_key: entry.false_next_node_key || "loop_end", branch: "false" });
+      } else edges.push({ source_node_key: entry.node_key, target_node_key: entry.next_node_key || next });
+    });
+    return edges;
   }
 
   function loopBodyField(label, field, value, { multiline = false, placeholder = "", type = "text" } = {}) {
@@ -1896,25 +1939,82 @@
     return "";
   }
 
+  function loopGraphPositions() {
+    const positions = new Map([
+      ["loop_start", state.loopBodyLayout?.loop_start || { x: 48, y: 128 }],
+      ["loop_end", state.loopBodyLayout?.loop_end || { x: 48 + (state.loopBodyDraft.length + 1) * 248, y: 128 }],
+    ]);
+    state.loopBodyDraft.forEach((entry, index) => positions.set(entry.node_key, {
+      x: Number.isFinite(Number(entry.canvas_x)) ? Number(entry.canvas_x) : 48 + (index + 1) * 248,
+      y: Number.isFinite(Number(entry.canvas_y)) ? Number(entry.canvas_y) : 128,
+    }));
+    return positions;
+  }
+
+  function loopGraphGeometry() {
+    const positions = loopGraphPositions();
+    return {
+      positions,
+      width: Math.max(920, ...[...positions.values()].map((point) => point.x + loopGraphNodeWidth + 80)),
+      height: Math.max(420, ...[...positions.values()].map((point) => point.y + loopGraphNodeHeight + 110)),
+    };
+  }
+
+  function loopGraphPath(source, target, branch = "") {
+    const startX = source.x + loopGraphNodeWidth;
+    const startY = source.y + (branch === "true" ? 32 : branch === "false" ? 58 : loopGraphNodeHeight / 2);
+    const endX = target.x;
+    const endY = target.y + loopGraphNodeHeight / 2;
+    const bend = Math.max(64, Math.abs(endX - startX) * 0.44);
+    return `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`;
+  }
+
+  function renderLoopGraphEdges() {
+    const layer = byId("loopGraphEdges");
+    if (!layer) return;
+    const { positions, width, height } = loopGraphGeometry();
+    layer.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    layer.setAttribute("width", width);
+    layer.setAttribute("height", height);
+    layer.innerHTML = `<defs><marker id="loopGraphArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z"></path></marker></defs>${(state.loopBodyEdges || []).map((edge, index) => {
+      const source = positions.get(edge.source_node_key);
+      const target = positions.get(edge.target_node_key);
+      if (!source || !target) return "";
+      const path = loopGraphPath(source, target, edge.branch);
+      return `<g class="loop-graph-edge ${state.loopBodySelectedEdge === index ? "selected" : ""}" data-loop-edge="${index}"><path class="loop-graph-edge-hit" d="${path}"></path><path class="loop-graph-edge-line" d="${path}" marker-end="url(#loopGraphArrow)"></path>${edge.branch ? `<text x="${(source.x + target.x + loopGraphNodeWidth) / 2}" y="${(source.y + target.y + loopGraphNodeHeight) / 2 - 12}">${edge.branch === "true" ? "是" : "否"}</text>` : ""}</g>`;
+    }).join("")}${state.loopBodyConnecting?.pointer ? `<path class="loop-graph-pending" d="${loopGraphPath(positions.get(state.loopBodyConnecting.source), { x: state.loopBodyConnecting.pointer.x, y: state.loopBodyConnecting.pointer.y - loopGraphNodeHeight / 2 }, state.loopBodyConnecting.branch)}"></path>` : ""}`;
+  }
+
+  function loopGraphNodeMarkup(key, type, name, position, readonly) {
+    const selected = state.loopBodySelectedKey === key;
+    const output = type === "END" ? "" : type === "IF"
+      ? `<button type="button" class="loop-graph-port output true" data-loop-output="${escapeHtml(key)}" data-loop-branch="true" title="条件成立：拖到下一个节点输入端点">是</button><button type="button" class="loop-graph-port output false" data-loop-output="${escapeHtml(key)}" data-loop-branch="false" title="条件不成立：拖到下一个节点输入端点">否</button>`
+      : `<button type="button" class="loop-graph-port output" data-loop-output="${escapeHtml(key)}" title="拖动连线到下一个节点输入端点"></button>`;
+    return `<article class="loop-graph-node loop-graph-${type.toLowerCase()} ${selected ? "selected" : ""}" data-loop-node-key="${escapeHtml(key)}" style="left:${position.x}px;top:${position.y}px" tabindex="0" aria-label="${escapeHtml(name)}"><button type="button" class="loop-graph-port input" data-loop-input="${escapeHtml(key)}" title="输入端点" ${key === "loop_start" ? "hidden" : ""}></button><div class="loop-graph-node-content"><span class="loop-graph-node-icon">${nodeTypeIcon(type)}</span><div><small>${escapeHtml(nodeTypeLabel(type))}</small><strong>${escapeHtml(name)}</strong><code>${escapeHtml(key)}</code></div></div>${output}</article>`;
+  }
+
   function renderLoopBodyEditor() {
     const target = byId("nodeLoopBodyEditor");
     if (!target || !state.loopBodyDraft) return;
     const readonly = !isDraft();
     const nodes = state.loopBodyDraft;
-    const destinationOptions = (index, selected, fallback) => {
-      const destinations = [...nodes.slice(index + 1).map((item) => [item.node_key, item.name || item.node_key]), ["loop_end", "循环结束"]];
-      if (selected && !destinations.some(([key]) => key === selected)) destinations.unshift([selected, `无效目标：${selected}`]);
-      return destinations.map(([key, label]) => `<option value="${escapeHtml(key)}" ${(selected || fallback) === key ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
-    };
     const conditionLoop = nodeById(state.selectedNodeId)?.node_type === "CONDITION_LOOP";
-    target.innerHTML = `<div class="loop-body-heading"><strong>${conditionLoop ? "循环体 · 每轮执行一次" : "子流程 · 每项执行一次"}</strong><small>${nodes.length} 个处理节点</small><button type="button" class="btn btn-outline-primary btn-sm" data-subflow-inspector-open>在画布中展开 ↓</button></div><div class="loop-body-track"><div class="loop-body-boundary">▶ ${conditionLoop ? "本轮开始" : "本项开始"} <code>${conditionLoop ? "state.* / input.item.*" : "input.item.*"}</code></div>${nodes.map((entry, index) => {
-      const nextKey = nodes[index + 1]?.node_key || "loop_end";
-      const routing = entry.node_type === "IF"
-        ? `<div class="loop-body-routing"><label><span>条件成立 →</span><select class="form-select form-select-sm" data-loop-route="true_next_node_key">${destinationOptions(index, entry.true_next_node_key, nextKey)}</select></label><label><span>条件不成立 →</span><select class="form-select form-select-sm" data-loop-route="false_next_node_key">${destinationOptions(index, entry.false_next_node_key, "loop_end")}</select></label></div>`
-        : `<div class="loop-body-routing"><label><span>执行后连接 →</span><select class="form-select form-select-sm" data-loop-route="next_node_key">${destinationOptions(index, entry.next_node_key, nextKey)}</select></label></div>`;
-      return `<article class="loop-body-card" data-loop-index="${index}"><header><span>${index + 1}. ${escapeHtml(nodeTypeLabel(entry.node_type))}</span><input class="form-control form-control-sm" data-loop-name value="${escapeHtml(entry.name || entry.node_key)}" aria-label="节点名称" ${readonly ? "readonly" : ""}><code>${escapeHtml(entry.node_key)}</code>${readonly ? "" : `<button type="button" class="btn btn-outline-secondary btn-sm" data-loop-move="up" data-loop-index="${index}" ${index === 0 ? "disabled" : ""} title="上移">↑</button><button type="button" class="btn btn-outline-secondary btn-sm" data-loop-move="down" data-loop-index="${index}" ${index === nodes.length - 1 ? "disabled" : ""} title="下移">↓</button><button type="button" class="btn btn-outline-danger btn-sm" data-loop-remove="${index}" title="删除节点">×</button>`}</header><div class="loop-body-fields">${loopBodyNodeFields(entry)}${routing}</div></article><div class="loop-body-arrow">↓</div>`;
-    }).join("")}<div class="loop-body-boundary">■ ${conditionLoop ? "本轮结束" : "本项结束"} · 收集最后节点输出</div></div>${readonly ? "" : `<div class="loop-body-add"><select id="nodeLoopAddType" class="form-select form-select-sm">${loopBodyTypes.map((type) => `<option value="${type}">${escapeHtml(nodeTypeLabel(type))}</option>`).join("")}</select><button type="button" class="btn btn-outline-primary btn-sm" id="nodeLoopAdd">＋ 添加内部节点</button></div>`}<p class="muted-copy">默认顺序连接；条件分支可分别选择后续节点。${conditionLoop ? '本轮状态用 <code>{{ state.变量名 }}</code>，轮次用 <code>{{ input.item.index }}</code>。' : '当前项用 <code>{{ input.item.* }}</code>。'}内部上游用 <code>{{ nodes.节点键.* }}</code>；外层用 <code>{{ parent.nodes.节点键.* }}</code>。</p>`;
+    if (state.subflowNodeId === null) {
+      target.innerHTML = `<div class="loop-body-heading"><strong>${conditionLoop ? "每轮子流程" : "逐项子流程"}</strong><small>${nodes.length} 个节点 · ${(state.loopBodyEdges || []).length} 条连线</small></div><button type="button" class="btn btn-outline-primary loop-body-expand" data-subflow-inspector-open>打开循环体画布</button>`;
+      return;
+    }
+    if (!nodes.some((entry) => entry.node_key === state.loopBodySelectedKey)) state.loopBodySelectedKey = null;
+    const selectedIndex = nodes.findIndex((entry) => entry.node_key === state.loopBodySelectedKey);
+    const selected = nodes[selectedIndex];
+    const { positions, width, height } = loopGraphGeometry();
+    const viewport = target.querySelector("#loopGraphViewport");
+    const scrollLeft = viewport?.scrollLeft || 0;
+    const scrollTop = viewport?.scrollTop || 0;
+    target.innerHTML = `<div class="loop-body-heading"><div><strong>${conditionLoop ? "每轮执行画布" : "逐项执行画布"}</strong><small>${nodes.length} 个节点 · 拖端点连线，点节点配置</small></div>${readonly ? "" : `<div class="loop-graph-toolbar"><select id="nodeLoopAddType" class="form-select form-select-sm" aria-label="选择内部节点">${loopBodyTypes.map((type) => `<option value="${type}">${escapeHtml(nodeTypeLabel(type))}</option>`).join("")}</select><button type="button" class="btn btn-primary btn-sm" id="nodeLoopAdd">＋ 添加节点</button><button type="button" class="btn btn-outline-danger btn-sm" id="loopGraphDeleteEdge" ${state.loopBodySelectedEdge === null ? "disabled" : ""}>删除连线</button></div>`}</div><div class="loop-graph-workbench"><div class="loop-graph-viewport" id="loopGraphViewport"><div class="loop-graph-surface" id="loopGraphSurface" style="width:${width}px;height:${height}px"><svg id="loopGraphEdges" class="loop-graph-edge-layer" aria-label="内部节点连线"></svg>${loopGraphNodeMarkup("loop_start", "START", conditionLoop ? "本轮开始" : "本项开始", positions.get("loop_start"), readonly)}${nodes.map((entry) => loopGraphNodeMarkup(entry.node_key, entry.node_type, entry.name || entry.node_key, positions.get(entry.node_key), readonly)).join("")}${loopGraphNodeMarkup("loop_end", "END", conditionLoop ? "本轮结束" : "本项结束", positions.get("loop_end"), readonly)}</div></div><aside class="loop-graph-config">${selected ? `<article class="loop-body-card" data-loop-index="${selectedIndex}"><header><span>${escapeHtml(nodeTypeLabel(selected.node_type))}</span><button type="button" class="btn btn-outline-danger btn-sm" data-loop-remove="${selectedIndex}" ${readonly ? "hidden" : ""}>删除节点</button></header><label><span>节点名称</span><input class="form-control" data-loop-name value="${escapeHtml(selected.name || selected.node_key)}" ${readonly ? "readonly" : ""}></label><code>${escapeHtml(selected.node_key)}</code><div class="loop-body-fields">${loopBodyNodeFields(selected)}</div></article>` : `<div class="loop-graph-empty"><strong>选择内部节点</strong><p>从左侧节点库拖入或点击节点添加。点击节点配置，拖动输出端点到下一个节点的输入端点连接执行路径。</p></div>`}</aside></div><p class="muted-copy">${conditionLoop ? '本轮状态用 <code>{{ state.变量名 }}</code>；' : '当前项用 <code>{{ input.item.* }}</code>；'}内部上游用 <code>{{ nodes.节点键.* }}</code>，外层用 <code>{{ parent.nodes.节点键.* }}</code>。</p>`;
     target.querySelectorAll("input, textarea, select").forEach((field) => { if (readonly) field.disabled = true; });
+    byId("loopGraphViewport").scrollLeft = scrollLeft;
+    byId("loopGraphViewport").scrollTop = scrollTop;
+    renderLoopGraphEdges();
   }
 
   function syncLoopBodyEditor() {
@@ -1942,7 +2042,7 @@
     });
   }
 
-  function addLoopBodyNode(selectedType = null) {
+  function addLoopBodyNode(selectedType = null, point = null) {
     syncLoopBodyEditor();
     const type = selectedType || byId("nodeLoopAddType")?.value;
     if (!state.loopBodyDraft || !loopBodyTypes.includes(type)) return;
@@ -1951,10 +2051,21 @@
     const prefix = `body_${type.toLowerCase()}`;
     while (state.loopBodyDraft.some((item) => item.node_key === `${prefix}_${sequence}`)) sequence += 1;
     const key = `${prefix}_${sequence}`;
-    state.loopBodyDraft.push({ node_key: key, name: `${nodeTypeLabel(type)}${sequence}`, node_type: type, config_json: defaultNodeConfig(type) });
+    const position = point || { x: 48 + (state.loopBodyDraft.length + 1) * 248, y: 128 };
+    const previous = state.loopBodyDraft.at(-1)?.node_key || "loop_start";
+    const terminalEdge = (state.loopBodyEdges || []).find((edge) => edge.source_node_key === previous && edge.target_node_key === "loop_end" && !edge.branch);
+    state.loopBodyDraft.push({ node_key: key, name: `${nodeTypeLabel(type)}${sequence}`, node_type: type, canvas_x: Math.round(position.x), canvas_y: Math.round(position.y), config_json: defaultNodeConfig(type) });
+    if (terminalEdge) terminalEdge.target_node_key = key;
+    else if (previous === "loop_start") state.loopBodyEdges.push({ source_node_key: "loop_start", target_node_key: key });
+    if (type === "IF") {
+      state.loopBodyEdges.push({ source_node_key: key, target_node_key: "loop_end", branch: "true" });
+      state.loopBodyEdges.push({ source_node_key: key, target_node_key: "loop_end", branch: "false" });
+    } else state.loopBodyEdges.push({ source_node_key: key, target_node_key: "loop_end" });
+    state.loopBodySelectedKey = key;
+    state.loopBodySelectedEdge = null;
     renderLoopBodyEditor();
-    const canvas = byId("workflowSubflowCanvas");
-    if (state.subflowNodeId !== null && canvas) canvas.scrollLeft = canvas.scrollWidth;
+    const viewport = byId("loopGraphViewport");
+    if (viewport) viewport.scrollLeft = Math.max(0, position.x - viewport.clientWidth / 2);
   }
 
   function acceptsLoopDrop(node) {
@@ -1969,7 +2080,14 @@
     if (!isDraft()) { notify("已发布版本不可修改，请先新建草稿版本。", "warning"); return; }
     if (!loopBodyTypes.includes(type)) { notify("此节点暂不支持放入循环体。", "warning"); return; }
     if (state.subflowNodeId !== nodeId) openSubflowCanvas(nodeId);
-    if (state.subflowNodeId === nodeId) addLoopBodyNode(type);
+    if (state.subflowNodeId === nodeId) {
+      const surface = byId("loopGraphSurface");
+      const rect = surface?.getBoundingClientRect();
+      const point = rect && rect.left <= event.clientX && event.clientX <= rect.right && rect.top <= event.clientY && event.clientY <= rect.bottom
+        ? { x: Math.max(24, (event.clientX - rect.left) / state.zoom - loopGraphNodeWidth / 2), y: Math.max(24, (event.clientY - rect.top) / state.zoom - loopGraphNodeHeight / 2) }
+        : null;
+      addLoopBodyNode(type, point);
+    }
   }
 
   function openSubflowCanvas(nodeId) {
@@ -1985,13 +2103,16 @@
     const editor = byId("nodeLoopBodyEditor");
     if (!editor) return;
     state.subflowNodeId = node.id;
+    state.subflowPreviousZoom = state.zoom;
+    state.zoom = 1;
     byId("workflowSubflowTitle").textContent = `${node.name} · ${nodeTypeLabel(node.node_type)}`;
     byId("workflowSubflowCanvas").appendChild(editor);
     byId("workflowSubflowSave").hidden = !isDraft();
     byId("workflowSubflowPanel").hidden = false;
     byId("workflowDesigner").classList.add("subflow-open");
-    state.zoom = Math.max(state.zoom, 0.75);
     setWorkbenchPanel("inspector", true);
+    setWorkbenchPanel("palette", false);
+    renderLoopBodyEditor();
     renderWorkflowCanvas();
     requestAnimationFrame(() => {
       const viewport = byId("workflowCanvasViewport");
@@ -2014,6 +2135,10 @@
     byId("workflowSubflowPanel").hidden = true;
     byId("workflowDesigner").classList.remove("subflow-open");
     state.subflowNodeId = null;
+    state.loopBodyConnecting = null;
+    if (state.subflowPreviousZoom !== null) state.zoom = state.subflowPreviousZoom;
+    state.subflowPreviousZoom = null;
+    renderLoopBodyEditor();
     renderWorkflowCanvas();
   }
 
@@ -2023,30 +2148,120 @@
       return true;
     }
     if (event.target.closest("#nodeLoopAdd")) { addLoopBodyNode(); return true; }
+    if (event.target.closest("#loopGraphDeleteEdge")) {
+      syncLoopBodyEditor();
+      if (state.loopBodySelectedEdge !== null) state.loopBodyEdges.splice(state.loopBodySelectedEdge, 1);
+      state.loopBodySelectedEdge = null;
+      renderLoopBodyEditor();
+      return true;
+    }
+    const edge = event.target.closest("[data-loop-edge]");
+    if (edge) {
+      syncLoopBodyEditor();
+      state.loopBodySelectedEdge = Number(edge.dataset.loopEdge);
+      state.loopBodySelectedKey = null;
+      renderLoopBodyEditor();
+      return true;
+    }
+    const node = event.target.closest("[data-loop-node-key]");
+    if (node && !event.target.closest(".loop-graph-port")) {
+      syncLoopBodyEditor();
+      state.loopBodySelectedKey = node.dataset.loopNodeKey;
+      state.loopBodySelectedEdge = null;
+      renderLoopBodyEditor();
+      return true;
+    }
     const loopRemove = event.target.closest("[data-loop-remove]");
     if (loopRemove) {
       syncLoopBodyEditor();
       const [removed] = state.loopBodyDraft.splice(Number(loopRemove.dataset.loopRemove), 1);
-      state.loopBodyDraft.forEach((entry) => {
-        for (const route of ["next_node_key", "true_next_node_key", "false_next_node_key"]) {
-          if (entry[route] === removed.node_key) delete entry[route];
-        }
-      });
+      const incoming = state.loopBodyEdges.filter((item) => item.target_node_key === removed.node_key);
+      const outgoing = state.loopBodyEdges.filter((item) => item.source_node_key === removed.node_key);
+      state.loopBodyEdges = state.loopBodyEdges.filter((item) => item.source_node_key !== removed.node_key && item.target_node_key !== removed.node_key);
+      if (outgoing.length === 1) incoming.forEach((item) => state.loopBodyEdges.push({ ...item, target_node_key: outgoing[0].target_node_key }));
+      state.loopBodySelectedKey = null;
+      state.loopBodySelectedEdge = null;
       renderLoopBodyEditor();
       return true;
     }
-    const loopMove = event.target.closest("[data-loop-move]");
-    if (loopMove) {
-      syncLoopBodyEditor();
-      const index = Number(loopMove.dataset.loopIndex);
-      const target = index + (loopMove.dataset.loopMove === "up" ? -1 : 1);
-      if (target >= 0 && target < state.loopBodyDraft.length) {
-        [state.loopBodyDraft[index], state.loopBodyDraft[target]] = [state.loopBodyDraft[target], state.loopBodyDraft[index]];
-        renderLoopBodyEditor();
-      }
-      return true;
-    }
     return false;
+  }
+
+  function loopGraphPointerPoint(event) {
+    const rect = byId("loopGraphSurface")?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: (event.clientX - rect.left) / state.zoom, y: (event.clientY - rect.top) / state.zoom };
+  }
+
+  function connectLoopGraphNodes(source, target, branch = "") {
+    if (!source || !target || source === target || source === "loop_end" || target === "loop_start") return;
+    const sourceNode = state.loopBodyDraft.find((entry) => entry.node_key === source);
+    if (source !== "loop_start" && !sourceNode) return;
+    if (target !== "loop_end" && !state.loopBodyDraft.some((entry) => entry.node_key === target)) return;
+    const route = sourceNode?.node_type === "IF" ? branch : "";
+    if (sourceNode?.node_type === "IF" && !route) return;
+    const edges = state.loopBodyEdges.filter((edge) => edge.source_node_key !== source || (edge.branch || "") !== route);
+    const pending = [target];
+    const visited = new Set();
+    while (pending.length) {
+      const key = pending.pop();
+      if (key === source) { notify("不能连接成闭环；循环次数由遍历节点统一控制。", "warning"); return; }
+      if (visited.has(key)) continue;
+      visited.add(key);
+      edges.filter((edge) => edge.source_node_key === key).forEach((edge) => pending.push(edge.target_node_key));
+    }
+    syncLoopBodyEditor();
+    state.loopBodyEdges = [...edges, { source_node_key: source, target_node_key: target, ...(route ? { branch: route } : {}) }];
+    state.loopBodySelectedEdge = null;
+    renderLoopBodyEditor();
+  }
+
+  function beginLoopGraphPointer(event) {
+    if (!isDraft() || state.subflowNodeId === null) return;
+    const output = event.target.closest("[data-loop-output]");
+    if (output) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.loopBodyConnecting = { source: output.dataset.loopOutput, branch: output.dataset.loopBranch || "", pointer: loopGraphPointerPoint(event) };
+      renderLoopGraphEdges();
+      return;
+    }
+    const node = event.target.closest("[data-loop-node-key]");
+    if (!node || event.target.closest("[data-loop-input]")) return;
+    event.stopPropagation();
+    const point = loopGraphPositions().get(node.dataset.loopNodeKey);
+    state.loopBodyDrag = { key: node.dataset.loopNodeKey, pointerX: event.clientX, pointerY: event.clientY, x: point.x, y: point.y };
+  }
+
+  function moveLoopGraphPointer(event) {
+    if (state.loopBodyConnecting) {
+      state.loopBodyConnecting.pointer = loopGraphPointerPoint(event);
+      renderLoopGraphEdges();
+    }
+    if (!state.loopBodyDrag) return;
+    const drag = state.loopBodyDrag;
+    const surface = byId("loopGraphSurface");
+    if (!surface) return;
+    const x = Math.max(12, Math.min(surface.offsetWidth - loopGraphNodeWidth - 12, drag.x + (event.clientX - drag.pointerX) / state.zoom));
+    const y = Math.max(12, Math.min(surface.offsetHeight - loopGraphNodeHeight - 12, drag.y + (event.clientY - drag.pointerY) / state.zoom));
+    if (["loop_start", "loop_end"].includes(drag.key)) state.loopBodyLayout[drag.key] = { x: Math.round(x), y: Math.round(y) };
+    else {
+      const entry = state.loopBodyDraft.find((item) => item.node_key === drag.key);
+      if (entry) { entry.canvas_x = Math.round(x); entry.canvas_y = Math.round(y); }
+    }
+    const node = [...surface.querySelectorAll("[data-loop-node-key]")].find((item) => item.dataset.loopNodeKey === drag.key);
+    if (node) { node.style.left = `${Math.round(x)}px`; node.style.top = `${Math.round(y)}px`; }
+    renderLoopGraphEdges();
+  }
+
+  function endLoopGraphPointer(event) {
+    state.loopBodyDrag = null;
+    if (!state.loopBodyConnecting) return;
+    const input = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-loop-input]");
+    if (!input) return;
+    const { source, branch } = state.loopBodyConnecting;
+    state.loopBodyConnecting = null;
+    connectLoopGraphNodes(source, input.dataset.loopInput, branch);
   }
 
   function renderInspector() {
@@ -2062,7 +2277,11 @@
     const config = deepCopy(node.config_json);
     if (loopTypes.has(node.node_type) && state.loopBodyNodeId !== node.id) {
       state.loopBodyDraft = Array.isArray(config.body_nodes) ? deepCopy(config.body_nodes) : [];
+      state.loopBodyEdges = Array.isArray(config.body_edges) ? deepCopy(config.body_edges) : legacyLoopBodyEdges(state.loopBodyDraft);
+      state.loopBodyLayout = deepCopy(config.body_layout || {});
       state.loopBodyNodeId = node.id;
+      state.loopBodySelectedKey = null;
+      state.loopBodySelectedEdge = null;
     }
     const readonly = !isDraft();
     const systemNode = ["START", "END"].includes(node.node_type);
@@ -2464,6 +2683,7 @@
     const result = execution.result || finalOutput.result || "UNCERTAIN";
     panel.hidden = false;
     stage?.classList.add("has-test");
+    byId("workflowDesigner").classList.add("workflow-test-open");
     byId("workflowTestSummary").textContent = `最终结果：${result} · 总耗时：${execution.elapsed_ms ?? "—"} ms · 已执行 ${traces.length} 个节点`;
     setWorkflowTestRunMeta({ result, elapsed: execution.elapsed_ms, traceCount: traces.length });
     byId("workflowTestFinalOutput").innerHTML = workflowFinalOutputMarkup(result, finalOutput, execution.error_message || "", traces);
@@ -2477,6 +2697,7 @@
     const panel = byId("workflowTestPanel");
     panel.hidden = false;
     document.querySelector(".workflow-stage-panel")?.classList.add("has-test");
+    byId("workflowDesigner").classList.add("workflow-test-open");
     setWorkbenchPanel("inspector", true);
     setWorkbenchPanel("palette", true);
     setWorkflowTestRunMeta({ result: "运行中", traceCount: "执行中" });
@@ -2489,6 +2710,7 @@
     const panel = byId("workflowTestPanel");
     panel.hidden = true;
     document.querySelector(".workflow-stage-panel")?.classList.remove("has-test");
+    byId("workflowDesigner").classList.remove("workflow-test-open");
     byId("workflowTestTraceList").innerHTML = '<div class="empty-state compact-empty"><span>⌘</span><strong>等待流程测试</strong><p>结果会按执行顺序展示每个节点的输入、输出和耗时。</p></div>';
     byId("workflowTestFinalOutput").innerHTML = '<div class="empty-state compact-empty"><span>✓</span><strong>等待最终结果</strong><p>运行流程后，这里会展示最终状态和完整返回内容。</p></div>';
     byId("workflowTestSummary").textContent = "上传测试图后，查看每个节点的输入、输出与处理耗时。";
@@ -2678,6 +2900,8 @@
         const limit = node.node_type === "CONDITION_LOOP" ? 20 : 100;
         if (!Number.isInteger(config.max_iterations) || config.max_iterations < 1 || config.max_iterations > limit) throw new Error(`最大次数必须在 1 到 ${limit} 之间。`);
         config.body_nodes = readLoopBody();
+        config.body_edges = deepCopy(state.loopBodyEdges || []);
+        config.body_layout = deepCopy(state.loopBodyLayout || {});
         config.body_output = readParameterRows("nodeLoopBodyOutputParameters", "子流程输出");
         if (node.node_type === "ITERATION") {
           config.items = byId("nodeLoopItems").value.trim();
@@ -2713,6 +2937,8 @@
         if (!Number.isInteger(config.max_iterations) || config.max_iterations < 1 || config.max_iterations > (config.operation === "VLM" ? 30 : config.operation === "SUBFLOW" ? 100 : 1000)) throw new Error("最大次数超出允许范围。");
         if (config.operation === "SUBFLOW") {
           config.body_nodes = readLoopBody();
+          config.body_edges = deepCopy(state.loopBodyEdges || []);
+          config.body_layout = deepCopy(state.loopBodyLayout || {});
           config.aggregate = byId("nodeLoopBodyAggregate").value;
           config.body_output = readParameterRows("nodeLoopBodyOutputParameters", "循环体每项输出");
         }
@@ -2828,7 +3054,15 @@
     byId("workflowPaletteClose").addEventListener("click", () => setWorkbenchPanel("palette", true));
     byId("workflowInspectorToggle").addEventListener("click", () => setWorkbenchPanel("inspector", !state.inspectorCollapsed));
     byId("workflowInspectorClose").addEventListener("click", () => setWorkbenchPanel("inspector", true));
-    document.querySelectorAll(".palette-node").forEach((node) => node.addEventListener("dragstart", (event) => { event.dataTransfer.setData("application/vision-node", node.dataset.nodeType); event.dataTransfer.effectAllowed = "copy"; }));
+    document.querySelectorAll(".palette-node").forEach((node) => {
+      node.addEventListener("dragstart", (event) => { event.dataTransfer.setData("application/vision-node", node.dataset.nodeType); event.dataTransfer.effectAllowed = "copy"; });
+      node.addEventListener("click", () => {
+        if (state.subflowNodeId !== null) { addLoopBodyNode(node.dataset.nodeType); return; }
+        const viewport = byId("workflowCanvasViewport");
+        const rect = viewport.getBoundingClientRect();
+        createWorkflowNode(node.dataset.nodeType, { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+      });
+    });
     byId("workflowCanvasViewport").addEventListener("dragover", (event) => event.preventDefault());
     byId("workflowCanvasViewport").addEventListener("drop", (event) => { event.preventDefault(); if (event.target.closest("#workflowSubflowPanel")) return; const type = event.dataTransfer.getData("application/vision-node"); if (type) createWorkflowNode(type, event); });
     byId("workflowSubflowPanel").addEventListener("dragover", (event) => {
@@ -2847,6 +3081,9 @@
     byId("workflowSubflowClose").addEventListener("click", closeSubflowCanvas);
     byId("workflowSubflowSave").addEventListener("click", () => { closeSubflowCanvas(); saveNodeConfig(); });
     byId("workflowSubflowPanel").addEventListener("click", handleLoopBodyAction);
+    byId("workflowSubflowPanel").addEventListener("pointerdown", beginLoopGraphPointer);
+    window.addEventListener("pointermove", moveLoopGraphPointer);
+    window.addEventListener("pointerup", endLoopGraphPointer);
     byId("workflowNodeLayer").addEventListener("dragover", (event) => {
       const element = event.target.closest("[data-node-id]");
       if (!isDraft() || !acceptsLoopDrop(nodeById(Number(element?.dataset.nodeId)))) return;
@@ -2880,6 +3117,18 @@
       renderInspector();
     });
     document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.loopBodyConnecting) {
+        state.loopBodyConnecting = null;
+        renderLoopGraphEdges();
+        return;
+      }
+      if (state.subflowNodeId !== null && state.loopBodySelectedEdge !== null && isDraft() && ["Delete", "Backspace"].includes(event.key) && !event.target.closest("input, textarea, select, [contenteditable]")) {
+        event.preventDefault();
+        state.loopBodyEdges.splice(state.loopBodySelectedEdge, 1);
+        state.loopBodySelectedEdge = null;
+        renderLoopBodyEditor();
+        return;
+      }
       if (!isDraft() || state.selectedEdgeId === null || !["Delete", "Backspace"].includes(event.key)) return;
       if (event.target.closest("input, textarea, select, [contenteditable], [role='textbox']")) return;
       event.preventDefault();

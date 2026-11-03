@@ -68,7 +68,7 @@ MODEL_PAGES = {
     "registry": {
         "active_section": "model_registry",
         "title": "训练模型维护",
-        "description": "定义可训练模型的名称、架构、任务类型和识别类别；支持 YOLO 与 ResNet。",
+        "description": "定义可训练模型的名称、任务类型和识别类别；当前支持 YOLO 目标检测、分割和分类。",
     },
     "training": {
         "active_section": "model_training",

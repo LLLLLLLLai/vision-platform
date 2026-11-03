@@ -31,6 +31,7 @@ from app.models.intelligence import (
     VisionModelVersion,
 )
 from app.models.recipe import Recipe, RegionOfInterest
+from app.services.loop_body_graph import loop_body_connections
 from app.services.scenario_runtime import ScenarioRuntimeError, scenario_runtime
 from app.services.scene_result_images import SceneResultSnapshot, build_scene_result_image
 from app.services.scene_s3_storage import InvalidSceneS3KeyError, SceneS3Storage, SceneS3StorageError
@@ -329,7 +330,7 @@ def _validate_published_vision_model_node(database: Session, node: ScenarioNode)
         .options(selectinload(VisionModelVersion.vision_model))
         .where(VisionModelVersion.id == version_id)
     )
-    if version is None or version.is_deleted or version.status != "PUBLISHED":
+    if version is None or version.is_deleted or version.status not in {"PUBLISHED", "ARCHIVED"}:
         raise HTTPException(
             status_code=400,
             detail=f"模型节点“{node.name}”引用的模型版本不存在或尚未发布。",
@@ -742,22 +743,44 @@ def _validate_loop_body(database: Session, loop_node: ScenarioNode, add: Any) ->
         entries.append(entry)
     graph_keys = {entry["node_key"] for entry in entries}
     graph_keys.update({"loop_start", "loop_end"})
+    node_types = {entry["node_key"]: entry["node_type"] for entry in entries}
+    node_types.update({"loop_start": "START", "loop_end": "END"})
     adjacency: dict[str, set[str]] = {key: set() for key in graph_keys}
-    if entries:
-        adjacency["loop_start"].add(entries[0]["node_key"])
-    for index, entry in enumerate(entries):
-        source = entry["node_key"]
-        next_key = entries[index + 1]["node_key"] if index + 1 < len(entries) else "loop_end"
-        targets = (
-            [entry.get("true_next_node_key") or next_key, entry.get("false_next_node_key") or "loop_end"]
-            if entry["node_type"] == "IF"
-            else [entry.get("next_node_key") or next_key]
-        )
-        for target in targets:
-            if target not in graph_keys:
-                add("ERROR", "LOOP_BODY_EDGE_INVALID", f"循环体节点“{source}”连接到不存在的节点“{target}”。", node=loop_node)
-            else:
-                adjacency[source].add(target)
+    outgoing: dict[str, set[str]] = {key: set() for key in graph_keys}
+    incoming: dict[str, int] = {key: 0 for key in graph_keys}
+    connections = loop_body_connections(entries, config.get("body_edges"))
+    if not connections or len(connections) > 2 * len(entries) + 1:
+        add("ERROR", "LOOP_BODY_EDGE_INVALID", "循环体连线数量无效。", node=loop_node)
+    for connection in connections:
+        if not isinstance(connection, dict):
+            add("ERROR", "LOOP_BODY_EDGE_INVALID", "循环体连线格式无效。", node=loop_node)
+            continue
+        source = str(connection.get("source_node_key") or "")
+        target = str(connection.get("target_node_key") or "")
+        branch = str(connection.get("branch") or "").lower()
+        if source not in graph_keys or target not in graph_keys or source == "loop_end" or target == "loop_start" or source == target:
+            add("ERROR", "LOOP_BODY_EDGE_INVALID", f"循环体连线 {source} → {target} 无效。", node=loop_node)
+            continue
+        if node_types[source] == "IF" and branch not in {"true", "false"}:
+            add("ERROR", "LOOP_BODY_EDGE_INVALID", f"条件节点“{source}”的连线须选择成立或不成立。", node=loop_node)
+            continue
+        if node_types[source] != "IF" and branch:
+            add("ERROR", "LOOP_BODY_EDGE_INVALID", f"节点“{source}”不支持分支连线。", node=loop_node)
+            continue
+        route = branch or "default"
+        if route in outgoing[source]:
+            add("ERROR", "LOOP_BODY_EDGE_INVALID", f"节点“{source}”的 {route} 连线重复。", node=loop_node)
+            continue
+        outgoing[source].add(route)
+        adjacency[source].add(target)
+        incoming[target] += 1
+    for key in graph_keys - {"loop_end"}:
+        expected = {"true", "false"} if node_types[key] == "IF" else {"default"}
+        if outgoing[key] != expected:
+            add("ERROR", "LOOP_BODY_DISCONNECTED", f"循环体节点“{key}”缺少输出连线。", node=loop_node)
+    for key in graph_keys - {"loop_start"}:
+        if incoming[key] == 0:
+            add("ERROR", "LOOP_BODY_DISCONNECTED", f"循环体节点“{key}”缺少输入连线。", node=loop_node)
     visited: set[str] = set()
     pending = ["loop_start"]
     while pending:

@@ -1,5 +1,6 @@
 -- Vision Platform MySQL 8 schema generated from SQLAlchemy metadata.
--- Apply to a new MySQL 8.0.17+ database after reviewing deployment-specific settings.
+-- Includes 31 tables; apply only to a new MySQL 8.0.17+ database.
+-- This is a full baseline, not an ALTER migration for existing databases.
 SET NAMES utf8mb4;
 
 -- algorithm_configs: 算法能力与服务端点配置。

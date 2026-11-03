@@ -648,7 +648,30 @@ def update_dataset(
     else:
         values["collection_scenario_version_id"] = None
     if "labels" in values:
-        values["label_schema_json"] = _normalize_labels(values.pop("labels"))
+        labels = _normalize_labels(values.pop("labels"))
+        allowed_labels = {label.casefold() for label in labels}
+        used_labels: dict[str, tuple[str, int]] = {}
+        annotations = database.scalars(
+            select(DatasetItem.annotation_json).where(
+                DatasetItem.dataset_id == dataset.id,
+                DatasetItem.is_deleted.is_(False),
+                DatasetItem.annotation_status == "LABELED",
+            )
+        ).all()
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            for label in set(_annotation_labels(dataset, annotation)):
+                key = label.casefold()
+                name, count = used_labels.get(key, (label, 0))
+                used_labels[key] = (name, count + 1)
+        missing = [f"{name}（{count} 张）" for key, (name, count) in used_labels.items() if key not in allowed_labels]
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"类别仍被已标注素材使用：{'、'.join(missing)}。请先修改或删除相关素材的标注，再删除类别。",
+            )
+        values["label_schema_json"] = labels
     for key, value in values.items():
         setattr(dataset, key, value.strip() if isinstance(value, str) else value)
     database.commit()

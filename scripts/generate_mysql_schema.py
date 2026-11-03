@@ -97,7 +97,8 @@ def build_sql() -> str:
     dialect = mysql.dialect()
     statements = [
         "-- Vision Platform MySQL 8 schema generated from SQLAlchemy metadata.",
-        "-- Apply to a new MySQL 8.0.17+ database after reviewing deployment-specific settings.",
+        f"-- Includes {len(Base.metadata.tables)} tables; apply only to a new MySQL 8.0.17+ database.",
+        "-- This is a full baseline, not an ALTER migration for existing databases.",
         "SET NAMES utf8mb4;",
         "",
     ]
@@ -121,7 +122,8 @@ def build_markdown() -> str:
         "## 使用范围",
         "",
         "- 推荐 MySQL `8.0.17+`、`InnoDB`、`utf8mb4` 与 `utf8mb4_0900_ai_ci`。",
-        "- 平台当前本地开发可兼容 SQLite；迁移到 MySQL 前应使用 `scripts/migrate_sqlite_to_mysql.py` 等受控迁移脚本，不应直接对已有生产库重复执行完整建表 SQL。",
+        "- 本 SQL 是空库建表基线，不是已有 MySQL 数据库的字段升级脚本；生产库升级必须先备份，再使用受控迁移，不应重复执行完整建表 SQL。",
+        "- 平台支持 SQLite 与 MySQL；`init_database()` 会创建缺失表，但不会自动给已有 MySQL 表补字段。",
         "- JSON 字段保存流程定义、规则配置、模型输出和快照；查询高频 JSON 属性时建议再建立生成列和索引。",
         "- `created_at`、`updated_at` 等显示“应用默认值”的字段由应用写入 UTC 时间。",
         "",

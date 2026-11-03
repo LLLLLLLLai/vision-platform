@@ -2701,8 +2701,77 @@ function recordOperation(record) {
 
 function recordImageCard(title, imageUrl, emptyText) {
   return imageUrl
-    ? `<figure class="record-detail-image"><figcaption>${escapeHtml(title)}</figcaption><img src="${escapeHtml(imageUrl)}?v=${Date.now()}" alt="${escapeHtml(title)}"></figure>`
+    ? `<figure class="record-detail-image"><figcaption>${escapeHtml(title)}</figcaption><button class="record-image-open" type="button" data-record-image-open aria-label="放大查看${escapeHtml(title)}"><img src="${escapeHtml(imageUrl)}?v=${Date.now()}" alt="${escapeHtml(title)}"><span>点击放大</span></button></figure>`
     : `<div class="record-detail-image empty"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(emptyText)}</span></div>`;
+}
+
+let recordImageTrigger = null;
+
+function closeRecordImageLightbox() {
+  const lightbox = byId("recordImageLightbox");
+  if (lightbox.hidden) return;
+  lightbox.hidden = true;
+  byId("recordImageLightboxImage").removeAttribute("src");
+  recordImageTrigger?.focus();
+  recordImageTrigger = null;
+}
+
+function openRecordImageLightbox(button) {
+  const thumbnail = button.querySelector("img");
+  if (!thumbnail) return;
+  recordImageTrigger = button;
+  const lightbox = byId("recordImageLightbox");
+  const image = byId("recordImageLightboxImage");
+  image.src = thumbnail.src;
+  image.alt = thumbnail.alt;
+  byId("recordImageLightboxCaption").textContent = thumbnail.alt;
+  lightbox.hidden = false;
+  byId("recordImageLightboxClose").focus();
+}
+
+function recordOutputValue(output) {
+  if (output == null) return "-";
+  if (typeof output !== "object") return String(output);
+  const value = [
+    output.predicted_label,
+    output.classification?.top1_label,
+    output.text,
+    output.color,
+    output.answer,
+    output.actual,
+    output.reason,
+  ].find((candidate) => candidate != null && typeof candidate !== "object");
+  if (value != null) return String(value);
+  if (Array.isArray(output.objects)) return `检测到 ${output.objects.length} 个目标`;
+  if (output.object_count != null) return `检测到 ${output.object_count} 个目标`;
+  if (output.result != null && typeof output.result !== "object") return String(output.result);
+  return "查看完整数据";
+}
+
+function renderRecordProcessing(roi) {
+  const processing = roi.processing && typeof roi.processing === "object" ? roi.processing : {};
+  const output = processing.result && typeof processing.result === "object" ? processing.result : processing;
+  const primary = processing.primary_result || {};
+  const details = primary.details || {};
+  const review = processing.vlm_review || {};
+  const traces = Array.isArray(processing.traces) ? processing.traces : [];
+  const modelValue = recordOutputValue(output) !== "-" && recordOutputValue(output) !== "查看完整数据"
+    ? recordOutputValue(output)
+    : recordOutputValue(details);
+  const facts = [
+    ["场景结果", output.result || primary.status || roi.status || "-"],
+    ["模型输出", modelValue],
+    ["模型 / 场景", primary.model || roi.scene_name || "-"],
+    ["置信度 / 分数", roi.score == null ? "-" : Number(roi.score).toFixed(4)],
+  ];
+  if (review.status) facts.push(["VLM 复核", review.status]);
+  if (roi.message || output.reason || primary.message) facts.push(["处理说明", roi.message || output.reason || primary.message]);
+  return `<section class="record-processing">
+    <header><strong>模型处理结果</strong><button class="btn btn-sm btn-outline-primary" type="button" data-record-json-toggle aria-expanded="false">查看完整 JSON</button></header>
+    <div class="record-processing-facts">${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("")}</div>
+    ${traces.length ? `<div class="record-processing-traces">${traces.map((trace) => `<div><span>${escapeHtml(trace.node_name || trace.node_key || "节点")}</span><b>${escapeHtml(recordOutputValue(trace.output))}</b><small>${formatElapsedMs(trace.elapsed_ms)}</small></div>`).join("")}</div>` : ""}
+    <pre class="record-processing-json" hidden>${escapeHtml(JSON.stringify(processing, null, 2))}</pre>
+  </section>`;
 }
 
 function formatElapsedMs(value) {
@@ -2797,12 +2866,10 @@ function renderDetectionRecordDetail(detail) {
                 </div>
                 <dl>
                   <div><dt>关联场景</dt><dd>${escapeHtml(roi.scene_name || "-")}</dd></div>
-                  <div><dt>模型分数</dt><dd>${roi.score == null ? "-" : escapeHtml(Number(roi.score).toFixed(4))}</dd></div>
-                  <div><dt>处理说明</dt><dd>${escapeHtml(roi.message || "-")}</dd></div>
                 </dl>
+                ${renderRecordProcessing(roi)}
                  ${renderScenarioTiming(roi.scenario_timing)}
                 ${renderManualReview(roi)}
-                <details><summary>查看模型处理结果</summary><pre>${escapeHtml(JSON.stringify(roi.processing || {}, null, 2))}</pre></details>
               </article>`).join("") || '<div class="records-empty">该图片没有 ROI 处理明细</div>'}
           </div>
         </article>`).join("") || '<div class="records-empty">该配方没有图片处理结果</div>'}
@@ -2830,7 +2897,7 @@ async function openDetectionRecordDetail(recordId) {
 
 function renderDetectionRecords() {
   const records = state.detectionRecords;
-  const successCount = records.filter((record) => record.response_code === 0).length;
+  const successCount = records.filter((record) => record.call_status === "SUCCESS").length;
   byId("detectionRecordsSummary").innerHTML = `
     <span><small>记录数量</small><strong>${records.length}</strong></span>
     <span><small>成功调用</small><strong>${successCount}</strong></span>
@@ -2847,7 +2914,7 @@ function renderDetectionRecords() {
             <td><code>${escapeHtml(record.caller_ip)}</code></td>
             <td><strong>${escapeHtml(record.sn)}</strong></td>
             <td>${escapeHtml(recordOperation(record))}</td>
-            <td><span class="call-status ${record.response_code === 0 ? "success" : "failed"}">${record.response_code} · ${escapeHtml(record.call_status)}</span></td>
+            <td><span class="call-status ${record.call_status === "SUCCESS" ? "success" : "failed"}">${record.response_code} · ${escapeHtml(record.call_status)}</span></td>
             <td><span class="result-badge ${(response.result || "error").toLowerCase()}">${escapeHtml(response.result || "ERROR")}</span></td>
             <td>${renderRecordModelResults(response)}</td>
             <td>${record.elapsed_ms == null ? "-" : `${record.elapsed_ms} ms`}</td>
@@ -3035,6 +3102,7 @@ function openTest(recipeId) {
     referenceEmpty.hidden = false;
   }
   byId("testUploadStage").hidden = false;
+  byId("chooseAnotherTestImage").hidden = true;
   byId("runRecipeTest").disabled = true;
   byId("testOverview").innerHTML = `
     <div><small>检测状态</small><strong>等待上传图片</strong></div>
@@ -3048,11 +3116,16 @@ function previewTestFile(file) {
   if (!file) return;
   state.testFile = file;
   const preview = byId("testPreviewImage");
+  if (preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
   preview.src = URL.createObjectURL(file);
   byId("testActualImageLabel").textContent = "实测图（检测前）";
   byId("testImageComparison").hidden = false;
   byId("testUploadStage").hidden = true;
+  byId("chooseAnotherTestImage").hidden = false;
   byId("runRecipeTest").disabled = false;
+  byId("runRecipeTest").textContent = "开始执行全部规则";
+  byId("testOverview").innerHTML = '<div><small>检测状态</small><strong>等待执行当前图片</strong></div><span class="result-badge pending">WAITING</span>';
+  byId("testObjectResults").innerHTML = '<div class="no-object-selected"><span>◎</span><strong>等待当前图片检测</strong></div>';
 }
 
 function renderTestResult(result) {
@@ -3316,6 +3389,20 @@ byId("detectionRecordsBody").addEventListener("click", (event) => {
   openDetectionRecordDetail(Number(button.dataset.recordDetail));
 });
 byId("detectionRecordDetailContent").addEventListener("click", async (event) => {
+  const imageButton = event.target.closest("[data-record-image-open]");
+  if (imageButton) {
+    openRecordImageLightbox(imageButton);
+    return;
+  }
+  const jsonButton = event.target.closest("[data-record-json-toggle]");
+  if (jsonButton) {
+    const json = jsonButton.closest(".record-processing")?.querySelector(".record-processing-json");
+    if (!json) return;
+    json.hidden = !json.hidden;
+    jsonButton.setAttribute("aria-expanded", String(!json.hidden));
+    jsonButton.textContent = json.hidden ? "查看完整 JSON" : "收起 JSON";
+    return;
+  }
   const verdictButton = event.target.closest("[data-manual-verdict]");
   if (verdictButton) {
     const section = verdictButton.closest("[data-manual-review-execution]");
@@ -3358,6 +3445,11 @@ byId("detectionRecordDetailContent").addEventListener("click", async (event) => 
     saveButton.textContent = "保存人工确认";
   }
 });
+byId("recordImageLightbox").addEventListener("click", closeRecordImageLightbox);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeRecordImageLightbox();
+});
+byId("detectionRecordDetailModal").addEventListener("hidden.bs.modal", closeRecordImageLightbox);
 byId("refreshInspectionReports").addEventListener("click", loadInspectionReports);
 byId("inspectionReportDimensions").addEventListener("click", (event) => {
   const button = event.target.closest("[data-scene-sort]");
@@ -3525,6 +3617,7 @@ byId("editTestRecipe").addEventListener("click", async () => {
   await loadRecipe(state.testRecipe.id);
 });
 byId("testFile").addEventListener("change", (event) => previewTestFile(event.target.files[0]));
+byId("chooseAnotherTestImage").addEventListener("click", () => byId("testFile").click());
 byId("runRecipeTest").addEventListener("click", () => runTest());
 
 loadData()

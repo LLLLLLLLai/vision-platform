@@ -249,6 +249,36 @@ class WorkflowBatchLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["result"] for item in result["items"]], ["OK", "NG"])
         self.assertEqual(result["items"][1]["nodes"]["body_rule_1"]["result"], "SKIPPED")
 
+    async def test_custom_loop_body_uses_canvas_connections(self) -> None:
+        node = ScenarioNode(config_json={
+            "operation": "SUBFLOW", "items": "{{ input.items }}", "max_iterations": 2,
+            "body_nodes": [
+                {"node_key": "body_if", "node_type": "IF", "config_json": {
+                    "actual": "{{ input.value }}", "operator": "EQUALS", "expected": "FU5",
+                }},
+                {"node_key": "body_fu5", "node_type": "RULE", "config_json": {
+                    "actual": "{{ input.value }}", "operator": "EQUALS", "expected": "FU5",
+                }},
+                {"node_key": "body_fu7", "node_type": "RULE", "config_json": {
+                    "actual": "{{ input.value }}", "operator": "EQUALS", "expected": "FU7",
+                }},
+            ],
+            "body_edges": [
+                {"source_node_key": "loop_start", "target_node_key": "body_if"},
+                {"source_node_key": "body_if", "target_node_key": "body_fu5", "branch": "true"},
+                {"source_node_key": "body_if", "target_node_key": "body_fu7", "branch": "false"},
+                {"source_node_key": "body_fu5", "target_node_key": "loop_end"},
+                {"source_node_key": "body_fu7", "target_node_key": "loop_end"},
+            ],
+        })
+        result = await ScenarioRuntime()._execute_loop(self.database, self.version, node, {
+            "input": {"image_path": "source.jpg", "items": [{"value": "FU5"}, {"value": "FU7"}]},
+            "nodes": {}, "traces": [],
+        })
+
+        self.assertEqual([item["nodes"]["body_fu5"]["result"] for item in result["items"]], ["OK", "SKIPPED"])
+        self.assertEqual([item["nodes"]["body_fu7"]["result"] for item in result["items"]], ["SKIPPED", "OK"])
+
     async def test_custom_loop_body_failed_child_does_not_pass(self) -> None:
         node = ScenarioNode(config_json={
             "operation": "SUBFLOW", "items": "{{ input.items }}", "max_iterations": 1,
