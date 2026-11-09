@@ -1694,6 +1694,8 @@
 }
 
 .workflow-trace-status {
+  display: inline-block;
+  white-space: nowrap;
   padding: 3px 6px;
   border-radius: 999px;
   font-size: .62rem;

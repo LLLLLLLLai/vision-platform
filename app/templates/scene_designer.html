@@ -14,6 +14,7 @@
       <span class="status-pill draft" id="designerVersionStatus">DRAFT</span>
       <button class="btn btn-outline-secondary btn-sm" id="designerVersionHistory" type="button">版本历史</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerApi" type="button">接口调用</button>
+      <button class="btn btn-outline-primary btn-sm" id="openSceneAssistant" type="button">✦ AI 辅助设计</button>
       <button class="btn btn-outline-secondary btn-sm" id="designerClone" type="button">新建草稿版本</button>
        <button class="btn btn-outline-primary btn-sm" id="designerValidate" type="button">检查编排</button>
       <button class="btn btn-outline-primary btn-sm" id="designerSave" type="button">保存草稿</button>
@@ -22,6 +23,43 @@
   </header>
 
   <div id="designerAlert" class="scene-designer-alert"></div>
+  <div class="d-flex align-items-center gap-2 flex-wrap px-3 py-2">
+    <label for="designerRunMode">运行模式</label>
+    <select id="designerRunMode" class="form-select form-select-sm w-auto"><option value="DETECT">正常检测</option><option value="COLLECT_ONLY">仅采集图片</option></select>
+    <span id="designerRunModeTip" class="small text-muted"></span>
+  </div>
+  <section id="collectionDesigner" class="card m-3 p-3 overflow-auto" hidden>
+    <h2 class="fs-5">仅采集图片 · 未执行质量检测</h2>
+    <p>配方定位并裁剪 ROI 后存入关联数据集，不调用模型。detect 返回 NG，采集记录不参与准确率统计。</p>
+    <div id="collectionDatasetList"></div>
+    <div class="d-flex gap-2 my-3"><a class="btn btn-outline-primary btn-sm" href="/datasets/maintenance">配置采集数据集</a><button class="btn btn-outline-secondary btn-sm" type="button" id="collectionRefresh">刷新关联</button></div>
+    <label class="form-label" for="collectionTestImage">检查采集配置（测试不会写入数据集）</label>
+    <input id="collectionTestImage" class="form-control" type="file" accept="image/*">
+    <button id="collectionTest" type="button" class="btn btn-primary align-self-start my-2">测试采集</button>
+    <pre id="collectionTestResult" style="overflow-wrap:anywhere;white-space:pre-wrap" aria-live="polite"></pre>
+  </section>
+
+  <div class="modal fade" id="sceneAssistantModal" tabindex="-1" aria-labelledby="sceneAssistantTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+      <div class="modal-header"><h2 class="modal-title fs-5" id="sceneAssistantTitle">AI 辅助设计</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body scene-assistant-layout">
+        <form id="sceneAssistantForm" class="scene-assistant-inputs">
+          <label>设计助手 VLM<select class="form-select" id="sceneAssistantModel" required></select></label>
+          <label>场景图片<input class="form-control" id="sceneAssistantImage" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
+          <img id="sceneAssistantImagePreview" alt="待设计场景图片" hidden>
+          <p class="text-muted small mb-0">图片与要求会发送到所选 VLM 接口。最多20MB；请确认允许该服务处理图片。</p>
+          <label>检测要求 / 继续补充<textarea class="form-control" id="sceneAssistantRequirements" rows="5" maxlength="8000" placeholder="例如：检查线束标签文字是否与传入的expected_text一致，只返回OK或NG，看不清按NG。" required></textarea></label>
+          <div class="d-flex gap-2"><button class="btn btn-primary" id="sceneAssistantGenerate" type="submit">生成设计</button><button class="btn btn-outline-secondary" id="sceneAssistantReset" type="button">清空对话</button></div>
+          <div id="sceneAssistantMessages" class="scene-assistant-messages" aria-live="polite"></div>
+        </form>
+        <section class="scene-assistant-output">
+          <div id="sceneAssistantStatus" role="status">上传图片并描述检测要求。生成内容需确认、测试后再发布。</div>
+          <div id="sceneAssistantDesign"><div class="empty-state">VLM 场景生成检测提示词；流程场景生成带模型、参数和连线的基础流程。复杂循环、Web接口及上传节点可在画布继续配置。</div></div>
+        </section>
+      </div>
+      <div class="modal-footer"><span class="text-muted small me-auto">保存为独立新草稿，不覆盖原版本、不自动发布。</span><button class="btn btn-light" type="button" data-bs-dismiss="modal">关闭</button><button class="btn btn-primary" id="sceneAssistantApply" type="button" disabled>确认并创建新草稿</button></div>
+    </div></div>
+  </div>
 
   <div class="modal fade" id="sceneVersionModal" tabindex="-1" aria-labelledby="sceneVersionModalTitle" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -183,6 +221,8 @@
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260929-02" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20261008-01" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20261103-4" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20261103-3"></script>
+<link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20261104-4" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20261108-collection"></script>
+<link href="{{ url_for('static', path='/css/scene_assistant.css') }}?v=20261104-1" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/scene_design_assistant.js') }}?v=20261104-1"></script>
 {% endblock %}

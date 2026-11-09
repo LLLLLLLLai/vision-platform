@@ -164,7 +164,7 @@
           </div>
           <pre class="job-result model-test-result" id="vlmTest_${model.id}" hidden></pre>
         </article>`).join("")
-      : `<div class="empty-state catalog-empty"><span>◈</span><strong>还没有 VLM 模型</strong><p>点击“创建模型”，接入本地或云端 OpenAI 兼容接口。</p><button class="btn btn-primary btn-sm" type="button" data-create-model="vlm">创建 VLM 模型</button></div>`;
+      : `<div class="empty-state catalog-empty"><span>◈</span><strong>还没有 VLM 接口配置</strong><p>点击右上角“配置 VLM 接口”，接入本地或云端 OpenAI 兼容接口。</p></div>`;
   }
 
   function renderVisionModels() {
@@ -188,7 +188,7 @@
             <div class="model-card-actions">
               <button class="btn btn-sm btn-outline-secondary" data-edit-vision="${model.id}" type="button">编辑</button>
               <button class="btn btn-sm btn-outline-secondary" data-guide-vision="${model.id}" type="button">模型说明</button>
-              <button class="btn btn-sm btn-outline-secondary" data-toggle-vision-versions="${model.id}" type="button" aria-haspopup="dialog">版本管理</button>
+              <button class="btn btn-sm btn-outline-secondary" data-toggle-vision-versions="${model.id}" type="button" aria-haspopup="dialog">版本管理 / 切换</button>
               <button class="btn btn-sm btn-outline-primary" data-import-vision="${model.id}" type="button">导入已训练模型</button>
               <button class="btn btn-sm btn-outline-primary" data-train-vision="${model.id}" type="button">创建训练任务</button>
               ${publishableVersion ? `<button class="btn btn-sm btn-primary" data-publish-vision-version="${publishableVersion.id}" data-model-id="${model.id}" type="button">发布 V${escapeHtml(publishableVersion.version)}</button>` : ""}
@@ -196,7 +196,7 @@
             </div>
           </article>`;
       }).join("")
-      : `<div class="empty-state catalog-empty"><span>◉</span><strong>还没有训练模型</strong><p>先创建 YOLO 模型卡片，再在模型训练页关联数据集训练版本。</p><button class="btn btn-primary btn-sm" type="button" data-create-model="vision">创建训练模型</button></div>`;
+      : `<div class="empty-state catalog-empty"><span>◉</span><strong>还没有训练模型</strong><p>点击右上角“创建训练模型”，再在模型训练页关联数据集训练版本。</p></div>`;
   }
 
   function openVisionModelGuide(modelId) {
@@ -278,7 +278,7 @@
         const weightsName = weightsPath.split(/[\\/]/).pop() || "未生成";
         const actions = [
           weightsPath ? `<a class="btn btn-sm btn-outline-primary" href="${api}/vision-models/${model.id}/versions/${version.id}/export" download>导出权重</a>` : "",
-          version.status === "ARCHIVED" && weightsPath ? `<button class="btn btn-sm btn-outline-secondary" data-rollback-vision-version="${version.id}" data-model-id="${model.id}" type="button">回退启用</button>` : "",
+          version.status === "ARCHIVED" && weightsPath ? `<button class="btn btn-sm btn-outline-primary" data-rollback-vision-version="${version.id}" data-model-id="${model.id}" type="button">切换到此版本</button>` : "",
           version.status === "DRAFT" && weightsPath ? `<button class="btn btn-sm btn-primary" data-publish-vision-version="${version.id}" data-model-id="${model.id}" type="button">发布</button>` : "",
         ].filter(Boolean).join("");
         return `<tr>
@@ -449,12 +449,12 @@
     const form = byId("visionModelForm");
     form.reset();
     byId("visionEditId").value = model?.id || "";
-    form.elements.code.readOnly = Boolean(model);
+    byId("visionModelFormAlert").hidden = true;
+    byId("visionModelCodeHint").textContent = model ? `模型编码：${model.code}（系统维护）` : "模型编码由系统自动生成，无需填写。";
     byId("visionModelModalTitle").textContent = model ? "编辑训练模型" : "创建训练模型";
     form.querySelector('[type="submit"]').textContent = model ? "保存修改" : "保存训练模型";
     syncVisionFamily({ taskType: model?.task_type, baseModel: model?.base_model });
     if (model) {
-      form.elements.code.value = model.code;
       form.elements.name.value = model.name;
       form.elements.labels.value = (model.labels_json || []).join("\n");
       form.elements.description.value = model.description || "";
@@ -553,6 +553,10 @@
   async function saveVision(event) {
     event.preventDefault();
     const form = byId("visionModelForm");
+    const submit = form.querySelector('[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    byId("visionModelFormAlert").hidden = true;
     const editId = Number(byId("visionEditId").value || 0);
     const values = Object.fromEntries(new FormData(form).entries());
     const payload = {
@@ -576,7 +580,11 @@
       await loadData();
       notify(editId ? "训练模型已更新。" : "训练模型已创建。卡片已加入训练模型维护页面。");
     } catch (error) {
+      byId("visionModelFormAlert").textContent = error.message;
+      byId("visionModelFormAlert").hidden = false;
       notify(error.message, "danger");
+    } finally {
+      submit.disabled = false;
     }
   }
 

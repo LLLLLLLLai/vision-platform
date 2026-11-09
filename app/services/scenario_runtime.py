@@ -40,8 +40,9 @@ from app.services.openai_compatible_vlm import (
     VlmRequestError,
     vlm_client,
 )
-from app.services.dataset_collection_service import try_collect_roi_for_matching_datasets
+from app.services.dataset_collection_service import collect_scene_image, is_collection_only, try_collect_roi_for_matching_datasets
 from app.services.loop_body_graph import loop_body_connections
+from app.services.node_trace_status import node_trace_state
 from app.services.remote_yolo_inference import run_remote_yolo_inference
 from app.services.scene_s3_storage import SceneS3Storage, SceneS3StorageError
 from app.services.vision_model_runtime import (
@@ -180,17 +181,16 @@ def _append_trace(
     started_at: float,
     node_input: Any,
     output: Any,
+    execution_status: str | None = None,
 ) -> None:
+    state = node_trace_state({"node_type": node_type, "output": output, "execution_status": execution_status})
     runtime_context.setdefault("traces", []).append(
         {
             "node_key": node_key,
             "node_name": node_name,
             "node_type": node_type,
-            "status": (
-                "COMPLETED"
-                if isinstance(output, dict) and output.get("result") is None and output.get("status") == "COMPLETED"
-                else _normalize_result(output.get("result") if isinstance(output, dict) else None)
-            ),
+            "status": state["detection_result"] or ("ERROR" if state["execution_status"] == "FAILED" else state["execution_status"]),
+            **state,
             "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
             "input": _trace_safe(node_input),
             "output": _trace_safe(output),
@@ -472,23 +472,34 @@ class ScenarioRuntime:
         started = time.perf_counter()
         runtime_context: dict[str, Any] = {"input": input_payload, "nodes": {}, "traces": []}
         try:
-            output = await self._run_definition(
-                database,
-                scenario_version,
-                image_path=image_path,
-                runtime_context=runtime_context,
-                execution_id=execution.id,
-                debug_preview=source == "SCENE_DESIGN_TEST",
-            )
+            if is_collection_only(scenario_version):
+                collection = collect_scene_image(
+                    database, scenario_version, execution_id=execution.id, roi_id=roi_id,
+                    source=source, image_path=image_path, context=input_payload,
+                )
+                output = {"result": "NOT_INSPECTED", "run_mode": "COLLECT_ONLY",
+                          "reason": collection["message"], "collection": collection}
+            else:
+                output = await self._run_definition(
+                    database,
+                    scenario_version,
+                    image_path=image_path,
+                    runtime_context=runtime_context,
+                    execution_id=execution.id,
+                    debug_preview=source == "SCENE_DESIGN_TEST",
+                )
             execution.output_json = {
                 "result": output,
                 "nodes": runtime_context["nodes"],
                 "traces": runtime_context["traces"],
             }
-            execution.result = _normalize_result(output.get("result"))
+            execution.result = "NOT_INSPECTED" if is_collection_only(scenario_version) else _normalize_result(output.get("result"))
             confidence = output.get("confidence", output.get("score"))
             execution.score = float(confidence) if confidence is not None else None
             execution.status = "COMPLETED"
+            if is_collection_only(scenario_version) and output["collection"]["status"] == "FAILED":
+                execution.status = "FAILED"
+                execution.error_message = output["reason"]
             if execution.result in {"OK", "NG", "UNCERTAIN"}:
                 collected_item_ids = try_collect_roi_for_matching_datasets(
                     database=database,
@@ -523,6 +534,11 @@ class ScenarioRuntime:
                 "traces": runtime_context["traces"],
             }
         finally:
+            if is_collection_only(scenario_version):
+                execution.result = "NOT_INSPECTED"
+                execution.output_json = {
+                    **(execution.output_json or {}), "run_mode": "COLLECT_ONLY",
+                }
             execution.elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
             execution.completed_at = datetime.utcnow()
             database.flush()
@@ -541,6 +557,8 @@ class ScenarioRuntime:
         debug_preview: bool = False,
     ) -> dict[str, Any]:
         nodes = _workflow_order(scenario_version)
+        if is_collection_only(scenario_version):
+            raise ScenarioRuntimeError("仅采集场景不能作为流程中的检测节点，请直接关联配方 ROI。")
         if scenario_version.scenario.mode == "VLM_DIRECT" or not nodes:
             node_started = time.perf_counter()
             model = _select_vlm(database, scenario_version)
@@ -577,6 +595,7 @@ class ScenarioRuntime:
                     started_at=node_started,
                     node_input=trace_input,
                     output={"result": "ERROR", "reason": str(exc)},
+                    execution_status="FAILED",
                 )
                 raise
             runtime_context["nodes"]["direct_vlm"] = output
@@ -626,6 +645,7 @@ class ScenarioRuntime:
                         started_at=node_started,
                         node_input={},
                         output=skipped,
+                        execution_status="SKIPPED",
                     )
                     continue
             try:
@@ -936,6 +956,7 @@ class ScenarioRuntime:
                     started_at=node_started,
                     node_input=trace_input,
                     output={"result": "ERROR", "reason": str(exc)},
+                    execution_status="FAILED",
                 )
                 raise
             runtime_context["nodes"][node.node_key] = result
@@ -1671,6 +1692,11 @@ class ScenarioRuntime:
             database.flush()
 
         review_model_id = version.review_vlm_model_id
+        if is_collection_only(version):
+            review.status = "SKIPPED"
+            review.reason = "仅采集图片，未执行质量检测，不进行 VLM 复核。"
+            database.flush()
+            return review
         if not review_model_id:
             review.status = "SKIPPED"
             review.reason = "场景未配置独立 VLM 复核模型。"

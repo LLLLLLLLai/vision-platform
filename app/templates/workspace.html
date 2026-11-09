@@ -300,7 +300,7 @@
             <th>检测结果</th>
             <th>模型处理</th>
             <th>耗时</th>
-            <th>调用详情</th>
+            <th>调用详情 / 报表统计</th>
           </tr>
         </thead>
         <tbody id="detectionRecordsBody"></tbody>
@@ -395,5 +395,12 @@
   </section>
 </div>
 
-<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20261103-3"></script>
+<div class="modal fade" id="workspaceActionModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title fs-5" id="workspaceActionTitle"></h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+    <div class="modal-body"><p id="workspaceActionMessage"></p><label id="workspaceActionReasonField" class="w-100" hidden>调整原因<textarea class="form-control" id="workspaceActionReason" maxlength="500" rows="3"></textarea></label></div>
+    <div class="modal-footer"><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="button" id="workspaceActionConfirm">确认</button></div>
+  </div></div>
+</div>
+<script src="{{ url_for('static', path='/js/workspace.js') }}?v=20261105-1"></script>
 {% endblock %}

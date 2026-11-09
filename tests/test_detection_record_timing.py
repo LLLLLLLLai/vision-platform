@@ -192,6 +192,9 @@ class DetectionRecordTimingTests(unittest.TestCase):
 
         self.assertEqual(timing["display_type"], "WORKFLOW")
         self.assertEqual(timing["total_elapsed_ms"], 385.4)
+        self.assertTrue(all(node["execution_status"] == "COMPLETED" for node in timing["nodes"]))
+        self.assertIsNone(timing["nodes"][0]["detection_result"])
+        self.assertEqual(timing["nodes"][1]["detection_result"], "OK")
         self.assertEqual(
             [(node["node_key"], node["elapsed_ms"]) for node in timing["nodes"]],
             [("detector", 202.1), ("judge", 1.3)],

@@ -70,6 +70,7 @@
       OFFLINE_YOLO: "离线 YOLO 导入",
       AUTO_COLLECTION: "自动采集",
       AUTO_ROI: "ROI 自动采集",
+      AUTO_ROI_RECIPE: "配方 ROI 自动采集",
       AUTO_ORIGINAL: "相机原图采集",
       AUGMENTED: "数据增强",
       UPLOAD: "手动上传",
@@ -196,7 +197,7 @@
     const filtered = items.filter((item) => (
       (state.itemFilter === "ALL" || itemAnnotationGroup(item) === state.itemFilter)
       && (sourceFilter === "ALL" || (sourceFilter === "AUTO"
-        ? ["AUTO_COLLECTION", "AUTO_ROI", "AUTO_ORIGINAL"].includes(String(item.source || "").toUpperCase())
+        ? ["AUTO_COLLECTION", "AUTO_ROI", "AUTO_ROI_RECIPE", "AUTO_ORIGINAL"].includes(String(item.source || "").toUpperCase())
         : String(item.source || "UPLOAD").toUpperCase() === sourceFilter))
       && (splitFilter === "ALL" || String(item.split || "UNASSIGNED").toUpperCase() === splitFilter)
       && (!query || String(item.original_name || "").toLowerCase().includes(query))
@@ -296,6 +297,7 @@
     const dataset = selected();
     byId("datasetDetail").hidden = !dataset;
     byId("datasetDetailEmpty").hidden = Boolean(dataset);
+    byId("exportDatasetImages").hidden = !dataset;
     if (!dataset) return;
 
     const items = dataset.items || [];
@@ -319,6 +321,7 @@
       ];
     byId("datasetDetailCode").textContent = dataset.code;
     byId("datasetDetailName").textContent = dataset.name;
+    byId("exportDatasetImages").href = `${api}/datasets/${dataset.id}/export`;
     byId("datasetDetailMeta").textContent = purposeLabel(dataset);
     byId("datasetDetailMeta").className = `status-pill ${isTraining(dataset) ? "draft" : "published"}`;
     byId("openDatasetAugmentation").hidden = !supportsDatasetAugmentation(dataset);
@@ -603,19 +606,24 @@
     const scope = String(dataset.collection_scope || "ROI").toUpperCase();
     const scene = state.publishedScenarios.find((item) => Number(item.scenario_version_id) === Number(dataset.collection_scenario_version_id));
     const recipe = state.publishedRecipes.find((item) => Number(item.id) === Number(dataset.collection_recipe_id));
-    const sourceId = scope === "ORIGINAL" ? dataset.collection_recipe_id : dataset.collection_scenario_version_id;
+    const recipeScope = ["ROI_RECIPE", "ORIGINAL"].includes(scope);
+    const sourceId = recipeScope ? dataset.collection_recipe_id : dataset.collection_scenario_version_id;
     const toggle = byId("datasetAutoCollectToggle");
     toggle.checked = Boolean(dataset.auto_collect_enabled);
     toggle.disabled = dataset.media_type !== "IMAGE";
     byId("datasetAutoCollectState").textContent = dataset.auto_collect_enabled ? "已启用" : "已关闭";
     byId("openDatasetCollectionSettings").disabled = dataset.media_type !== "IMAGE";
     if (!dataset.auto_collect_enabled) {
-      const sourceName = scope === "ORIGINAL" ? recipeLabel(recipe) || `工艺配方 #${sourceId}` : scene?.scenario_name || `场景版本 #${sourceId}`;
+      const sourceName = recipeScope ? recipeLabel(recipe) || `工艺配方 #${sourceId}` : scene?.scenario_name || `场景版本 #${sourceId}`;
       container.innerHTML = `<span class="muted-copy">已关闭${sourceId ? ` · 来源：${escapeHtml(sourceName)}` : " · 请先设置采集来源"}</span>`;
       return;
     }
     if (scope === "ORIGINAL") {
       container.innerHTML = `<span class="status-pill published">相机原图采集</span><strong>${escapeHtml(recipeLabel(recipe) || `工艺配方 #${dataset.collection_recipe_id}`)}</strong><span>每张原图按内容去重；达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止。</span>`;
+      return;
+    }
+    if (scope === "ROI_RECIPE") {
+      container.innerHTML = `<span class="status-pill published">配方 ROI 采集</span><strong>${escapeHtml(recipeLabel(recipe) || `工艺配方 #${dataset.collection_recipe_id}`)}</strong><span>采集该配方内所有启用 ROI，不要求绑定场景；按内容去重并标记待标注，达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止。</span>`;
       return;
     }
     container.innerHTML = `<span class="status-pill published">ROI 采集</span><strong>${escapeHtml(scene?.scenario_name || `场景版本 #${dataset.collection_scenario_version_id}`)}</strong><span>每个生产 ROI 按内容去重；达到 ${escapeHtml(dataset.auto_collect_limit || 1000)} 张后自动停止。</span>`;
@@ -709,9 +717,14 @@
   }
 
   function syncCollectionSettingsMode() {
-    const original = byId("collectionSettingsScope").value === "ORIGINAL";
-    byId("collectionSettingsScenarioField").hidden = original;
-    byId("collectionSettingsRecipeField").hidden = !original;
+    const scope = byId("collectionSettingsScope").value;
+    const recipeScope = ["ROI_RECIPE", "ORIGINAL"].includes(scope);
+    byId("collectionSettingsScenarioField").hidden = recipeScope;
+    byId("collectionSettingsRecipeField").hidden = !recipeScope;
+    byId("collectionSettingsRecipeLabel").textContent = scope === "ROI_RECIPE" ? "已发布检测配方" : "已发布工艺配方";
+    byId("collectionSettingsRecipeHint").textContent = scope === "ROI_RECIPE"
+      ? "采集配方内所有启用 ROI 的裁剪图；无需 ROI 绑定场景，素材会标记为待标注。"
+      : "采集该配方对应的完整相机原图，与 ROI 裁剪图分开保存。";
   }
 
   function openCollectionSettings(enableAfterSave = false) {
@@ -737,8 +750,9 @@
   async function saveCollectionSettings() {
     const dataset = selected();
     if (!dataset) return;
-    const original = byId("collectionSettingsScope").value === "ORIGINAL";
-    const sourceId = Number(byId(original ? "collectionSettingsRecipe" : "collectionSettingsScenario").value);
+    const scope = byId("collectionSettingsScope").value;
+    const recipeScope = ["ROI_RECIPE", "ORIGINAL"].includes(scope);
+    const sourceId = Number(byId(recipeScope ? "collectionSettingsRecipe" : "collectionSettingsScenario").value);
     const limit = Number(byId("collectionSettingsLimit").value);
     if (!sourceId || !Number.isInteger(limit) || limit < 1 || limit > 100000) {
       notify("请选择已发布的采集来源，并填写 1 到 100000 之间的数量。", "warning");
@@ -749,9 +763,9 @@
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          collection_scope: original ? "ORIGINAL" : "ROI",
-          collection_scenario_version_id: original ? null : sourceId,
-          collection_recipe_id: original ? sourceId : null,
+          collection_scope: scope,
+          collection_scenario_version_id: recipeScope ? null : sourceId,
+          collection_recipe_id: recipeScope ? sourceId : null,
           auto_collect_limit: limit,
           auto_collect_enabled: dataset.auto_collect_enabled || state.enableCollectionAfterSettings,
         }),
@@ -769,7 +783,7 @@
     const dataset = selected();
     if (!dataset) return;
     const enabled = byId("datasetAutoCollectToggle").checked;
-    const sourceId = dataset.collection_scope === "ORIGINAL" ? dataset.collection_recipe_id : dataset.collection_scenario_version_id;
+    const sourceId = ["ROI_RECIPE", "ORIGINAL"].includes(dataset.collection_scope) ? dataset.collection_recipe_id : dataset.collection_scenario_version_id;
     if (enabled && !sourceId) {
       byId("datasetAutoCollectToggle").checked = false;
       openCollectionSettings(true);
@@ -854,15 +868,22 @@
   function syncDatasetCollectionMode() {
     const scope = String(byId("datasetCollectionScope").value || "ROI").toUpperCase();
     const collectOriginal = scope === "ORIGINAL";
-    byId("datasetCollectionScenarioField").hidden = collectOriginal;
-    byId("datasetCollectionRecipeField").hidden = !collectOriginal;
+    const recipeScope = ["ROI_RECIPE", "ORIGINAL"].includes(scope);
+    byId("datasetCollectionScenarioField").hidden = recipeScope;
+    byId("datasetCollectionRecipeField").hidden = !recipeScope;
+    byId("datasetCollectionRecipeLabel").textContent = scope === "ROI_RECIPE" ? "关联已发布检测配方" : "关联已发布工艺配方";
+    byId("datasetCollectionRecipeHint").textContent = scope === "ROI_RECIPE"
+      ? "采集该配方中所有启用 ROI 的裁剪图，不要求 ROI 绑定场景；图片进入待标注状态。"
+      : "采集完整相机原图，与 ROI 局部图分开保存。";
     byId("datasetAutoCollectEnabledLabel").textContent = collectOriginal
       ? "启用自动采集相机原图"
       : "启用自动采集 ROI";
     byId("datasetCollectionScopeHint").textContent = collectOriginal
-      ? "关联已发布工艺配方后，detect 接口中的完整相机原图会进入本数据集。"
-      : "关联已发布场景后，生产检测的 ROI 局部图会进入本数据集。";
-    if (collectOriginal) {
+      ? "按配方收集完整原图，内容去重并受数量上限约束。"
+      : scope === "ROI_RECIPE"
+        ? "无需创建检测场景；选择已发布配方后，生产检测会收集其中每个启用 ROI 的裁剪图。"
+        : "选择已发布场景后，生产检测会收集关联场景的 ROI 局部图。";
+    if (recipeScope) {
       byId("datasetCollectionScenario").value = "";
     } else {
       byId("datasetCollectionRecipe").value = "";

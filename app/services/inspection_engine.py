@@ -32,6 +32,10 @@ from app.services.reference_embedding_service import (
     rank_reference_vectors,
 )
 from app.services.scenario_runtime import scenario_runtime
+from app.services.dataset_collection_service import (
+    is_collection_only,
+    try_collect_recipe_roi_for_matching_datasets,
+)
 
 
 def similarity_review_band(
@@ -91,6 +95,7 @@ class InspectionEngine:
         artifact_root: str | Path | None = None,
         roi_parallelism: int | None = None,
         source_image_paths: list[str] | None = None,
+        source: str = "PRODUCTION",
     ) -> dict[str, Any]:
         if source_image_paths is not None and len(source_image_paths) != len(image_paths):
             raise ValueError("原始图片路径数量必须与待检测图片数量一致。")
@@ -102,6 +107,7 @@ class InspectionEngine:
             recipe_id=recipe.id,
             recipe_version=recipe.version,
             original_image_paths=image_paths,
+            report_excluded=source != "PRODUCTION",
         )
         database.add(task)
         database.commit()
@@ -280,6 +286,7 @@ class InspectionEngine:
                             roi_file,
                             image_file,
                             scenario_bindings,
+                            source=source,
                             image_index=image_index,
                             result_url_prefix=result_url_prefix,
                             sn=sn,
@@ -307,8 +314,10 @@ class InspectionEngine:
                             overall_status = "NG"
                         image_status = "NG"
 
-                result_path = task_root / f"result_{image_index}.jpg"
-                annotate_image(str(inspection_image), annotations, result_path)
+                collection_only = bool(item_results) and all(item.get("run_mode") == "COLLECT_ONLY" for item in item_results)
+                result_path = image_file if collection_only else task_root / f"result_{image_index}.jpg"
+                if not collection_only:
+                    annotate_image(str(inspection_image), annotations, result_path)
                 result_image_paths.append(str(result_path))
                 image_results.append(
                     {
@@ -319,6 +328,7 @@ class InspectionEngine:
                         "result_image_path": str(result_path),
                         "result": image_status,
                         "inspection_items": item_results,
+                        "collection_only": collection_only,
                     }
                 )
 
@@ -445,6 +455,7 @@ class InspectionEngine:
         box: tuple[int, int, int, int],
         alignment: dict[str, Any],
         source_image_path: str,
+        source: str = "PRODUCTION",
     ) -> dict[str, Any]:
         roi_status = "OK"
         item_results: list[dict[str, Any]] = []
@@ -454,6 +465,16 @@ class InspectionEngine:
             "coordinate_space": "SOURCE_IMAGE",
             "alignment": alignment.get("roi_correction"),
         }
+        try_collect_recipe_roi_for_matching_datasets(
+            database=database,
+            recipe_id=recipe.id,
+            detection_task_id=task.id,
+            image_index=image_index,
+            roi_id=roi.id,
+            source=source,
+            roi_image_path=str(roi_file),
+            source_image_path=source_image_path,
+        )
         scenario_binding = scenario_bindings.get(roi.id)
         if scenario_binding is not None:
             scenario_version = scenario_binding.scenario_version
@@ -461,7 +482,7 @@ class InspectionEngine:
                 database,
                 scenario_version,
                 image_path=str(roi_file),
-                source="PRODUCTION",
+                source=source,
                 detection_task_id=task.id,
                 roi_id=roi.id,
                 context={
@@ -486,11 +507,12 @@ class InspectionEngine:
                 },
             )
             result_status = str(execution.result or "ERROR").upper()
-            if result_status == "ERROR":
+            collecting = is_collection_only(scenario_version)
+            if execution.status == "FAILED" or result_status == "ERROR":
                 roi_status = "ERROR"
-            elif result_status in {"NG", "UNCERTAIN"}:
+            elif collecting or result_status in {"NG", "UNCERTAIN"}:
                 roi_status = "NG"
-            if scenario_version.review_vlm_model_id:
+            if scenario_version.review_vlm_model_id and not collecting:
                 database.add(
                     AutomationJob(
                         job_type="VLM_REVIEW",
@@ -518,20 +540,22 @@ class InspectionEngine:
                     "scenario_version_id": scenario_version.id,
                     "scenario_version": scenario_version.version,
                     "scenario_execution_id": execution.id,
-                    "primary_model": "场景运行时",
-                    "vlm_review_enabled": bool(scenario_version.review_vlm_model_id),
-                    "status": "NG" if result_status == "UNCERTAIN" else result_status,
+                    "primary_model": "仅采集图片（未调用模型）" if collecting else "场景运行时",
+                    "run_mode": "COLLECT_ONLY" if collecting else "DETECT",
+                    "execution_status": execution.status,
+                    "vlm_review_enabled": bool(scenario_version.review_vlm_model_id) and not collecting,
+                    "status": "ERROR" if execution.status == "FAILED" else "NG" if result_status == "UNCERTAIN" else result_status,
                     "raw_status": result_status,
                     "actual": actual,
                     "score": execution.score,
-                    "message": execution.error_message,
+                    "message": execution.error_message or ((execution.output_json or {}).get("result") or {}).get("reason"),
                     "elapsed_ms": execution.elapsed_ms,
                 }
             )
             return {
                 "status": roi_status,
                 "items": item_results,
-                "annotation": {"box": box, "code": roi.code, "status": roi_status},
+                "annotation": {"box": box, "code": roi.code, "status": "NOT_INSPECTED" if collecting else roi_status},
             }
 
         message = (

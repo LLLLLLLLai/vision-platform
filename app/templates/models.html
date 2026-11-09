@@ -13,14 +13,10 @@
     <div class="management-hero-actions">
       {% if active_model_view == 'training' %}
       <button class="btn btn-primary" id="openTrainingTask" type="button">＋ 创建模型训练任务</button>
+      {% elif active_model_view == 'registry' %}
+      <button class="btn btn-primary" type="button" data-create-model="vision">＋ 创建训练模型</button>
       {% else %}
-      <div class="dropdown">
-        <button class="btn btn-primary dropdown-toggle" id="createModelMenu" type="button" data-bs-toggle="dropdown" aria-expanded="false">＋ 创建模型</button>
-        <ul class="dropdown-menu dropdown-menu-end model-create-menu" aria-labelledby="createModelMenu">
-          <li><button class="dropdown-item" type="button" data-create-model="vlm"><strong>创建 VLM 模型</strong><small>OpenAI 兼容接口、提示词场景与复核</small></button></li>
-          <li><button class="dropdown-item" type="button" data-create-model="vision"><strong>创建训练模型</strong><small>YOLO 的目标检测、分割和分类模型</small></button></li>
-        </ul>
-      </div>
+      <button class="btn btn-primary" type="button" data-create-model="vlm">＋ 配置 VLM 接口</button>
       {% endif %}
       <button class="btn btn-outline-primary" id="reloadModels" type="button">刷新</button>
     </div>
@@ -31,7 +27,6 @@
   <section class="management-view {% if active_model_view == 'vlm' %}active{% endif %}" id="vlmView">
     <div class="catalog-section-heading">
       <div><small>OPENAI COMPATIBLE API</small><h2>VLM 模型卡片</h2><p>每张卡片代表一个可复用的 VLM 服务配置，可用于场景执行、提示词优化和异步复核。</p></div>
-      <button class="btn btn-sm btn-primary" type="button" data-create-model="vlm">创建 VLM 模型</button>
     </div>
     <div id="vlmModelList" class="model-card-grid"></div>
   </section>
@@ -39,7 +34,6 @@
   <section class="management-view {% if active_model_view == 'registry' %}active{% endif %}" id="visionView">
     <div class="catalog-section-heading">
       <div><small>TRAINABLE MODEL REGISTRY</small><h2>训练模型卡片</h2><p>先定义模型用途、架构和类别；可通过训练生成版本，也可直接导入已训练的 Ultralytics YOLO 权重。</p></div>
-      <button class="btn btn-sm btn-primary" type="button" data-create-model="vision">创建训练模型</button>
     </div>
     <div id="visionModelList" class="model-card-grid"></div>
   </section>
@@ -91,10 +85,9 @@
       <div class="modal-header"><div><small class="text-primary">TRAINABLE MODEL REGISTRY</small><h2 class="modal-title fs-5" id="visionModelModalTitle">创建训练模型</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
       <div class="modal-body stack-form">
         <input id="visionEditId" type="hidden">
-        <div class="form-row">
-          <label><span>模型编码</span><input class="form-control" name="code" placeholder="AI_HARNESS_DETECTION" required></label>
-          <label><span>模型名称</span><input class="form-control" name="name" placeholder="AI 检测线束" required></label>
-        </div>
+        <div class="alert alert-danger" id="visionModelFormAlert" role="alert" hidden></div>
+        <label><span>模型名称</span><input class="form-control" name="name" placeholder="AI 检测线束" maxlength="200" required></label>
+        <p class="muted-copy" id="visionModelCodeHint">模型编码由系统自动生成，无需填写。</p>
         <div class="form-row">
             <label><span>模型系列</span><input class="form-control" id="visionModelFamily" name="model_family" value="YOLO 系列" readonly></label>
           <label><span>任务类型</span><select class="form-select" id="visionModelTaskType" name="task_type"></select></label>
@@ -113,7 +106,7 @@
     <div class="modal-header"><div><small class="text-primary">模型版本</small><h2 class="modal-title fs-5" id="visionVersionsModalTitle">版本列表</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
     <div class="modal-body">
       <p class="muted-copy" id="visionVersionsSummary"></p>
-      <p class="muted-copy">导出会下载所选版本的 .pt 权重；回退仅切换模型卡片的当前发布版本，不会更改已发布场景中固定引用的模型版本。</p>
+      <p class="muted-copy">点击“切换到此版本”可回退到旧版本，也可恢复到较新版本，不删除任何权重。已发布场景固定引用原模型版本；如需用于生产，请在场景草稿中重新选择模型版本、测试并发布。</p>
       <div class="table-responsive"><table class="table table-hover align-middle mb-0">
         <thead><tr><th scope="col">版本</th><th scope="col">状态</th><th scope="col">训练数据集</th><th scope="col">关键指标</th><th scope="col">最近启用时间</th><th scope="col">权重文件</th><th scope="col">操作</th></tr></thead>
         <tbody id="visionVersionsList"></tbody>
@@ -193,5 +186,5 @@
 </div>
 
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20261103-06" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/models.js') }}?v=20261103-06"></script>
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20261104-07"></script>
 {% endblock %}

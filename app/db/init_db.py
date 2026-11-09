@@ -248,6 +248,26 @@ def _upgrade_dataset_collection_schema() -> None:
     ).create(bind=engine, checkfirst=True)
 
 
+def _upgrade_report_selection_schema() -> None:
+    inspector = inspect(engine)
+    additions = {
+        "detection_tasks": {"report_excluded": "BOOLEAN NOT NULL DEFAULT 0"},
+        "detection_api_calls": {
+            "report_excluded": "BOOLEAN NOT NULL DEFAULT 0",
+            "report_note": "VARCHAR(500)",
+            "report_updated_at": "DATETIME",
+        },
+    }
+    for table, fields in additions.items():
+        if table not in inspector.get_table_names():
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        with engine.begin() as connection:
+            for name, definition in fields.items():
+                if name not in columns:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+
+
 def init_database() -> None:
     for directory in (
         "data",
@@ -265,6 +285,7 @@ def init_database() -> None:
 
     _upgrade_sqlite_schema()
     _upgrade_dataset_collection_schema()
+    _upgrade_report_selection_schema()
     Base.metadata.create_all(bind=engine)
     _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()

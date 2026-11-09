@@ -766,14 +766,6 @@ def update_recipe(
     if payload.execution_mode is None:
         values["execution_mode"] = recipe.execution_mode
         values["skip_reason"] = recipe.skip_reason
-    if (
-        values["execution_mode"] != recipe.execution_mode
-        and (recipe.base_image_path or recipe.rois)
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="已有基准图或 ROI 的配方不能切换执行方式；请新建对应类型的配方。",
-        )
     for field, value in values.items():
         setattr(recipe, field, value)
     _mark_recipe_changed(recipe)
@@ -848,6 +840,49 @@ def recipe_detail(
             for roi in recipe.rois
         ],
     }
+
+
+@router.delete("/recipes/{recipe_id}/family")
+def delete_recipe_family(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    source = _load_recipe_with_content(database, recipe_id)
+    family_code = _normalize_recipe_family(source)
+    rows = database.scalars(select(Recipe).where(
+        (Recipe.recipe_family_code == family_code)
+        | ((Recipe.recipe_family_code == "") & (Recipe.code == family_code)),
+        Recipe.is_deleted.is_(False),
+    ).with_for_update()).all()
+    for recipe in rows:
+        recipe.is_deleted = True
+        recipe.status = "ARCHIVED"
+    database.query(Dataset).filter(
+        Dataset.collection_recipe_id.in_([recipe.id for recipe in rows]),
+    ).update({"auto_collect_enabled": False}, synchronize_session=False)
+    database.commit()
+    return {"deleted": True, "version_count": len(rows)}
+
+
+@router.post("/recipes/{recipe_id}/unpublish")
+def unpublish_recipe(
+    recipe_id: int,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    source = _load_recipe_with_content(database, recipe_id)
+    if source.status != "PUBLISHED":
+        raise HTTPException(status_code=409, detail="仅生产版本可以撤回发布。")
+    family_code = _normalize_recipe_family(source)
+    draft = _find_recipe_draft(database, family_code)
+    if draft is None:
+        draft = _clone_recipe_content(
+            database, source, code=source.code, name=source.name,
+            recipe_family_code=family_code,
+        )
+    source.version_no = source.version_no or 1
+    source.status = "ARCHIVED"
+    database.commit()
+    return {"id": draft.id, "status": draft.status, "production_recipe_id": None}
 
 
 @router.post("/recipes/{recipe_id}/image")
@@ -1563,6 +1598,7 @@ def publish_recipe(
         )
     ).all()
     for other in other_recipes:
+        other.version_no = other.version_no or 1
         other.status = "ARCHIVED"
     all_family_versions = database.scalars(
         select(Recipe).where(

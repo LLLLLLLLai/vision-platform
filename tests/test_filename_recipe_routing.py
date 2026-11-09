@@ -326,7 +326,7 @@ class RecipeDatabaseRoutingTest(unittest.IsolatedAsyncioTestCase):
                     "code": 0,
                     "message": "success",
                     "result": "OK",
-                    "image_paths": ["not-a-local-result-a.jpg", "not-a-local-result-b.jpg"],
+                    "image_paths": [f"not-a-local-result-{len(captured_paths)}.jpg"],
                     "image_results": [],
                 }
 

@@ -52,6 +52,7 @@ class DetectionTask(TimestampMixin, Base):
     elapsed_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    report_excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     item_results: Mapped[list["DetectionItemResult"]] = relationship(
         back_populates="task",
@@ -76,6 +77,9 @@ class DetectionApiCall(TimestampMixin, Base):
     response_code: Mapped[int] = mapped_column(Integer, index=True)
     call_status: Mapped[str] = mapped_column(String(30), index=True)
     elapsed_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    report_excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    report_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    report_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DetectionItemResult(TimestampMixin, Base):

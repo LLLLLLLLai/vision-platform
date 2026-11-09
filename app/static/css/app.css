@@ -1398,11 +1398,17 @@ button, input, select { font: inherit; }
   font-weight: 800;
 }
 
-.record-timing-status.ok { color: #0a7650; }
+.record-timing-status.ok,
+.record-timing-status.completed { color: #0a7650; }
 .record-timing-status.ng,
+.record-timing-status.failed,
 .record-timing-status.error { color: #c23b48; }
 .record-timing-status.skipped,
-.record-timing-status.uncertain { color: #907020; }
+.record-timing-status.cancelled,
+.record-timing-status.pending,
+.record-timing-status.unknown { color: #71849a; }
+.record-timing-status.uncertain,
+.record-timing-status.running { color: #907020; }
 
 .configuration-bar, .canvas-panel, .inspector-panel, .rule-workbench,
 .library-toolbar, .configuration-library, .library-detail {
@@ -4656,8 +4662,7 @@ button, input, select { font: inherit; }
   font-size: 11px;
 }
 
-.record-image-lightbox[hidden],
-.record-processing-json[hidden] {
+.record-image-lightbox[hidden] {
   display: none;
 }
 
@@ -4746,28 +4751,23 @@ button, input, select { font: inherit; }
   font-size: 12px;
 }
 
-.record-processing-traces {
-  display: grid;
-  gap: 5px;
-  max-height: 180px;
+.record-processing-raw {
   margin-top: 10px;
-  overflow: auto;
+  padding-top: 8px;
+  border-top: 1px solid #d8e5f4;
 }
 
-.record-processing-traces > div {
-  display: grid;
-  grid-template-columns: minmax(90px, .8fr) minmax(0, 1.5fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: #fff;
+.record-processing-raw summary {
+  width: fit-content;
+  color: #2f5d90;
+  cursor: pointer;
   font-size: 11px;
 }
 
-.record-processing-traces span { color: #6f8198; }
-.record-processing-traces b { min-width: 0; overflow-wrap: anywhere; color: #2f4e73; }
-.record-processing-traces small { white-space: nowrap; }
+.record-processing-raw summary:focus-visible {
+  outline: 2px solid #2f5d90;
+  outline-offset: 3px;
+}
 
 .record-processing-json {
   max-height: 280px;

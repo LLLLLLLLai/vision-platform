@@ -24,7 +24,10 @@ class DesignerRecordUiAssetTests(unittest.TestCase):
 
         self.assertIn('id="recordImageLightboxClose"', template)
         self.assertIn('data-record-image-open', script)
-        self.assertIn('data-record-json-toggle', script)
+        self.assertIn('class="record-processing-raw"', script)
+        self.assertNotIn('data-record-json-toggle', script)
+        self.assertNotIn('return "查看完整数据"', script)
+        self.assertNotIn('class="record-processing-traces"', script)
         self.assertIn('recordImageLightboxImage', script)
         self.assertIn('renderRecordProcessing(roi)', script)
         self.assertIn('record.call_status === "SUCCESS"', script)

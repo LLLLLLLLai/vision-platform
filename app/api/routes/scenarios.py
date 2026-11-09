@@ -5,20 +5,23 @@ from pathlib import Path
 import re
 from secrets import compare_digest
 import shutil
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from PIL import Image, UnidentifiedImageError
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
 from app.core.config import PROJECT_ROOT, settings
 from app.db.session import get_db
 from app.models.intelligence import (
     AutomationJob,
     Dataset,
+    DatasetItem,
     InspectionScenario,
     InspectionScenarioVersion,
     RoiScenarioBinding,
@@ -32,7 +35,13 @@ from app.models.intelligence import (
 )
 from app.models.recipe import Recipe, RegionOfInterest
 from app.services.loop_body_graph import loop_body_connections
+from app.services.node_trace_status import with_node_trace_states
+from app.services.openai_compatible_vlm import VlmConfigurationError, VlmRequestError
+from app.services.scene_design_assistant import (
+    DesignConversation, SceneDesign, generate_scene_design, validate_design_references,
+)
 from app.services.scenario_runtime import ScenarioRuntimeError, scenario_runtime
+from app.services.dataset_collection_service import is_collection_only, scene_collection_targets
 from app.services.scene_result_images import SceneResultSnapshot, build_scene_result_image
 from app.services.scene_s3_storage import InvalidSceneS3KeyError, SceneS3Storage, SceneS3StorageError
 from app.services.vision_model_runtime import resolve_weights_path, task_output_profile
@@ -112,6 +121,7 @@ class ScenarioCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     category: str = Field(default="GENERAL", max_length=100)
     mode: str = "VLM_DIRECT"
+    run_mode: Literal["DETECT", "COLLECT_ONLY"] = "DETECT"
     description: str | None = Field(default=None, max_length=1000)
     version: str = Field(default="1.0", max_length=50)
     prompt_template: str | None = Field(default=None, max_length=8000)
@@ -151,6 +161,13 @@ class VersionCreate(BaseModel):
     output_schema_json: dict[str, Any] = Field(default_factory=dict)
     definition_json: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("definition_json")
+    @classmethod
+    def validate_run_mode(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if value.get("run_mode", "DETECT") not in {"DETECT", "COLLECT_ONLY"}:
+            raise ValueError("运行模式仅支持 DETECT 或 COLLECT_ONLY")
+        return value
+
     @field_validator("version", mode="before")
     @classmethod
     def trim_version(cls, value: Any) -> Any:
@@ -174,6 +191,13 @@ class VersionUpdate(BaseModel):
     input_schema_json: dict[str, Any] | None = None
     output_schema_json: dict[str, Any] | None = None
     definition_json: dict[str, Any] | None = None
+
+    @field_validator("definition_json")
+    @classmethod
+    def validate_run_mode(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None and value.get("run_mode", "DETECT") not in {"DETECT", "COLLECT_ONLY"}:
+            raise ValueError("运行模式仅支持 DETECT 或 COLLECT_ONLY")
+        return value
 
     @field_validator("prompt_template", mode="before")
     @classmethod
@@ -525,6 +549,7 @@ def _validate_vlm_node(database: Session, node: ScenarioNode) -> None:
             referenced is None
             or referenced.is_deleted
             or referenced.status != "PUBLISHED"
+            or is_collection_only(referenced)
             or referenced.scenario.mode != "VLM_DIRECT"
             or not referenced.primary_vlm_model_id
             or not referenced.prompt_template
@@ -851,7 +876,11 @@ def _workflow_preflight(
         diagnostics.append(item)
 
     scene = version.scenario
-    if scene.mode == "VLM_DIRECT":
+    if is_collection_only(version):
+        add("INFO", "COLLECTION_ONLY", "仅采集图片：无需模型，不执行质量判定，detect 按约定返回 NG。")
+        if not any(item.enabled and item.auto_collect_enabled for item in scene_collection_targets(database, version)):
+            add("WARNING", "COLLECTION_TARGET_REQUIRED", "尚未关联已启用自动采集的数据集。发布后请到数据集维护关联本场景。")
+    elif scene.mode == "VLM_DIRECT":
         if not version.primary_vlm_model_id:
             add("ERROR", "DIRECT_VLM_REQUIRED", "直接 VLM 场景必须配置主 VLM。", suggestion="在“检测配置”中选择可用的 VLM 模型。")
         else:
@@ -1152,6 +1181,10 @@ def _workflow_preflight(
         "scene_id": version.scenario_id,
         "mode": scene.mode,
         "ready": errors == 0,
+        "affected_roi_count": database.query(RoiScenarioBinding).join(InspectionScenarioVersion).filter(
+            InspectionScenarioVersion.scenario_id == version.scenario_id,
+            RoiScenarioBinding.enabled.is_(True),
+        ).count(),
         "summary": {
             "errors": errors,
             "warnings": warnings,
@@ -1162,7 +1195,7 @@ def _workflow_preflight(
 
 
 def _validate_preview_rule_contract(database: Session, version: InspectionScenarioVersion) -> None:
-    if version.scenario.mode != "WORKFLOW":
+    if is_collection_only(version) or version.scenario.mode != "WORKFLOW":
         return
     rule_errors = {
         "RULE_ACTUAL_REQUIRED", "IF_ACTUAL_REQUIRED",
@@ -1397,6 +1430,7 @@ def _version_payload(version: InspectionScenarioVersion) -> dict[str, Any]:
         "input_schema_json": version.input_schema_json,
         "output_schema_json": version.output_schema_json,
         "definition_json": version.definition_json,
+        "run_mode": "COLLECT_ONLY" if is_collection_only(version) else "DETECT",
         "primary_vlm_model_id": version.primary_vlm_model_id,
         "review_vlm_model_id": version.review_vlm_model_id,
         "created_at": version.created_at.isoformat() if version.created_at else None,
@@ -1415,8 +1449,9 @@ def _version_payload(version: InspectionScenarioVersion) -> dict[str, Any]:
     }
 
 
-def _scenario_payload(scene: InspectionScenario) -> dict[str, Any]:
+def _scenario_payload(scene: InspectionScenario, *, include_collection: bool = True) -> dict[str, Any]:
     versions = sorted(scene.versions, key=lambda item: item.id, reverse=True)
+    database = object_session(scene)
     return {
         "id": scene.id,
         "code": scene.code,
@@ -1429,6 +1464,16 @@ def _scenario_payload(scene: InspectionScenario) -> dict[str, Any]:
         "created_at": scene.created_at.isoformat() if scene.created_at else None,
         "updated_at": scene.updated_at.isoformat() if scene.updated_at else None,
         "versions": [_version_payload(version) for version in versions],
+        "collection_datasets": [
+            {"id": dataset.id, "name": dataset.name,
+             "enabled": bool(dataset.enabled and dataset.auto_collect_enabled),
+             "count": database.scalar(select(func.count(DatasetItem.id)).where(
+                 DatasetItem.dataset_id == dataset.id, DatasetItem.source == "AUTO_ROI",
+                 DatasetItem.is_deleted.is_(False),
+             )) or 0,
+             "limit": dataset.auto_collect_limit}
+            for dataset in scene_collection_targets(database, versions[0])
+        ] if include_collection and versions and database is not None else [],
     }
 
 
@@ -1445,7 +1490,7 @@ def _execution_payload(execution: ScenarioExecution) -> dict[str, Any]:
         "result": execution.result,
         "score": execution.score,
         "input_json": execution.input_json,
-        "output_json": execution.output_json,
+        "output_json": with_node_trace_states(execution.output_json),
         "elapsed_ms": execution.elapsed_ms,
         "error_message": execution.error_message,
         "created_at": execution.created_at.isoformat(),
@@ -1523,6 +1568,8 @@ def _validate_published_scene_inputs(
     version: InspectionScenarioVersion,
     inputs: dict[str, Any],
 ) -> None:
+    if is_collection_only(version):
+        return
     input_fields = _scene_input_fields(version)
     allowed_names = {str(field["name"]) for field in input_fields}
     unknown_names = sorted(set(inputs) - allowed_names)
@@ -1550,15 +1597,16 @@ def _published_scene_api_contract(
     scene: InspectionScenario,
     version: InspectionScenarioVersion,
 ) -> dict[str, Any]:
-    input_fields = _scene_input_fields(version)
+    collecting = is_collection_only(version)
+    input_fields = [] if collecting else _scene_input_fields(version)
     request_inputs = {
         field["name"]: f"<{field['label']}>" for field in input_fields
     }
     api_key_required = bool(settings.scene_api_key.strip())
-    has_upload_node = any(
+    has_upload_node = not collecting and any(
         node.enabled and node.node_type.upper() == "S3_UPLOAD" for node in version.nodes
     )
-    uploads_result = settings.scene_result_s3_enabled and (
+    uploads_result = not collecting and settings.scene_result_s3_enabled and (
         has_upload_node or settings.scene_result_s3_auto_publish
     )
     return {
@@ -1566,6 +1614,7 @@ def _published_scene_api_contract(
             "code": scene.code,
             "name": scene.name,
             "mode": scene.mode,
+            "run_mode": "COLLECT_ONLY" if is_collection_only(version) else "DETECT",
             "version": version.version,
         },
         "method": "POST",
@@ -1592,7 +1641,7 @@ def _published_scene_api_contract(
         "result_image": {
             "s3_enabled": settings.scene_result_s3_enabled,
             "upload_node": has_upload_node,
-            "auto_publish": settings.scene_result_s3_auto_publish,
+            "auto_publish": not collecting and settings.scene_result_s3_auto_publish,
             "destination_field": "result_s3_key",
             "description": (
                 "流程中的 S3 上传节点负责上传指定的图片；result_s3_key 可覆盖节点默认对象键。"
@@ -1611,7 +1660,7 @@ def _published_scene_api_contract(
         },
         "response_example": {
             "code": 0,
-            "message": "success",
+            "message": "仅采集图片，未执行质量检测，按配置返回 NG" if collecting else "success",
             "request_id": "scene-call-001",
             "scene": {
                 "code": scene.code,
@@ -1620,11 +1669,11 @@ def _published_scene_api_contract(
                 "version": version.version,
             },
             "execution_id": 123,
-            "result": "OK",
-            "score": 0.98,
+            "result": "NG" if collecting else "OK",
+            "score": None if collecting else 0.98,
             "elapsed_ms": 135.2,
-            "output": {"result": "OK"},
-            "image_paths": (["s3://<bucket>/<prefix>/external/scene-call-001_result.jpg"] if uploads_result else []),
+            "output": {"result": "NOT_INSPECTED" if collecting else "OK"},
+            "image_paths": ["C:/vision-share/sample.jpg"] if collecting else (["s3://<bucket>/<prefix>/external/scene-call-001_result.jpg"] if uploads_result else []),
             "result_image_path": ("s3://<bucket>/<prefix>/external/scene-call-001_result.jpg" if uploads_result else None),
             "review_queued": False,
         },
@@ -1646,7 +1695,7 @@ def list_scenarios(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
         .where(InspectionScenario.is_deleted.is_(False))
         .order_by(InspectionScenario.id.desc())
     ).all()
-    return [_scenario_payload(scene) for scene in scenes]
+    return [_scenario_payload(scene, include_collection=False) for scene in scenes]
 
 
 @router.get("/published")
@@ -1672,6 +1721,7 @@ def list_published_scenarios(database: Session = Depends(get_db)) -> list[dict[s
             "scenario_name": scene.name,
             "category": scene.category,
             "mode": scene.mode,
+            "run_mode": "COLLECT_ONLY" if is_collection_only(version) else "DETECT",
             "scenario_version_id": version.id,
             "version": version.version,
             "input_fields": _scene_input_fields(version),
@@ -1708,10 +1758,10 @@ async def invoke_published_scene(
     _validate_scene_api_key(x_scene_api_key)
     scene, version = _published_scene_for_invoke(database, scene_code)
     _validate_published_scene_inputs(version, payload.inputs)
-    has_upload_node = any(
+    has_upload_node = not is_collection_only(version) and any(
         node.enabled and node.node_type.upper() == "S3_UPLOAD" for node in version.nodes
     )
-    auto_publish = settings.scene_result_s3_enabled and settings.scene_result_s3_auto_publish
+    auto_publish = not is_collection_only(version) and settings.scene_result_s3_enabled and settings.scene_result_s3_auto_publish
     storage = SceneS3Storage()
     if payload.result_s3_key and not (has_upload_node or auto_publish):
         raise HTTPException(status_code=422, detail="当前场景未配置 S3 上传节点，不能指定 result_s3_key。")
@@ -1792,6 +1842,7 @@ async def invoke_published_scene(
         "message": (
             f"场景检测已完成，但结果图上传失败：{upload_error}"
             if upload_error
+            else (output.get("reason") or "仅采集图片，未执行质量检测") if is_collection_only(version)
             else "success" if succeeded else (execution.error_message or "场景执行失败。")
         ),
         "request_id": payload.request_id or f"scene-{execution.id}",
@@ -1802,11 +1853,11 @@ async def invoke_published_scene(
             "version": version.version,
         },
         "execution_id": execution.id,
-        "result": execution.result or "ERROR",
+        "result": "NG" if is_collection_only(version) else execution.result or "ERROR",
         "score": execution.score,
         "elapsed_ms": execution.elapsed_ms,
         "output": output,
-        "image_paths": [result_image_path] if result_image_path else [],
+        "image_paths": [payload.image_path] if is_collection_only(version) else [result_image_path] if result_image_path else [],
         "result_image_path": result_image_path,
         "review_queued": review_queued,
     }
@@ -1841,6 +1892,7 @@ def create_scenario(
             prompt_template=payload.prompt_template,
             primary_vlm_model_id=payload.primary_vlm_model_id,
             review_vlm_model_id=payload.review_vlm_model_id,
+            definition_json={"run_mode": payload.run_mode},
         )
         database.add(version)
         database.flush()
@@ -1854,6 +1906,175 @@ def create_scenario(
             detail=f"场景编码“{code}”已存在，请更换后再创建。",
         ) from exc
     return {"id": scene.id, "version_id": version.id, "status": "DRAFT"}
+
+
+def _assistant_catalog(database: Session) -> dict[str, Any]:
+    vlms = database.scalars(select(VlmModelConfig).where(
+        VlmModelConfig.enabled.is_(True), VlmModelConfig.is_deleted.is_(False),
+    )).all()
+    versions = database.scalars(select(VisionModelVersion).join(VisionModel).where(
+        VisionModelVersion.status == "PUBLISHED", VisionModelVersion.is_deleted.is_(False),
+        VisionModel.enabled.is_(True), VisionModel.is_deleted.is_(False),
+    )).all()
+    return {
+        "vlm": [{"id": model.id, "name": model.name} for model in vlms],
+        "trained": [{"id": version.id, "name": version.vision_model.name,
+                     "task_type": version.vision_model.task_type,
+                     "labels": version.vision_model.labels_json} for version in versions],
+    }
+
+
+def _assistant_version(mode: str, design: SceneDesign, catalog: dict[str, Any]) -> InspectionScenarioVersion:
+    if design.mode != mode:
+        raise ValueError("生成的场景类型与当前场景不一致")
+    validate_design_references(design)
+    vlm_ids = {model["id"] for model in catalog["vlm"]}
+    trained_ids = {model["id"] for model in catalog["trained"]}
+    if (mode == "VLM_DIRECT" or design.primary_vlm_model_id is not None) and design.primary_vlm_model_id not in vlm_ids:
+        raise ValueError("请选择可用的检测VLM模型")
+    allowed_config = {
+        "START": set(), "END": {"output"},
+        "VLM": {"vlm_model_id", "prompt", "image_path"},
+        "VISION_MODEL": {"model_version_id", "image_path", "confidence"},
+        "RULE": {"actual", "operator", "expected"},
+        "IMAGE_CROP": {"image_path", "bbox", "objects", "padding_ratio"},
+        "IMAGE_ANNOTATE": {"image_path", "bbox", "objects"},
+    }
+    for node in design.nodes:
+        config = node.config_json
+        if set(config) - allowed_config[node.node_type]:
+            raise ValueError(f"节点 {node.name} 包含不支持的配置项")
+        if node.node_type == "VLM" and (not isinstance(config.get("prompt"), str) or not 1 <= len(config["prompt"].strip()) <= 8000):
+            raise ValueError(f"节点 {node.name} 的提示词必须是1至8000字的文字")
+        if node.node_type == "RULE" and config.get("operator") not in {
+            "EQUALS", "CONTAINS", "EXISTS", "NUMBER_EQUALS", "NUMBER_GT", "NUMBER_GTE", "NUMBER_LT", "NUMBER_LTE",
+        }:
+            raise ValueError(f"节点 {node.name} 使用了不支持的规则运算符")
+        if node.node_type == "END" and not isinstance(config.get("output"), dict):
+            raise ValueError("结束节点必须配置输出字段映射")
+        for field, permitted in (("vlm_model_id", vlm_ids), ("model_version_id", trained_ids)):
+            if (node.node_type == "VLM" and field == "vlm_model_id") or (node.node_type == "VISION_MODEL" and field == "model_version_id"):
+                value = config.get(field)
+                if type(value) is not int or value not in permitted:
+                    raise ValueError(f"节点 {node.name} 未选择有效模型版本：{field}")
+        if "confidence" in config and (type(config["confidence"]) not in (int, float) or not 0 <= config["confidence"] <= 1):
+            raise ValueError("模型置信度必须是0至1的数字")
+        if "image_path" in config and not re.fullmatch(
+            r"\s*\{\{\s*(?:input\.image_path|nodes\.[A-Za-z_][A-Za-z0-9_]*\.(?:crops\.\d+\.)?image_path)\s*\}\}\s*",
+            str(config["image_path"]),
+        ):
+            raise ValueError("图片路径必须引用输入图片或上游节点，不能由AI填写本地路径")
+    fields = [field.model_dump() for field in design.input_fields]
+    version = InspectionScenarioVersion(
+        id=0, scenario_id=0, scenario=InspectionScenario(mode=mode), status="DRAFT",
+        prompt_template=design.prompt_template or None,
+        primary_vlm_model_id=design.primary_vlm_model_id,
+        input_schema_json={"fields": fields}, output_schema_json={}, definition_json={},
+    )
+    for index, node in enumerate(design.nodes):
+        config = dict(node.config_json)
+        if node.node_type == "START":
+            config = {"inputs": [{"name": "image_path", "label": "检测图片", "type": "IMAGE", "required": True}, *fields]}
+        version.nodes.append(ScenarioNode(
+            id=index + 1, node_key=node.node_key, name=node.name, node_type=node.node_type,
+            config_json=config, enabled=True, sort_order=(index + 1) * 10,
+            canvas_x=80 + (index % 5) * 320, canvas_y=120 + (index // 5) * 210,
+        ))
+    for index, edge in enumerate(design.edges):
+        version.edges.append(ScenarioEdge(id=index + 1, **edge.model_dump(), mapping_json={}))
+    return version
+
+
+def _check_assistant_design(database: Session, mode: str, design: SceneDesign) -> InspectionScenarioVersion:
+    version = _assistant_version(mode, design, _assistant_catalog(database))
+    preflight = _workflow_preflight(database, version)
+    errors = [item["message"] for item in preflight["diagnostics"] if item["level"] == "ERROR"]
+    if errors:
+        raise ValueError("；".join(errors))
+    return version
+
+
+@router.post("/{scenario_id}/design-assistant")
+async def assist_scene_design(
+    scenario_id: int,
+    vlm_model_id: int = Form(...),
+    requirements: str = Form(..., min_length=1, max_length=8000),
+    conversation_json: str = Form("{}", max_length=150000),
+    image: UploadFile = File(...),
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    scene = database.get(InspectionScenario, scenario_id)
+    if scene is None or scene.is_deleted:
+        raise HTTPException(status_code=404, detail="检测场景不存在。")
+    model = database.get(VlmModelConfig, vlm_model_id)
+    if model is None or model.is_deleted or not model.enabled:
+        raise HTTPException(status_code=422, detail="请选择已启用的VLM接口配置。")
+    if not requirements.strip():
+        raise HTTPException(status_code=422, detail="请填写检测要求。")
+    try:
+        conversation = DesignConversation.model_validate_json(conversation_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="对话内容格式不正确或过长。") from exc
+    content = await image.read(20 * 1024 * 1024 + 1)
+    await image.close()
+    if not content or len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="请上传不超过20MB的图片。")
+    with TemporaryDirectory(prefix="vision-scene-design-") as temporary:
+        image_path = Path(temporary) / "sample.png"
+        image_path.write_bytes(content)
+        try:
+            with Image.open(image_path) as uploaded:
+                if uploaded.width * uploaded.height > 40_000_000:
+                    raise ValueError("图片像素超过4000万，请缩小后上传。")
+                uploaded.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise HTTPException(status_code=422, detail="图片无法读取或像素过大，请重新上传。") from exc
+        try:
+            design = await generate_scene_design(
+                model, image_path=str(image_path), mode=scene.mode, requirements=requirements.strip(),
+                conversation=conversation, catalog=_assistant_catalog(database),
+                validate=lambda generated: _check_assistant_design(database, scene.mode, generated),
+            )
+        except (VlmRequestError, VlmConfigurationError) as exc:
+            raise HTTPException(status_code=502, detail=f"AI设计服务调用失败：{exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"design": design.model_dump(), "message": "生成完成，尚未修改场景。请确认后创建新草稿并测试。"}
+
+
+@router.post("/{scenario_id}/design-assistant/apply")
+def apply_assisted_scene_design(
+    scenario_id: int, design: SceneDesign, database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    scene = database.get(InspectionScenario, scenario_id)
+    if scene is None or scene.is_deleted:
+        raise HTTPException(status_code=404, detail="检测场景不存在。")
+    try:
+        generated = _check_assistant_design(database, scene.mode, design)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    version = InspectionScenarioVersion(
+        scenario_id=scene.id, version=f"AI-{datetime.utcnow():%Y%m%d-%H%M%S}-{uuid4().hex[:6]}",
+        status="DRAFT", prompt_template=generated.prompt_template,
+        primary_vlm_model_id=generated.primary_vlm_model_id,
+        input_schema_json=generated.input_schema_json, output_schema_json={},
+        definition_json={"design_assistant": {"explanation": design.explanation}},
+    )
+    database.add(version)
+    database.flush()
+    for node in generated.nodes:
+        database.add(ScenarioNode(
+            scenario_version_id=version.id, node_key=node.node_key, name=node.name,
+            node_type=node.node_type, config_json=node.config_json, sort_order=node.sort_order,
+            canvas_x=node.canvas_x, canvas_y=node.canvas_y, enabled=True,
+        ))
+    for edge in generated.edges:
+        database.add(ScenarioEdge(
+            scenario_version_id=version.id, source_node_key=edge.source_node_key,
+            target_node_key=edge.target_node_key, mapping_json={},
+        ))
+    database.commit()
+    return {"version_id": version.id, "version": version.version, "status": "DRAFT"}
 
 
 @router.get("/{scenario_id}")
@@ -1917,6 +2138,10 @@ def create_scenario_version(
         if source_version.scenario_id != scene.id:
             raise HTTPException(status_code=400, detail="新版本只能复制当前场景的版本定义。")
     version_values = payload.model_dump(exclude={"source_version_id"})
+    if source_version is not None:
+        for field in ("definition_json", "input_schema_json", "output_schema_json", "prompt_template", "primary_vlm_model_id", "review_vlm_model_id"):
+            if field not in payload.model_fields_set:
+                version_values[field] = getattr(source_version, field)
     version = InspectionScenarioVersion(scenario=scene, **version_values)
     database.add(version)
     database.flush()
@@ -2108,7 +2333,9 @@ def publish_scenario_version(
         details = "；".join(str(item["message"]) for item in blocking[:3])
         more = "" if len(blocking) <= 3 else f"；另有 {len(blocking) - 3} 项问题"
         raise HTTPException(status_code=400, detail=f"发布前检查未通过：{details}{more}")
-    if scene.mode == "VLM_DIRECT":
+    if is_collection_only(version):
+        pass
+    elif scene.mode == "VLM_DIRECT":
         if not version.primary_vlm_model_id or not version.prompt_template:
             raise HTTPException(status_code=400, detail="直接 VLM 场景必须配置主 VLM 和提示词。")
     else:
@@ -2287,7 +2514,7 @@ async def execute_scenario_version(
         source="TEST",
         context=payload.context,
     )
-    if payload.enqueue_review:
+    if payload.enqueue_review and not is_collection_only(version):
         database.add(
             AutomationJob(
                 job_type="VLM_REVIEW",
@@ -2389,6 +2616,8 @@ def enqueue_execution_review(
     execution = database.get(ScenarioExecution, execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="场景执行记录不存在。")
+    if is_collection_only(execution.scenario_version):
+        raise HTTPException(status_code=400, detail="仅采集记录未执行检测，不支持 VLM 复核。")
     existing = database.scalar(
         select(AutomationJob).where(
             AutomationJob.job_type == "VLM_REVIEW",
@@ -2425,6 +2654,8 @@ def record_manual_review(
     )
     if execution is None:
         raise HTTPException(status_code=404, detail="场景执行记录不存在。")
+    if is_collection_only(execution.scenario_version):
+        raise HTTPException(status_code=400, detail="仅采集记录不参与准确率统计，请在数据集中标注素材。")
     review = execution.review
     if review is None:
         review = ScenarioExecutionReview(execution_id=execution.id, status="SKIPPED")

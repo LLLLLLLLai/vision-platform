@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.services.dataset_collection_service import is_collection_only
 from app.core.config import settings
 from app.models.intelligence import (
     AutomationJob,
@@ -162,6 +163,8 @@ def queue_scene_evaluation(
         raise HTTPException(status_code=404, detail="场景版本不存在。")
     if version.status != "PUBLISHED":
         raise HTTPException(status_code=400, detail="场景评测只能使用已发布的场景版本。")
+    if is_collection_only(version):
+        raise HTTPException(status_code=400, detail="仅采集场景没有检测结论，请切换正常检测并发布后再评测。")
     if dataset is None or dataset.is_deleted:
         raise HTTPException(status_code=404, detail="数据集不存在。")
     if dataset.purpose != "TEST":
@@ -197,6 +200,8 @@ def queue_prompt_optimization(
     dataset = database.get(Dataset, payload.dataset_id)
     if version is None or version.status != "PUBLISHED":
         raise HTTPException(status_code=400, detail="请选择已发布的场景版本。")
+    if is_collection_only(version):
+        raise HTTPException(status_code=400, detail="仅采集场景没有检测提示词，请切换正常检测并发布后再优化。")
     if version.scenario is None or version.scenario.mode != "VLM_DIRECT":
         raise HTTPException(status_code=400, detail="提示词优化仅支持直接 VLM 检测场景。")
     if dataset is None or dataset.purpose != "TEST":

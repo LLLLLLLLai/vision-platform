@@ -2,11 +2,12 @@ from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -38,12 +39,17 @@ MAX_IMPORTED_WEIGHTS_BYTES = 8 * 1024 * 1024 * 1024
 
 
 class VisionModelCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=100)
+    code: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     task_type: str
     description: str | None = Field(default=None, max_length=1000)
     base_model: str | None = Field(default=None, max_length=300)
     labels_json: list[str] = Field(default_factory=list)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class VisionModelUpdate(BaseModel):
@@ -53,6 +59,11 @@ class VisionModelUpdate(BaseModel):
     base_model: str | None = Field(default=None, max_length=300)
     labels_json: list[str] | None = None
     enabled: bool | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class VisionModelVersionCreate(BaseModel):
@@ -259,9 +270,13 @@ def create_vision_model(
             status_code=400,
             detail="当前仅支持 YOLO 目标检测、目标分割和分类模型。",
         )
-    code = payload.code.strip()
+    code = (payload.code or "").strip() or f"MODEL_{uuid4().hex.upper()}"
     if database.scalar(select(VisionModel.id).where(VisionModel.code == code)):
         raise HTTPException(status_code=409, detail="模型编码已存在。")
+    if database.scalar(select(VisionModel.id).where(
+        func.lower(VisionModel.name) == payload.name.lower(), VisionModel.is_deleted.is_(False),
+    )):
+        raise HTTPException(status_code=409, detail="模型名称已存在，请使用不同名称或编辑已有模型。")
     model = VisionModel(
         code=code,
         name=payload.name.strip(),
@@ -290,6 +305,11 @@ def update_vision_model(
     if model is None or model.is_deleted:
         raise HTTPException(status_code=404, detail="视觉模型不存在。")
     values = payload.model_dump(exclude_unset=True)
+    if values.get("name") and database.scalar(select(VisionModel.id).where(
+        func.lower(VisionModel.name) == values["name"].lower(),
+        VisionModel.id != model_id, VisionModel.is_deleted.is_(False),
+    )):
+        raise HTTPException(status_code=409, detail="模型名称已存在，请使用不同名称。")
     task_type = values.get("task_type")
     if task_type is not None:
         task_type = task_type.upper()
@@ -461,7 +481,7 @@ def publish_model_version(
     version_id: int,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    model = database.get(VisionModel, model_id)
+    model = database.scalar(select(VisionModel).where(VisionModel.id == model_id).with_for_update())
     if model is None or model.is_deleted or not model.enabled:
         raise HTTPException(status_code=404, detail="视觉模型不存在或已停用。")
     version = _model_version_or_404(database, model_id, version_id)

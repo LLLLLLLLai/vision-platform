@@ -141,7 +141,7 @@
     openModal("promptViewerModal");
   };
   const publishedVersions = () => state.scenes.flatMap((scene) => scene.versions
-    .filter((version) => version.status === "PUBLISHED")
+    .filter((version) => version.status === "PUBLISHED" && version.run_mode !== "COLLECT_ONLY")
     .map((version) => ({ scene, version })));
   const sceneVersionLabel = (versionId) => {
     const match = state.scenes.flatMap((scene) => scene.versions.map((version) => ({ scene, version })))
@@ -172,7 +172,7 @@
       return `<tr>
         <td><strong>${escapeHtml(scene.name)}</strong><small>${escapeHtml(scene.code)}</small></td>
         <td>${escapeHtml(scene.category || "GENERAL")}</td>
-        <td>${escapeHtml(modeLabel(scene.mode))}</td>
+        <td>${escapeHtml(modeLabel(scene.mode))}${current?.run_mode === "COLLECT_ONLY" ? '<br><span class="status-pill draft">仅采集图片</span>' : ''}</td>
         <td>${escapeHtml(versionText)}</td>
         <td><span class="status-pill ${statusClass(status)}">${escapeHtml(status)}</span></td>
         <td>${scene.versions.length}</td>
@@ -429,6 +429,7 @@
       name: values.name.trim(),
       category: values.category.trim() || "GENERAL",
       mode: values.mode,
+      run_mode: values.run_mode || "DETECT",
       description: values.description.trim() || null,
       version: values.version.trim() || "1.0",
     };

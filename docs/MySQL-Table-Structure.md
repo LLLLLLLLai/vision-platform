@@ -82,6 +82,9 @@
 | `response_code` | `INTEGER` | 否 | INDEX | - |
 | `call_status` | `VARCHAR(30)` | 否 | INDEX | - |
 | `elapsed_ms` | `FLOAT` | 是 | - | - |
+| `report_excluded` | `BOOL` | 否 | - | 0 |
+| `report_note` | `VARCHAR(500)` | 是 | - | - |
+| `report_updated_at` | `DATETIME` | 是 | - | - |
 | `created_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `updated_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `is_deleted` | `BOOL` | 否 | - | 应用默认值 |
@@ -399,6 +402,7 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `elapsed_ms` | `FLOAT` | 是 | - | - |
 | `error_message` | `VARCHAR(1000)` | 是 | - | - |
 | `completed_at` | `DATETIME` | 是 | - | - |
+| `report_excluded` | `BOOL` | 否 | - | 0 |
 | `created_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `updated_at` | `DATETIME` | 否 | - | 应用默认值 |
 | `is_deleted` | `BOOL` | 否 | - | 应用默认值 |

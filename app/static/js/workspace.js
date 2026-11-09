@@ -2582,7 +2582,7 @@ function renderLibrary() {
           <td><div class="recipe-version-status">${executionMode}</div></td>
           <td>${recipe.roi_count}</td>
           <td><div class="recipe-version-status">${productionStatus}${draftStatus}</div></td>
-          <td class="recipe-table-actions"><button class="btn btn-sm btn-outline-secondary detail-recipe" type="button">详情</button><button class="btn btn-sm btn-outline-primary edit-recipe" type="button" title="编辑会打开同一配方的唯一草稿，不会影响生产版本">编辑</button><button class="btn btn-sm btn-outline-secondary history-recipe" type="button">历史 / 回滚</button><button class="btn btn-sm btn-outline-secondary copy-recipe" type="button">复制</button>${passThrough ? "" : '<button class="btn btn-sm btn-primary test-recipe" type="button">测试</button>'}<button class="btn btn-sm btn-outline-danger delete-recipe" type="button">删除草稿</button></td>
+          <td class="recipe-table-actions"><button class="btn btn-sm btn-outline-secondary detail-recipe" type="button">详情</button><button class="btn btn-sm btn-outline-primary edit-recipe" type="button" title="编辑会打开同一配方的唯一草稿，不会影响生产版本">编辑</button><button class="btn btn-sm btn-outline-secondary history-recipe" type="button">历史 / 回滚 / 撤回</button><button class="btn btn-sm btn-outline-secondary copy-recipe" type="button">复制</button>${passThrough ? "" : '<button class="btn btn-sm btn-primary test-recipe" type="button">测试</button>'}<button class="btn btn-sm btn-outline-danger delete-recipe" type="button">删除配方</button></td>
         </tr>`;
     }).join("")
     : '<tr><td colspan="10"><div class="library-no-results">没有找到匹配的工艺配方，请清除筛选或创建新配方。</div></td></tr>';
@@ -2602,6 +2602,35 @@ function isEditableRecipeVersion(version) {
   return ["DRAFT", "SAVED"].includes(String(version?.status || "").toUpperCase());
 }
 
+function confirmWorkspaceAction(title, message, requireReason = false) {
+  const element = byId("workspaceActionModal");
+  const confirm = byId("workspaceActionConfirm");
+  const reason = byId("workspaceActionReason");
+  byId("workspaceActionTitle").textContent = title;
+  byId("workspaceActionMessage").textContent = message;
+  byId("workspaceActionReasonField").hidden = !requireReason;
+  reason.value = "";
+  reason.required = requireReason;
+  confirm.disabled = true;
+  element.addEventListener("shown.bs.modal", () => { confirm.disabled = false; }, { once: true });
+  const modal = bootstrap.Modal.getOrCreateInstance(element);
+  return new Promise((resolve) => {
+    let result = null;
+    const submit = () => {
+      if (requireReason && !reason.value.trim()) { reason.value = ""; reason.reportValidity(); return; }
+      result = { reason: reason.value.trim() };
+      confirm.disabled = true;
+      modal.hide();
+    };
+    confirm.addEventListener("click", submit);
+    element.addEventListener("hidden.bs.modal", () => {
+      confirm.removeEventListener("click", submit);
+      resolve(result);
+    }, { once: true });
+    modal.show();
+  });
+}
+
 function openRecipeHistory(history, sourceRecipeId) {
   const versions = Array.isArray(history?.versions) ? history.versions : [];
   const editableDraft = versions.find(isEditableRecipeVersion);
@@ -2612,7 +2641,7 @@ function openRecipeHistory(history, sourceRecipeId) {
     : "历史版本与回滚";
   byId("recipeHistoryIntro").textContent = editableDraft
     ? `当前已有 ${editableDraft.display_version || "未发布草稿"}，请先继续编辑、发布或删除该草稿后再回滚其他版本。`
-    : "选择一个历史版本后，系统会复制出新的待发布草稿；生产中正在使用的已发布版本不会被覆盖。";
+    : "编辑或恢复历史版本只生成草稿，不影响生产；“撤回为草稿”则会停止该配方的生产匹配，重新发布后才恢复。";
   byId("recipeHistoryList").innerHTML = versions.length
     ? versions.map((version) => {
       const editable = isEditableRecipeVersion(version);
@@ -2625,9 +2654,11 @@ function openRecipeHistory(history, sourceRecipeId) {
         DRAFT: "草稿",
       }[String(version.status || "").toUpperCase()] || version.status || "未知状态";
       const action = editable
-        ? `<button class="btn btn-sm btn-outline-primary" type="button" data-recipe-history-open-draft="${version.id}">继续编辑</button>`
-        : `<button class="btn btn-sm btn-primary" type="button" data-recipe-history-rollback="${version.id}" ${canRollback ? "" : "disabled"}>回滚为草稿</button>`;
-      const disabledHint = !canRollback && !editable ? "<small>需先处理当前未发布草稿</small>" : "";
+        ? `<button class="btn btn-sm btn-outline-primary" type="button" data-recipe-history-open-draft="${version.id}">继续编辑</button> <button class="btn btn-sm btn-outline-danger" type="button" data-recipe-history-delete-draft="${version.id}">删除草稿</button>`
+        : version.status === "PUBLISHED"
+          ? `<button class="btn btn-sm btn-outline-danger" type="button" data-recipe-history-unpublish="${version.id}">撤回为草稿</button>`
+          : `<button class="btn btn-sm btn-primary" type="button" data-recipe-history-rollback="${version.id}" ${canRollback ? "" : "disabled"}>恢复为草稿</button>`;
+      const disabledHint = !canRollback && !editable && version.status !== "PUBLISHED" ? "<small>需先处理当前未发布草稿</small>" : "";
       return `<article class="recipe-history-item ${current ? "current" : ""} ${editable ? "draft" : ""}">
         <div>
           <strong>${escapeHtml(version.display_version || version.version || `版本 #${version.id}`)}</strong>
@@ -2675,12 +2706,15 @@ function conciseModelValue(item) {
 function renderRecordModelResults(response) {
   const items = detectionModelItems(response);
   if (!items.length) return '<span class="record-model-empty">无模型明细</span>';
-  const problemCount = items.filter((item) => item.status !== "OK").length;
+  const collectionCount = items.filter((item) => item.run_mode === "COLLECT_ONLY").length;
+  const problemCount = items.filter((item) => item.run_mode !== "COLLECT_ONLY" && item.status !== "OK").length;
+  const collectionFailures = items.filter((item) => item.run_mode === "COLLECT_ONLY" && item.status === "ERROR").length;
   return `
     <details class="record-model-details">
-      <summary><strong>${items.length} 项</strong><span>${problemCount ? `${problemCount} 项异常` : "全部通过"}</span></summary>
+      <summary><strong>${items.length} 项</strong><span>${collectionCount ? `${collectionCount} 项仅采集${collectionFailures ? `（${collectionFailures} 项采集失败）` : ''} · ${problemCount} 项检测异常` : problemCount ? `${problemCount} 项异常` : "全部通过"}</span></summary>
       <div class="record-model-list">
         ${items.map((item) => {
+          if (item.run_mode === "COLLECT_ONLY") return `<article class="record-model-item"><header><strong>${escapeHtml(item.roi_code || "ROI")}</strong><b>${item.status === "ERROR" ? "采集失败" : "仅采集 / 未检测"}</b></header><p>${escapeHtml(item.message || "未调用模型，接口按约定返回 NG")}</p></article>`;
           const primary = item.actual?.primary_result || {};
           const review = item.actual?.vlm_review;
           return `<article class="record-model-item ${String(item.status || "ERROR").toLowerCase()}">
@@ -2730,7 +2764,7 @@ function openRecordImageLightbox(button) {
 }
 
 function recordOutputValue(output) {
-  if (output == null) return "-";
+  if (output == null) return "";
   if (typeof output !== "object") return String(output);
   const value = [
     output.predicted_label,
@@ -2739,38 +2773,47 @@ function recordOutputValue(output) {
     output.color,
     output.answer,
     output.actual,
-    output.reason,
   ].find((candidate) => candidate != null && typeof candidate !== "object");
   if (value != null) return String(value);
   if (Array.isArray(output.objects)) return `检测到 ${output.objects.length} 个目标`;
   if (output.object_count != null) return `检测到 ${output.object_count} 个目标`;
   if (output.result != null && typeof output.result !== "object") return String(output.result);
-  return "查看完整数据";
+  return "";
 }
 
 function renderRecordProcessing(roi) {
   const processing = roi.processing && typeof roi.processing === "object" ? roi.processing : {};
   const output = processing.result && typeof processing.result === "object" ? processing.result : processing;
+  if (processing.run_mode === "COLLECT_ONLY" || output.run_mode === "COLLECT_ONLY") {
+    const collection = output.collection || {};
+    return `<section class="record-processing"><header><strong>图片采集结果（未调用模型）</strong></header><p>${escapeHtml(roi.message || output.reason || "仅采集图片，未执行质量检测")}</p>${(collection.datasets || []).map((item) => `<div class="record-processing-facts"><span>${escapeHtml(item.dataset_name)}</span><b>${escapeHtml(item.message)}</b></div>`).join("")}<p>接口按配置返回 NG，本项不参与检测指标统计。</p><details class="record-processing-raw"><summary>采集原始数据</summary><pre class="record-processing-json">${escapeHtml(JSON.stringify(processing, null, 2))}</pre></details></section>`;
+  }
   const primary = processing.primary_result || {};
   const details = primary.details || {};
   const review = processing.vlm_review || {};
   const traces = Array.isArray(processing.traces) ? processing.traces : [];
-  const modelValue = recordOutputValue(output) !== "-" && recordOutputValue(output) !== "查看完整数据"
-    ? recordOutputValue(output)
-    : recordOutputValue(details);
+  const modelTraces = traces.filter((trace) => ["VISION_MODEL", "VLM"].includes(String(trace.node_type || "").toUpperCase()));
+  const sceneResult = output.result || primary.status || roi.status || "-";
+  const modelOutputs = modelTraces
+    .map((trace) => recordOutputValue(trace.output))
+    .filter((value) => value && value !== sceneResult);
+  const modelValue = modelOutputs.length
+    ? modelOutputs.join("；")
+    : (recordOutputValue(output) || recordOutputValue(details));
+  const modelName = primary.model || modelTraces.map((trace) => trace.output?.model_code).filter(Boolean).join("；");
+  const confidence = roi.score ?? modelTraces.find((trace) => trace.output?.confidence != null)?.output.confidence ?? output.confidence;
   const facts = [
-    ["场景结果", output.result || primary.status || roi.status || "-"],
-    ["模型输出", modelValue],
-    ["模型 / 场景", primary.model || roi.scene_name || "-"],
-    ["置信度 / 分数", roi.score == null ? "-" : Number(roi.score).toFixed(4)],
+    ["场景结果", sceneResult],
   ];
+  if (modelValue && modelValue !== sceneResult) facts.push(["模型输出", modelValue]);
+  if (modelName) facts.push(["检测模型", modelName]);
+  if (confidence != null && !Number.isNaN(Number(confidence))) facts.push(["置信度 / 分数", Number(confidence).toFixed(6)]);
   if (review.status) facts.push(["VLM 复核", review.status]);
   if (roi.message || output.reason || primary.message) facts.push(["处理说明", roi.message || output.reason || primary.message]);
   return `<section class="record-processing">
-    <header><strong>模型处理结果</strong><button class="btn btn-sm btn-outline-primary" type="button" data-record-json-toggle aria-expanded="false">查看完整 JSON</button></header>
+    <header><strong>模型处理结果</strong></header>
     <div class="record-processing-facts">${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("")}</div>
-    ${traces.length ? `<div class="record-processing-traces">${traces.map((trace) => `<div><span>${escapeHtml(trace.node_name || trace.node_key || "节点")}</span><b>${escapeHtml(recordOutputValue(trace.output))}</b><small>${formatElapsedMs(trace.elapsed_ms)}</small></div>`).join("")}</div>` : ""}
-    <pre class="record-processing-json" hidden>${escapeHtml(JSON.stringify(processing, null, 2))}</pre>
+    <details class="record-processing-raw"><summary>原始数据（排查用，点击展开）</summary><pre class="record-processing-json">${escapeHtml(JSON.stringify(processing, null, 2))}</pre></details>
   </section>`;
 }
 
@@ -2788,8 +2831,11 @@ function sceneNodeTypeLabel(value) {
     IMAGE_ANNOTATE: "图片画框",
     RULE: "规则判断",
     WEB_API: "Web 接口",
+    S3_UPLOAD: "S3 上传",
     IF: "条件分支",
     LOOP: "循环控制",
+    ITERATION: "遍历处理",
+    CONDITION_LOOP: "条件循环",
   };
   return labels[String(value || "").toUpperCase()] || value || "节点";
 }
@@ -2801,6 +2847,7 @@ function timingStatusClass(value) {
 
 function renderScenarioTiming(timing) {
   if (!timing) return "";
+  if (timing.display_type === "COLLECTION") return `<section class="record-scene-timing"><header>图片采集耗时</header><strong>${formatElapsedMs(timing.total_elapsed_ms)}</strong><p>未调用模型</p></section>`;
   if (timing.display_type === "VLM") {
     return `<section class="record-scene-timing record-vlm-timing">
       <header><span>场景执行耗时</span><small>${escapeHtml(timing.scenario_name || "VLM 场景")}${timing.scenario_version ? ` · v${escapeHtml(timing.scenario_version)}` : ""}</small></header>
@@ -2812,7 +2859,7 @@ function renderScenarioTiming(timing) {
   return `<details class="record-scene-timing record-workflow-timing" open>
     <summary><span>流程节点耗时</span><b>总计 ${formatElapsedMs(timing.total_elapsed_ms)}</b></summary>
     ${nodes.length
-      ? `<div class="record-timing-table-wrap"><table class="record-timing-table"><thead><tr><th>节点</th><th>类型</th><th>状态</th><th>耗时</th></tr></thead><tbody>${nodes.map((node) => `<tr><td>${escapeHtml(node.node_name || node.node_key || "节点")}</td><td>${escapeHtml(sceneNodeTypeLabel(node.node_type))}</td><td><span class="record-timing-status ${timingStatusClass(node.status)}">${escapeHtml(node.status || "UNCERTAIN")}</span></td><td>${formatElapsedMs(node.elapsed_ms)}</td></tr>`).join("")}</tbody></table></div>`
+      ? `<div class="record-timing-table-wrap"><table class="record-timing-table"><thead><tr><th>节点</th><th>类型</th><th>执行状态</th><th>检测结论 / 分支</th><th>耗时</th></tr></thead><tbody>${nodes.map((node) => `<tr><td>${escapeHtml(node.node_name || node.node_key || "节点")}</td><td>${escapeHtml(sceneNodeTypeLabel(node.node_type))}</td><td><span class="record-timing-status ${timingStatusClass(node.execution_status || "UNKNOWN")}">${escapeHtml(node.execution_label || "状态未知")}</span></td><td><span class="record-timing-status ${timingStatusClass(node.detection_result || "UNKNOWN")}">${escapeHtml(node.result_label || "—")}</span></td><td>${formatElapsedMs(node.elapsed_ms)}</td></tr>`).join("")}</tbody></table></div>`
       : '<p class="record-timing-empty">历史记录未保存节点追踪，仅保留场景总耗时。</p>'}
   </details>`;
 }
@@ -2824,6 +2871,7 @@ function manualReviewLabel(verdict) {
 
 function renderManualReview(roi) {
   const review = roi.manual_review;
+  if (review?.unavailable_reason) return `<p class="text-muted">${escapeHtml(review.unavailable_reason)}</p>`;
   if (!review?.execution_id) {
     return `<section class="record-manual-review unavailable"><header><strong>人工确认</strong><span>不可用</span></header><p>此历史 ROI 未关联可追溯的场景执行记录，无法写入人工结论。</p></section>`;
   }
@@ -2859,7 +2907,7 @@ function renderDetectionRecordDetail(detail) {
           <div class="record-roi-detail-grid">
             ${(image.rois || []).map((roi) => `
               <article class="record-roi-detail ${String(roi.status || "ERROR").toLowerCase()}">
-                <header><div><strong>${escapeHtml(roi.roi_code || "ROI")}</strong><small>${escapeHtml(roi.roi_name || "-")}</small></div><b>${escapeHtml(roi.status || "ERROR")}</b></header>
+                <header><div><strong>${escapeHtml(roi.roi_code || "ROI")}</strong><small>${escapeHtml(roi.roi_name || "-")}</small></div><b>${escapeHtml(roi.status === "NOT_INSPECTED" ? "仅采集 / 未检测" : roi.status || "ERROR")}</b></header>
                 <div class="record-roi-image-row">
                   ${recordImageCard("标准 ROI", roi.standard_roi_image_url, "未配置基准图")}
                   ${recordImageCard("实测 ROI", roi.actual_roi_image_url, "处理图不存在")}
@@ -2879,6 +2927,7 @@ function renderDetectionRecordDetail(detail) {
   content.dataset.recordId = String(detail.id || "");
   content.innerHTML = `
     <div class="record-detail-meta"><span>调用方：<code>${escapeHtml(detail.caller_ip || "-")}</code></span><span>调用时间：${escapeHtml(formatDetectionTime(detail.called_at))}</span></div>
+    <div class="record-detail-meta"><span>报表统计：${detail.report_excluded ? "已排除" : "正常纳入"}</span>${detail.report_note ? `<span>调整原因：${escapeHtml(detail.report_note)}</span><span>调整时间：${escapeHtml(formatDetectionTime(detail.report_updated_at))}</span>` : ""}</div>
     ${recipeCards}`;
 }
 
@@ -2920,6 +2969,7 @@ function renderDetectionRecords() {
             <td>${record.elapsed_ms == null ? "-" : `${record.elapsed_ms} ms`}</td>
             <td>
               <button class="btn btn-sm btn-outline-primary record-detail-button" type="button" data-record-detail="${record.id}">详情</button>
+              <button class="btn btn-sm ${record.report_excluded ? "btn-outline-warning" : "btn-outline-secondary"}" type="button" data-record-report="${record.id}" title="${escapeHtml(record.report_note || "调整报表范围不修改检测结果")}">${record.report_excluded ? "已排除 · 恢复统计" : "移出报表"}</button>
               <details class="call-payload-details">
                 <summary>查看参数</summary>
                 <div><strong>调用参数</strong><pre>${escapeHtml(requestPayload)}</pre></div>
@@ -3383,7 +3433,24 @@ byId("refreshDetectionRecords").addEventListener("click", loadDetectionRecords);
 byId("detectionRecordSnFilter").addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadDetectionRecords();
 });
-byId("detectionRecordsBody").addEventListener("click", (event) => {
+byId("detectionRecordsBody").addEventListener("click", async (event) => {
+  const selection = event.target.closest("[data-record-report]");
+  if (selection) {
+    const record = state.detectionRecords.find((item) => item.id === Number(selection.dataset.recordReport));
+    const action = await confirmWorkspaceAction(record.report_excluded ? "恢复报表统计" : "移出报表",
+      "本次调用下所有图片、ROI 和场景指标一并调整；原始检测结果、人工复核和图片均保留。", true);
+    if (!action) return;
+    try {
+      await request(`${api}/inspection/call-records/${record.id}/report-selection`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ excluded: !record.report_excluded, reason: action.reason }),
+      });
+      await loadDetectionRecords();
+      state.inspectionReports = null;
+      notify("报表统计范围已更新，检测记录未删除。", "success", false);
+    } catch (error) { notify(error.message, "danger", false); }
+    return;
+  }
   const button = event.target.closest("[data-record-detail]");
   if (!button) return;
   openDetectionRecordDetail(Number(button.dataset.recordDetail));
@@ -3392,15 +3459,6 @@ byId("detectionRecordDetailContent").addEventListener("click", async (event) => 
   const imageButton = event.target.closest("[data-record-image-open]");
   if (imageButton) {
     openRecordImageLightbox(imageButton);
-    return;
-  }
-  const jsonButton = event.target.closest("[data-record-json-toggle]");
-  if (jsonButton) {
-    const json = jsonButton.closest(".record-processing")?.querySelector(".record-processing-json");
-    if (!json) return;
-    json.hidden = !json.hidden;
-    jsonButton.setAttribute("aria-expanded", String(!json.hidden));
-    jsonButton.textContent = json.hidden ? "查看完整 JSON" : "收起 JSON";
     return;
   }
   const verdictButton = event.target.closest("[data-manual-verdict]");
@@ -3496,17 +3554,11 @@ byId("configurationLibrary").addEventListener("click", async (event) => {
       }
       openTest(productionRecipeId);
     } else if (event.target.closest(".delete-recipe")) {
-      if (!draftRecipeId) {
-        notify("生产版本不能在此直接删除；如需停用请先创建并发布替代版本。", "warning", false);
-        return;
-      }
-      const draft = state.recipes.find((item) => item.id === draftRecipeId);
-      const title = draft?.name || `草稿 #${draftRecipeId}`;
-      const warning = `确定删除未发布草稿“${title}”吗？已发布生产版本不会受影响。`;
-      if (!window.confirm(warning)) return;
-      await request(`${api}/configuration/recipes/${draftRecipeId}`, { method: "DELETE" });
+      const warning = `确定删除“${recipe?.name || recipeId}”的全部版本吗？生产接口将不再匹配该配方；历史检测图片与记录保留。`;
+      if (!await confirmWorkspaceAction("删除工艺配方", warning)) return;
+      await request(`${api}/configuration/recipes/${sourceRecipeId}/family`, { method: "DELETE" });
       await loadData();
-      notify("未发布草稿已删除，生产版本保持不变。", "success", false);
+      notify("配方已删除并停止用于生产；历史记录保留。", "success", false);
     }
   } catch (error) {
     notify(error.message, "danger", false);
@@ -3514,6 +3566,26 @@ byId("configurationLibrary").addEventListener("click", async (event) => {
 });
 
 byId("recipeHistoryList").addEventListener("click", async (event) => {
+  const deleteDraft = event.target.closest("[data-recipe-history-delete-draft]");
+  if (deleteDraft) {
+    bootstrap.Modal.getOrCreateInstance(byId("recipeHistoryModal")).hide();
+    if (!await confirmWorkspaceAction("删除草稿", "仅删除当前草稿，生产版本保持不变。")) return;
+    try {
+      await request(`${api}/configuration/recipes/${deleteDraft.dataset.recipeHistoryDeleteDraft}`, { method: "DELETE" });
+      await loadData();
+    } catch (error) { notify(error.message, "danger", false); }
+    return;
+  }
+  const unpublish = event.target.closest("[data-recipe-history-unpublish]");
+  if (unpublish) {
+    bootstrap.Modal.getOrCreateInstance(byId("recipeHistoryModal")).hide();
+    if (!await confirmWorkspaceAction("撤回发布", "撤回后生产接口将不再匹配该配方，直到重新发布。历史版本保留，已有草稿不会被覆盖。若只想修改而不中断生产，请取消并使用列表的编辑按钮。")) return;
+    try {
+      const draft = await request(`${api}/configuration/recipes/${unpublish.dataset.recipeHistoryUnpublish}/unpublish`, { method: "POST" });
+      window.location.href = `/recipes/editor?recipe_id=${draft.id}`;
+    } catch (error) { notify(error.message, "danger", false); }
+    return;
+  }
   const openDraft = event.target.closest("[data-recipe-history-open-draft]");
   const rollback = event.target.closest("[data-recipe-history-rollback]");
   if (!openDraft && !rollback) return;

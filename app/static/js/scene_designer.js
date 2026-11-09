@@ -2394,6 +2394,59 @@
     updateHeader();
     renderDirectDesigner();
     renderWorkflowDesigner();
+    renderCollectionDesigner();
+  }
+
+  function collectionOnly() {
+    return currentVersion()?.definition_json?.run_mode === "COLLECT_ONLY";
+  }
+
+  function renderCollectionDesigner() {
+    const collecting = collectionOnly();
+    if (collecting) byId("designerSave").textContent = "保存草稿";
+    byId("designerRunMode").value = collecting ? "COLLECT_ONLY" : "DETECT";
+    byId("designerRunMode").disabled = !isDraft();
+    byId("designerRunModeTip").textContent = isDraft() ? "保存仅更新草稿，发布后才影响配方调用" : "修改运行模式请先新建草稿版本";
+    byId("collectionDesigner").hidden = !collecting;
+    if (!collecting) return;
+    byId("directDesigner").hidden = true;
+    byId("workflowDesigner").hidden = true;
+    const targets = state.scene.collection_datasets || [];
+    byId("collectionDatasetList").innerHTML = targets.length ? targets.map((item) => `<div class="d-flex gap-3 flex-wrap border-bottom py-2"><strong>${escapeHtml(item.name)}</strong><span>${item.enabled ? "自动采集已开启" : "自动采集已关闭"}</span><span>已采集 ${item.count ?? 0} / ${item.limit}</span></div>`).join("") : '<div class="alert alert-warning">尚未关联数据集。先发布本场景，再到数据集维护选择本场景并开启自动采集；未配置时接口会返回异常 code 和 NG。</div>';
+  }
+
+  async function saveRunMode() {
+    const version = currentVersion();
+    if (!isDraft()) return true;
+    const saved = await request(`${api}/scenarios/versions/${version.id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition_json: version.definition_json || {}, prompt_template: version.prompt_template,
+        primary_vlm_model_id: version.primary_vlm_model_id, review_vlm_model_id: version.review_vlm_model_id,
+        input_schema_json: version.input_schema_json || {} }),
+    });
+    state.scene.versions = state.scene.versions.map((item) => item.id === saved.id ? saved : item);
+    return true;
+  }
+
+  async function testCollection() {
+    const file = byId("collectionTestImage").files[0];
+    if (!file) { notify("请先选择测试图片。", "warning"); return; }
+    const button = byId("collectionTest");
+    button.disabled = true;
+    try {
+      await saveRunMode();
+      const form = new FormData();
+      form.append("image", file);
+      form.append("context_json", "{}");
+      const execution = await request(`${api}/scenarios/versions/${currentVersion().id}/preview-upload`, { method: "POST", body: form });
+      const collection = execution.output_json?.result?.collection;
+      byId("collectionTestResult").textContent = [
+        execution.status === "FAILED" ? `检查失败：${execution.error_message}` : "采集检查完成，未执行检测，测试图片未入库。",
+        ...(collection?.datasets || []).map((item) => `${item.dataset_name}：${item.message}`),
+        `耗时：${execution.elapsed_ms} ms；生产 detect 按约定返回 NG。`,
+      ].join("\n");
+    } catch (error) { byId("collectionTestResult").textContent = error.message; }
+    finally { button.disabled = false; }
   }
 
   async function loadData({ preserveVersion = true } = {}) {
@@ -2411,6 +2464,22 @@
     }
     renderAll();
   }
+
+  document.addEventListener("scene-design-applied", async (event) => {
+    state.versionId = event.detail.version_id;
+    state.selectedNodeId = null;
+    state.selectedEdgeId = null;
+    state.directTestValues = {};
+    clearDirectConversation();
+    clearWorkflowTest();
+    try {
+      await loadData();
+      const fields = state.scene.mode === "WORKFLOW" ? workflowInputFields() : schemaFields(currentVersion()?.input_schema_json || {});
+      const examples = Object.fromEntries(fields.filter((field) => field.default != null && !["image", "image_path", "image_paths"].includes(field.name)).map((field) => [field.name, field.default]));
+      byId("workflowTestContext").value = JSON.stringify(examples, null, 2);
+      notify("AI设计已保存为独立草稿。请检查参数并测试，确认后再发布；原版本未修改。");
+    } catch (error) { notify(`草稿已创建，刷新页面后查看：${error.message}`, "warning"); }
+  });
 
   function directPayload() {
     const version = currentVersion();
@@ -2444,11 +2513,16 @@
     } catch (error) { notify(error.message, "danger"); return false; }
   }
   async function saveDesigner() {
+    if (collectionOnly()) {
+      try { await saveRunMode(); notify("仅采集模式草稿已保存，发布后生效。"); return true; }
+      catch (error) { notify(error.message, "danger"); return false; }
+    }
     if (state.scene.mode === "VLM_DIRECT") return saveDirect();
     if (!isDraft()) { notify("已发布版本不能直接修改，请先新建草稿版本。", "warning"); return false; }
+    try { await saveRunMode(); } catch (error) { notify(error.message, "danger"); return false; }
     if (!nodeById(state.selectedNodeId)) {
-      notify("请先在画布中选择需要保存的节点。", "info");
-      return false;
+      notify("场景草稿已保存。", "info");
+      return true;
     }
     return saveNodeConfig();
   }
@@ -2491,6 +2565,7 @@
   }
   async function publishVersion() {
     if (!isDraft()) return;
+    if (!await saveDesigner()) return;
     const preflight = await runDesignerPreflight({ openModal: false, quiet: true });
     if (!preflight?.ready) {
       if (preflight) {
@@ -2500,7 +2575,7 @@
       notify("发布前检查未通过，请先处理标记的问题。", "warning");
       return;
     }
-    if (!confirm("发布后该版本可被工艺配方 ROI 引用；当前已发布版本会归档。确认发布吗？")) return;
+    if (!confirm(`发布后将同步切换 ${preflight.affected_roi_count || 0} 个 ROI 的场景版本，旧版本归档。${collectionOnly() ? "仅采集模式不会调用模型，detect 将返回 NG。" : "正常检测模式将执行模型或流程。"}确认发布吗？`)) return;
     try {
       const published = await request(`${api}/scenarios/versions/${currentVersion().id}/publish`, { method: "POST" });
       await loadData();
@@ -2600,9 +2675,18 @@
   function workflowTraceStatus(status) {
     const normalized = String(status || "UNCERTAIN").toUpperCase();
     if (["OK", "COMPLETED"].includes(normalized)) return "success";
-    if (["NG", "ERROR"].includes(normalized)) return "danger";
-    if (normalized === "SKIPPED") return "muted";
+    if (["NG", "ERROR", "FAILED"].includes(normalized)) return "danger";
+    if (["SKIPPED", "CANCELLED", "PENDING", "UNKNOWN"].includes(normalized)) return "muted";
     return "warning";
+  }
+
+  function workflowNodeStatusMarkup(trace) {
+    const executionStatus = trace.execution_status || "UNKNOWN";
+    const executionLabel = trace.execution_label || "状态未知";
+    const result = trace.result_label && trace.result_label !== "—"
+      ? `<span class="workflow-trace-status ${trace.detection_result ? workflowTraceStatus(trace.detection_result) : "muted"}" title="检测结论 / 分支">${escapeHtml(trace.result_label)}</span>`
+      : "";
+    return `<span class="workflow-trace-status ${workflowTraceStatus(executionStatus)}" title="节点执行状态">${escapeHtml(executionLabel)}</span>${result}`;
   }
 
   function workflowResultLabel(result) {
@@ -2672,7 +2756,7 @@
     const rounds = Array.isArray(output?.rounds);
     const items = rounds ? output.rounds : Array.isArray(output?.items) ? output.items : [];
     if (!items.some((item) => Array.isArray(item?.traces))) return "";
-    return `<section class="workflow-loop-traces"><header><small>${rounds ? "条件循环逐轮执行" : "遍历处理逐项执行"}</small><span>${items.length} ${rounds ? "轮" : "项"}</span></header>${items.map((item, index) => `<details class="workflow-loop-item"><summary><strong>#${index + 1} ${escapeHtml(rounds ? "循环轮次" : item.item?.label || item.item?.value || "当前项")}</strong><span class="workflow-trace-status ${workflowTraceStatus(item.result)}">${escapeHtml(item.result || "UNCERTAIN")}</span><small>${escapeHtml(item.elapsed_ms ?? 0)} ms</small></summary><div>${rounds ? `<small>退出条件：${escapeHtml(formatWorkflowTraceValue(item.stop_condition || {}))}</small>` : ""}${(item.traces || []).map((child) => `<details class="workflow-loop-step"><summary>${escapeHtml(child.node_name || child.node_key)} · ${escapeHtml(child.elapsed_ms ?? 0)} ms</summary>${workflowTraceArtifactMarkup(child.output)}<small>输入</small><pre>${escapeHtml(formatWorkflowTraceValue(child.input))}</pre><small>输出</small><pre>${escapeHtml(formatWorkflowTraceValue(child.output))}</pre></details>`).join("")}</div></details>`).join("")}</section>`;
+    return `<section class="workflow-loop-traces"><header><small>${rounds ? "条件循环逐轮执行" : "遍历处理逐项执行"}</small><span>${items.length} ${rounds ? "轮" : "项"}</span></header>${items.map((item, index) => `<details class="workflow-loop-item"><summary><strong>#${index + 1} ${escapeHtml(rounds ? "循环轮次" : item.item?.label || item.item?.value || "当前项")}</strong><span class="workflow-trace-status ${workflowTraceStatus(item.result)}">${escapeHtml(item.result || "UNCERTAIN")}</span><small>${escapeHtml(item.elapsed_ms ?? 0)} ms</small></summary><div>${rounds ? `<small>退出条件：${escapeHtml(formatWorkflowTraceValue(item.stop_condition || {}))}</small>` : ""}${(item.traces || []).map((child) => `<details class="workflow-loop-step"><summary>${escapeHtml(child.node_name || child.node_key)} · ${escapeHtml(child.elapsed_ms ?? 0)} ms ${workflowNodeStatusMarkup(child)}</summary>${workflowTraceArtifactMarkup(child.output)}<small>输入</small><pre>${escapeHtml(formatWorkflowTraceValue(child.input))}</pre><small>输出</small><pre>${escapeHtml(formatWorkflowTraceValue(child.output))}</pre></details>`).join("")}</div></details>`).join("")}</section>`;
   }
 
   function renderWorkflowTestResult(execution) {
@@ -2688,7 +2772,7 @@
     setWorkflowTestRunMeta({ result, elapsed: execution.elapsed_ms, traceCount: traces.length });
     byId("workflowTestFinalOutput").innerHTML = workflowFinalOutputMarkup(result, finalOutput, execution.error_message || "", traces);
     byId("workflowTestTraceList").innerHTML = traces.length
-      ? traces.map((trace, index) => `<details class="workflow-trace-card" ${index === traces.length - 1 ? "open" : ""}><summary><div><span class="workflow-trace-index">${index + 1}</span><div><strong>${escapeHtml(trace.node_name || trace.node_key || "节点")}</strong><small>${escapeHtml(nodeTypeLabel(trace.node_type || ""))} · ${escapeHtml(trace.node_key || "")}</small></div></div><div class="workflow-trace-summary-meta"><span class="workflow-trace-status ${workflowTraceStatus(trace.status)}">${escapeHtml(trace.status || "UNCERTAIN")}</span><b>${escapeHtml(trace.elapsed_ms ?? 0)} ms</b><i>⌄</i></div></summary><div class="workflow-trace-detail">${workflowTraceArtifactMarkup(trace.output)}${workflowLoopTraceMarkup(trace.output)}<section><header><small>节点输入</small><span>完整参数</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.input))}</pre></section><section><header><small>节点输出</small><span>完整结果</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.output))}</pre></section></div></details>`).join("")
+      ? traces.map((trace, index) => `<details class="workflow-trace-card" ${index === traces.length - 1 ? "open" : ""}><summary><div><span class="workflow-trace-index">${index + 1}</span><div><strong>${escapeHtml(trace.node_name || trace.node_key || "节点")}</strong><small>${escapeHtml(nodeTypeLabel(trace.node_type || ""))} · ${escapeHtml(trace.node_key || "")}</small></div></div><div class="workflow-trace-summary-meta">${workflowNodeStatusMarkup(trace)}<b>${escapeHtml(trace.elapsed_ms ?? 0)} ms</b><i>⌄</i></div></summary><div class="workflow-trace-detail">${workflowTraceArtifactMarkup(trace.output)}${workflowLoopTraceMarkup(trace.output)}<section><header><small>节点输入</small><span>完整参数</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.input))}</pre></section><section><header><small>节点输出</small><span>完整结果</span></header><pre>${escapeHtml(formatWorkflowTraceValue(trace.output))}</pre></section></div></details>`).join("")
       : `<div class="empty-state compact-empty"><span>!</span><strong>流程未产生节点追踪</strong><p>${escapeHtml(execution.error_message || "请检查节点配置和连接关系。")}</p><pre>${escapeHtml(formatWorkflowTraceValue(finalOutput))}</pre></div>`;
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -3020,6 +3104,22 @@
     byId("designerClone").addEventListener("click", cloneVersion);
     byId("designerValidate").addEventListener("click", () => runDesignerPreflight());
     byId("designerPublish").addEventListener("click", publishVersion);
+    byId("designerRunMode").addEventListener("change", (event) => {
+      if (!isDraft()) return;
+      const version = currentVersion();
+      const mode = event.target.value;
+      if (!collectionOnly() && state.scene.mode === "VLM_DIRECT") {
+        try { Object.assign(version, directPayload()); }
+        catch (error) { event.target.value = "DETECT"; notify(error.message, "warning"); return; }
+      }
+      version.definition_json = { ...(version.definition_json || {}), run_mode: mode };
+      renderAll();
+      byId("collectionTestResult").textContent = "";
+    });
+    byId("collectionRefresh").addEventListener("click", async () => {
+      try { await saveRunMode(); await loadData(); } catch (error) { notify(error.message, "danger"); }
+    });
+    byId("collectionTest").addEventListener("click", testCollection);
     byId("designerApi").addEventListener("click", showSceneApiContract);
     byId("copySceneApiEndpoint").addEventListener("click", () => copySceneApiValue("endpoint"));
     byId("copySceneApiRequest").addEventListener("click", () => copySceneApiValue("request"));

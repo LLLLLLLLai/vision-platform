@@ -19,7 +19,7 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.core.config import PROJECT_ROOT, settings
@@ -39,9 +39,11 @@ from app.models.recipe import Recipe, RegionOfInterest
 from app.models.system import Product, Station
 from app.services.image_processing import crop_roi
 from app.services.dataset_collection_service import (
+    is_collection_only,
     try_collect_original_image_for_matching_datasets,
 )
 from app.services.inspection_engine import InspectionEngine, load_recipe_for_execution
+from app.services.node_trace_status import node_trace_state
 from app.services.smb_storage import SmbStorage, SmbStorageError
 
 
@@ -321,8 +323,11 @@ def inspection_reports(
             ScenarioExecutionReview,
             ScenarioExecutionReview.execution_id == ScenarioExecution.id,
         )
+        .outerjoin(DetectionTask, DetectionTask.id == ScenarioExecution.detection_task_id)
         .where(
             ScenarioExecution.source == "PRODUCTION",
+            func.coalesce(InspectionScenarioVersion.definition_json["run_mode"].as_string(), "DETECT") != "COLLECT_ONLY",
+            (DetectionTask.id.is_(None) | DetectionTask.report_excluded.is_(False)),
             ScenarioExecution.created_at >= started_at,
             ScenarioExecution.created_at < ended_at,
         )
@@ -374,7 +379,7 @@ def inspection_reports(
             "scene": _scene_metrics(scene_dimension_rows),
         },
         "accuracy_note": (
-            "本报表按 ROI 关联的生产场景汇总。人工确认样本准确率只统计人工确认的 OK/NG；"
+            "本报表排除已手动移出报表的记录，按生产场景汇总。人工确认样本准确率只统计人工确认的 OK/NG；"
             "“暂不确定”不会作为真值。VLM 复核一致率仅表示模型结果与 VLM 结论是否一致，"
             "不能替代人工真值。漏判指原始 OK、人工确认 NG；误判指原始 NG、人工确认 OK。"
         ),
@@ -825,6 +830,14 @@ async def execute_filename_routed_inspection(
             }
         )
 
+    contains_collection_only = False
+    for group in image_groups:
+        bindings = engine._load_roi_scenario_bindings(database, group["recipe"])
+        collecting = [is_collection_only(binding.scenario_version) for binding in bindings.values()]
+        contains_collection_only = contains_collection_only or any(collecting)
+        group["collection_only"] = bool(collecting) and all(collecting) and len(bindings) == sum(
+            bool(roi.enabled) for roi in group["recipe"].rois
+        )
     storage = storage or SmbStorage()
     execution_date = datetime.utcnow().strftime("%Y%m%d")
     smb_transfer_semaphore = asyncio.Semaphore(
@@ -862,24 +875,13 @@ async def execute_filename_routed_inspection(
             )
         ]
 
-    try:
-        await asyncio.gather(*(stage_group_images(group) for group in image_groups))
-    except SmbStorageError as exc:
-        pass_through_paths = [
-            item["image_results"][0]["source_image_path"]
-            for item in sorted(pass_through_results, key=lambda item: item["source_index"])
-        ]
-        return {
-            "code": 1003,
-            "message": str(exc),
-            "sn": resolved_sn,
-            "result": "ERROR",
-            "image_paths": pass_through_paths,
-            "inspection_results": [
-                {key: value for key, value in item.items() if key != "source_index"}
-                for item in sorted(pass_through_results, key=lambda item: item["source_index"])
-            ],
-        }
+    staging_outcomes = await asyncio.gather(
+        *(stage_group_images(group) for group in image_groups),
+        return_exceptions=True,
+    )
+    for group, outcome in zip(image_groups, staging_outcomes):
+        if isinstance(outcome, Exception):
+            group["staging_error"] = outcome
 
     bind = database.get_bind()
     database_name = getattr(getattr(bind, "url", None), "database", None)
@@ -895,6 +897,8 @@ async def execute_filename_routed_inspection(
     image_semaphore = asyncio.Semaphore(max(1, settings.production_image_parallelism))
 
     async def execute_group(group: dict[str, Any]) -> dict[str, Any]:
+        if group.get("staging_error") is not None:
+            raise group["staging_error"]
         recipe_id = int(group["recipe"].id)
         group_request_id = f"{batch_request_id}-{group['group_key']}"
         async with image_semaphore:
@@ -937,9 +941,16 @@ async def execute_filename_routed_inspection(
                 )
 
         local_result_paths = list(result.get("image_paths") or [])
+        if len(local_result_paths) != len(group["source_paths"]):
+            raise RuntimeError("检测返回的结果图片数量不完整，已保留原图路径。")
 
-        async def publish_one(local_path: str, source_path: str) -> str:
+        async def publish_one(local_path: str, source_path: str, index: int) -> str:
+            image_results = result.get("image_results") or []
+            if group["collection_only"] or (index < len(image_results) and image_results[index].get("collection_only")):
+                return source_path
             if not Path(local_path).is_file():
+                if SmbStorage.is_remote_path(source_path):
+                    raise FileNotFoundError(f"检测结果图不存在：{local_path}")
                 return local_path
             async with smb_transfer_semaphore:
                 return await asyncio.to_thread(storage.publish_result, local_path, source_path)
@@ -947,11 +958,11 @@ async def execute_filename_routed_inspection(
         published_paths = list(
             await asyncio.gather(
                 *(
-                    publish_one(local_path, source_path)
-                    for local_path, source_path in zip(
+                    publish_one(local_path, source_path, index)
+                    for index, (local_path, source_path) in enumerate(zip(
                         local_result_paths,
                         group["source_paths"],
-                    )
+                    ))
                 )
             )
         )
@@ -973,6 +984,7 @@ async def execute_filename_routed_inspection(
         return {
             "source_index": group["source_index"],
             "recipe_code": recipe.code,
+            "recipe_id": recipe.id,
             "result": result,
         }
 
@@ -1029,11 +1041,12 @@ async def execute_filename_routed_inspection(
         source_index = int(group["source_index"])
         source_path = str(group["source_paths"][0])
         if isinstance(outcome, Exception):
-            errors.append(str(outcome))
+            errors.append(f"图片 {source_index}：{outcome}")
             result_paths_by_source_index[source_index] = source_path
             inspection_results_by_source_index[source_index] = {
                 "request_id": f"{batch_request_id}-{group['group_key']}",
                 "recipe_code": group["recipe"].code,
+                "recipe_id": group["recipe"].id,
                 "recipe_version": group["recipe"].version,
                 "result": "ERROR",
                 "elapsed_ms": None,
@@ -1080,6 +1093,7 @@ async def execute_filename_routed_inspection(
         )
         inspection_results_by_source_index[source_index] = {
             "request_id": result.get("request_id"),
+            "recipe_id": group["recipe"].id,
             "recipe_code": outcome["recipe_code"],
             "recipe_version": result.get("recipe_version"),
             "result": result.get("result", "ERROR"),
@@ -1089,6 +1103,12 @@ async def execute_filename_routed_inspection(
         group_result = str(result.get("result", "ERROR")).upper()
         if group_result == "ERROR":
             aggregate_result = "ERROR"
+            errors.extend(
+                str(item.get("message") or "场景执行失败")
+                for image_result in result.get("image_results") or []
+                for item in image_result.get("inspection_items") or []
+                if item.get("status") == "ERROR"
+            )
         elif group_result == "NG" and aggregate_result != "ERROR":
             aggregate_result = "NG"
 
@@ -1107,23 +1127,25 @@ async def execute_filename_routed_inspection(
             "code": (
                 2001
                 if routing_errors
+                else 1003 if any(isinstance(item, SmbStorageError) for item in group_outcomes)
                 else 1002 if any("Image does not exist" in error for error in errors) else 4001
             ),
             "message": "; ".join(errors),
             "sn": resolved_sn,
-            "result": "ERROR",
+            "result": "NG" if contains_collection_only else "ERROR",
             "image_paths": result_image_paths,
             "inspection_results": inspection_results,
         }
     return {
         "code": 0,
         "message": (
-            "success"
+            "仅采集图片，未执行质量检测，按配置返回 NG；其他检测项结果见检测记录"
+            if contains_collection_only else "success"
             if not pass_through_results
             else f"success；{len(pass_through_results)} 张图片按无需检测配方原图透传"
         ),
         "sn": resolved_sn,
-        "result": aggregate_result,
+        "result": "NG" if contains_collection_only else aggregate_result,
         "image_paths": result_image_paths,
         "inspection_results": inspection_results,
     }
@@ -1148,6 +1170,7 @@ def detection_call_records(
             "called_at": record.called_at.isoformat(),
             "sn": record.sn,
             "operation": _record_operation(record.request_payload),
+            **_record_report_selection(record),
             "request_payload": record.request_payload,
             "response_payload": record.response_payload,
             "response_code": record.response_code,
@@ -1156,6 +1179,47 @@ def detection_call_records(
         }
         for record in records
     ]
+
+
+def _record_report_selection(record: DetectionApiCall) -> dict[str, Any]:
+    return {
+        "report_excluded": record.report_excluded,
+        "report_note": record.report_note,
+        "report_updated_at": record.report_updated_at.isoformat() if record.report_updated_at else None,
+    }
+
+
+class ReportSelectionRequest(BaseModel):
+    excluded: bool
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@router.put("/call-records/{record_id}/report-selection")
+def update_record_report_selection(
+    record_id: int,
+    payload: ReportSelectionRequest,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    record = database.scalar(select(DetectionApiCall).where(
+        DetectionApiCall.id == record_id,
+    ).with_for_update())
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到检测调用记录。")
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="请填写调整报表统计范围的原因。")
+    request_ids = [
+        item["request_id"] for item in (record.response_payload or {}).get("inspection_results", [])
+        if item.get("request_id")
+    ]
+    database.query(DetectionTask).filter(DetectionTask.request_id.in_(request_ids)).update(
+        {"report_excluded": payload.excluded}, synchronize_session="fetch",
+    )
+    record.report_excluded = payload.excluded
+    record.report_note = reason
+    record.report_updated_at = datetime.utcnow()
+    database.commit()
+    return {"id": record.id, **_record_report_selection(record)}
 
 
 def _record_operation(payload: dict[str, Any] | None) -> str:
@@ -1250,6 +1314,8 @@ def _scenario_timing_payload(
         "scenario_version": scenario_version.version if scenario_version is not None else item.get("scenario_version"),
         "total_elapsed_ms": total_elapsed_ms,
     }
+    if scenario_version is not None and is_collection_only(scenario_version):
+        return {**common, "display_type": "COLLECTION"}
     if mode == "VLM_DIRECT":
         vlm_trace = next(
             (
@@ -1273,7 +1339,8 @@ def _scenario_timing_payload(
             "node_key": trace.get("node_key"),
             "node_name": trace.get("node_name") or trace.get("node_key") or "节点",
             "node_type": trace.get("node_type") or "UNKNOWN",
-            "status": trace.get("status") or "UNCERTAIN",
+            "status": trace.get("status"),
+            **node_trace_state(trace),
             "elapsed_ms": _elapsed_value(trace.get("elapsed_ms")),
         }
         for trace in traces
@@ -1314,6 +1381,8 @@ def _manual_review_payload(execution: ScenarioExecution | None) -> dict[str, Any
 
     if execution is None:
         return None
+    if is_collection_only(execution.scenario_version):
+        return {"unavailable_reason": "仅采集图片，未执行质量检测；请在数据集中标注素材。"}
     review = execution.review
     return {
         "execution_id": execution.id,
@@ -1373,10 +1442,10 @@ def detection_call_record_detail(
 
     recipes: list[dict[str, Any]] = []
     for inspection in inspection_results:
-        recipe = load_recipe_for_execution(
-            database,
-            recipe_code=str(inspection.get("recipe_code") or ""),
-            require_published=False,
+        task = task_by_request.get(str(inspection.get("request_id") or ""))
+        recipe_id = task.recipe_id if task else inspection.get("recipe_id")
+        recipe = database.get(Recipe, recipe_id) if recipe_id else load_recipe_for_execution(
+            database, recipe_code=str(inspection.get("recipe_code") or ""), require_published=False,
         )
         if recipe is None:
             continue
@@ -1454,6 +1523,7 @@ def detection_call_record_detail(
         "called_at": record.called_at.isoformat(),
         "sn": record.sn,
         "operation": _record_operation(record.request_payload),
+        **_record_report_selection(record),
         "request_payload": record.request_payload,
         "response_payload": response_payload,
         "recipes": recipes,
@@ -1508,6 +1578,7 @@ async def test_recipe(
             database,
             recipe,
             sn="TEST",
+            source="RECIPE_TEST",
             image_paths=[str(destination)],
             force_vlm_review=True,
             roi_ids={roi_id} if roi_id is not None else None,
@@ -1571,7 +1642,18 @@ async def public_detect(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    internal_response = await execute_filename_routed_inspection(payload, database)
+    try:
+        internal_response = await execute_filename_routed_inspection(payload, database)
+    except Exception as exc:
+        database.rollback()
+        internal_response = {
+            "code": 4001,
+            "message": f"检测执行异常：{exc}",
+            "result": "ERROR",
+            "image_paths": non_empty_image_paths(payload.image_paths),
+        }
+    if not internal_response.get("image_paths"):
+        internal_response["image_paths"] = non_empty_image_paths(payload.image_paths)
     resolved_sn = str(internal_response.get("sn") or payload.sn or "UNKNOWN").strip()
     internal_code = int(internal_response.get("code", 4001))
     response = {

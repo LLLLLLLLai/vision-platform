@@ -148,6 +148,33 @@ class VisionModelVersionActionTests(unittest.TestCase):
             rollback_model_version(self.model["id"], draft.id, database=self.database)
         self.assertEqual(missing_error.exception.status_code, 400)
 
+    def test_switch_old_version_back_to_new_version(self) -> None:
+        old = self.add_version("old")
+        new = self.add_version("new")
+        publish_model_version(self.model["id"], old.id, database=self.database)
+        publish_model_version(self.model["id"], new.id, database=self.database)
+        rollback_model_version(self.model["id"], old.id, database=self.database)
+        rollback_model_version(self.model["id"], new.id, database=self.database)
+        self.database.expire_all()
+        self.assertEqual(self.database.get(VisionModelVersion, new.id).status, "PUBLISHED")
+        self.assertEqual(self.database.get(VisionModelVersion, old.id).status, "ARCHIVED")
+
+    def test_auto_codes_and_duplicate_names(self) -> None:
+        responses = [self.client.post("/api/v1/vision-models", json={
+            "name": name, "task_type": "YOLO_CLASSIFICATION",
+        }) for name in [" 新模型一 ", "新模型二"]]
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        codes = [response.json()["code"] for response in responses]
+        self.assertTrue(all(code.startswith("MODEL_") for code in codes))
+        self.assertNotEqual(codes[0], codes[1])
+        self.assertEqual(responses[0].json()["name"], "新模型一")
+        duplicate = self.client.post("/api/v1/vision-models", json={"name": "新模型一", "task_type": "YOLO_CLASSIFICATION"})
+        self.assertEqual(duplicate.status_code, 409)
+        blank = self.client.post("/api/v1/vision-models", json={"name": "  ", "task_type": "YOLO_CLASSIFICATION"})
+        self.assertEqual(blank.status_code, 422)
+        rename = self.client.put(f"/api/v1/vision-models/{responses[1].json()['id']}", json={"name": "新模型一"})
+        self.assertEqual(rename.status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

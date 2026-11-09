@@ -1,14 +1,18 @@
 import hashlib
+import json
 import math
 import re
 import shutil
 import uuid
 import zipfile
+from tempfile import TemporaryDirectory
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -44,7 +48,7 @@ PURPOSES = {"TEST", "TRAIN"}
 MEDIA_TYPES = {"IMAGE", "VIDEO"}
 ANNOTATION_TYPES = {"NONE", "CLASSIFICATION", "DETECTION", "SEGMENTATION"}
 GROUND_TRUTHS = {"OK", "NG"}
-COLLECTION_SCOPES = {"ROI", "ORIGINAL"}
+COLLECTION_SCOPES = {"ROI", "ROI_RECIPE", "ORIGINAL"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 OFFLINE_YOLO_MAX_IMAGES = 2000
 OFFLINE_YOLO_MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
@@ -159,7 +163,7 @@ def _validate_collection_configuration(
     enabled: bool,
 ) -> None:
     if collection_scope not in COLLECTION_SCOPES:
-        raise HTTPException(status_code=400, detail="自动采集范围仅支持 ROI 或 ORIGINAL。")
+        raise HTTPException(status_code=400, detail="自动采集范围仅支持场景 ROI、配方 ROI 或相机原图。")
     if not enabled:
         return
     if media_type != "IMAGE":
@@ -172,10 +176,13 @@ def _validate_collection_configuration(
             raise HTTPException(status_code=400, detail="ROI 自动采集只能关联已发布的检测场景。")
         return
     if recipe_id is None:
-        raise HTTPException(status_code=400, detail="采集相机原图时必须关联一个已发布工艺配方。")
+        message = "采集相机原图时" if collection_scope == "ORIGINAL" else "采集配方 ROI 时"
+        raise HTTPException(status_code=400, detail=f"{message}必须关联一个已发布工艺配方。")
     recipe = database.get(Recipe, recipe_id)
     if recipe is None or recipe.is_deleted or recipe.status != "PUBLISHED":
-        raise HTTPException(status_code=400, detail="原图自动采集只能关联已发布工艺配方。")
+        raise HTTPException(status_code=400, detail="自动采集只能关联已发布工艺配方。")
+    if collection_scope == "ROI_RECIPE" and recipe.execution_mode != "INSPECT":
+        raise HTTPException(status_code=400, detail="配方 ROI 采集仅支持包含检测区域的检测配方。")
 
 
 def _new_dataset_code(purpose: str, media_type: str) -> str:
@@ -586,7 +593,7 @@ def create_dataset(
         collection_scope=collection_scope,
         collection_recipe_id=(
             payload.collection_recipe_id
-            if collection_scope == "ORIGINAL"
+            if collection_scope in {"ROI_RECIPE", "ORIGINAL"}
             else None
         ),
         auto_collect_enabled=payload.auto_collect_enabled,
@@ -596,6 +603,60 @@ def create_dataset(
     database.commit()
     database.refresh(dataset)
     return _dataset_payload(dataset)
+
+
+@router.get("/{dataset_id}/export")
+def export_dataset_images(
+    dataset_id: int,
+    database: Session = Depends(get_db),
+) -> FileResponse:
+    dataset = database.scalar(select(Dataset).where(
+        Dataset.id == dataset_id, Dataset.is_deleted.is_(False),
+    ))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在或已删除。")
+    items = database.scalars(select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset_id, DatasetItem.is_deleted.is_(False),
+        DatasetItem.media_type == "IMAGE",
+    ).order_by(DatasetItem.id)).all()
+    if not items:
+        raise HTTPException(status_code=400, detail="没有可导出的图片。")
+    temporary = TemporaryDirectory(prefix="vision-dataset-export-")
+    archive_path = Path(temporary.name) / "images.zip"
+    root = (PROJECT_ROOT / "uploads").resolve()
+    manifest: dict[str, Any] = {"dataset": dataset.name, "labels": dataset.label_schema_json,
+                               "items": [], "missing_item_ids": []}
+    size = 0
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            for item in items:
+                path = Path(item.media_path)
+                if not path.is_absolute():
+                    path = PROJECT_ROOT / path
+                path = path.resolve()
+                if not path.is_relative_to(root) or not path.is_file():
+                    manifest["missing_item_ids"].append(item.id)
+                    continue
+                size += path.stat().st_size
+                if size > 2 * 1024**3:
+                    raise HTTPException(status_code=413, detail="单次导出上限为 2GB，请拆分数据集后导出。")
+                name = f"images/{item.id}_{path.name}"
+                archive.write(path, name)
+                manifest["items"].append({
+                    "id": item.id, "file": name, "original_name": item.original_name,
+                    "ground_truth": item.ground_truth, "annotation_status": item.annotation_status,
+                    "annotation": item.annotation_json, "split": item.split,
+                })
+            if not manifest["items"]:
+                raise HTTPException(status_code=409, detail="图片文件已丢失或不在上传目录中，无法导出。")
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        return FileResponse(
+            archive_path, media_type="application/zip", filename=f"dataset-{dataset_id}-images.zip",
+            background=BackgroundTask(temporary.cleanup),
+        )
+    except Exception:
+        temporary.cleanup()
+        raise
 
 
 @router.get("/{dataset_id}")

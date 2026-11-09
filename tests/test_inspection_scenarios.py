@@ -1028,6 +1028,9 @@ class InspectionScenarioRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "start", "model_1", "annotate_1", "crop_1", "vlm_1", "end",
             ])
             self.assertTrue(all("elapsed_ms" in trace for trace in traces))
+            self.assertTrue(all(trace["execution_status"] == "COMPLETED" for trace in traces))
+            self.assertEqual(traces[0]["status"], "COMPLETED")
+            self.assertIsNone(traces[0]["detection_result"])
             self.assertEqual(traces[1]["input"]["mapped_inputs"]["image_path"], str(image_path))
             self.assertNotIn("output_mapping", traces[1]["input"]["parameters"])
             self.assertEqual(traces[1]["status"], "COMPLETED")
