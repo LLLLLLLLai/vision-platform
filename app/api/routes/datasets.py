@@ -92,7 +92,7 @@ class DatasetItemUpdate(BaseModel):
 
 
 class DatasetItemPreAnnotationRequest(BaseModel):
-    """Runtime options for a non-persistent AI pre-annotation request."""
+    """Runtime options for AI annotations saved directly as labeled data."""
 
     vision_model_version_id: int = Field(gt=0)
     confidence: float = Field(default=0.25, ge=0.0, le=1.0)
@@ -309,12 +309,7 @@ def _pre_annotation_from_inference(
     dataset: Dataset,
     inference: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Turn the common YOLO output contract into editable dataset annotations.
-
-    This deliberately returns only suggestions. The browser presents these as
-    editable candidates and only a later explicit save turns them into labeled
-    training data.
-    """
+    """Turn the common YOLO output contract into editable dataset annotations."""
 
     annotation_type = _normalize(dataset.annotation_type)
     warnings: list[str] = []
@@ -417,17 +412,9 @@ def _merge_pre_annotation(
     annotation_type = _normalize(dataset.annotation_type)
     if annotation_type == "CLASSIFICATION":
         current_label = str(existing.get("label") or "").strip()
-        suggested_label = str(suggested.get("label") or "").strip()
         if not current_label:
             return suggested, True
-        if current_label.casefold() == suggested_label.casefold():
-            return existing, False
-        merged = dict(existing)
-        merged["_meta"] = {
-            **dict(existing.get("_meta") or {}),
-            "ai_candidate_label": suggested_label,
-        }
-        return merged, True
+        return existing, False
 
     key = "boxes" if annotation_type == "DETECTION" else "segments"
     current = list(existing.get(key) or existing.get("polygons") or [])
@@ -1630,6 +1617,58 @@ def upload_dataset_items_batch(
     }
 
 
+def _save_pre_annotation(
+    database: Session,
+    dataset: Dataset,
+    item: DatasetItem,
+    annotation: dict[str, Any],
+    *,
+    model: VisionModel,
+    version: VisionModelVersion,
+    warnings: list[str],
+    confidence: float,
+    existing_annotations: str = "REPLACE",
+) -> bool:
+    _validate_training_annotation(dataset, annotation)
+    if not _annotation_labels(dataset, annotation):
+        raise HTTPException(status_code=422, detail="模型没有返回可用标注，原标注保持不变。")
+    if _normalize(dataset.annotation_type) == "CLASSIFICATION":
+        annotation["label"] = _resolve_dataset_classification_label(dataset, annotation["label"])
+    previous = dict(item.annotation_json or {})
+    previous_meta = dict(previous.get("_meta") or {})
+    previous_meta.pop("previous_annotation", None)
+    if previous:
+        previous["_meta"] = previous_meta
+    if existing_annotations == "PRESERVE" and previous:
+        annotation, changed = _merge_pre_annotation(dataset, previous, annotation)
+        if not changed:
+            return False
+    _validate_training_annotation(dataset, annotation)
+    metadata = dict(annotation.get("_meta") or {})
+    for key in ("confirmed_at", "ai_candidate_label", "previous_annotation"):
+        metadata.pop(key, None)
+    annotation["_meta"] = {
+        **metadata,
+        "source": "AI_PREANNOTATION",
+        "model_version_id": version.id,
+        "model_name": model.name,
+        "model_version": version.version,
+        "task_type": model.task_type,
+        "confidence_threshold": confidence,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "review_required": False,
+        "auto_accepted": True,
+        "warnings": warnings,
+        **({"previous_annotation": previous} if previous else {}),
+    }
+    _merge_dataset_labels(dataset, _annotation_labels(dataset, annotation))
+    _invalidate_augmented_children(database, dataset_id=dataset.id, source_id=item.id)
+    item.annotation_json = annotation
+    item.annotation_status = "LABELED"
+    dataset.revision += 1
+    return True
+
+
 def _batch_pre_annotation_job_payload(job: AutomationJob) -> dict[str, Any]:
     return {
         "id": job.id,
@@ -1723,7 +1762,7 @@ def create_batch_pre_annotation_job(
         result_json={
             "total": len(item_ids),
             "processed": 0,
-            "suggested": 0,
+            "labeled": 0,
             "skipped": 0,
             "failed": 0,
             "progress": {"percent": 0, "stage": "QUEUED", "label": "等待批量标注"},
@@ -1741,16 +1780,11 @@ def pre_annotate_dataset_item(
     payload: DatasetItemPreAnnotationRequest,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Generate editable AI annotation candidates from a published YOLO model.
-
-    Nothing is written to ``DatasetItem`` here.  That makes the contract safe
-    for production datasets: an operator may review, edit, reject or save the
-    suggestions in the annotation workspace before they become training truth.
-    """
+    """Generate and save editable AI annotations from a published YOLO model."""
 
     dataset = database.get(Dataset, dataset_id)
     item = database.get(DatasetItem, item_id)
-    if dataset is None or dataset.is_deleted or item is None or item.dataset_id != dataset_id:
+    if dataset is None or dataset.is_deleted or item is None or item.is_deleted or item.dataset_id != dataset_id:
         raise HTTPException(status_code=404, detail="数据集样本不存在。")
     if dataset.purpose != "TRAIN" or dataset.media_type != "IMAGE" or item.media_type != "IMAGE":
         raise HTTPException(status_code=400, detail="自动预标注仅支持图片训练数据集。")
@@ -1797,15 +1831,6 @@ def pre_annotate_dataset_item(
         raise HTTPException(status_code=422, detail=f"自动预标注失败：{exc}") from exc
 
     annotation, warnings = _pre_annotation_from_inference(dataset, inference)
-    annotation["_meta"] = {
-        **dict(annotation.get("_meta") or {}),
-        "model_version_id": version.id,
-        "model_name": model.name,
-        "model_version": version.version,
-        "task_type": model.task_type,
-        "confidence_threshold": payload.confidence,
-        "generated_at": datetime.now(UTC).isoformat(),
-    }
     candidate_count = (
         len(annotation.get("boxes") or [])
         if annotation_type == "DETECTION"
@@ -1817,9 +1842,17 @@ def pre_annotate_dataset_item(
     existing_labels = {label.casefold() for label in dataset.label_schema_json or []}
     unknown_labels = sorted({label for label in labels if label.casefold() not in existing_labels})
     if unknown_labels:
-        warnings.append("模型建议包含数据集类别字典外的类别；保存前请确认类别名称和编号顺序。")
+        warnings.append("模型包含新类别，保存时自动追加到类别字典，已有类别顺序不变。")
+    _save_pre_annotation(
+        database, dataset, item, annotation,
+        model=model, version=version, warnings=warnings, confidence=payload.confidence,
+    )
+    database.commit()
     return {
-        "annotation": annotation,
+        "annotation": item.annotation_json,
+        "item": _item_payload(item),
+        "labels": list(dataset.label_schema_json or []),
+        "annotation_status": item.annotation_status,
         "candidate_count": candidate_count,
         "unknown_labels": unknown_labels,
         "warnings": warnings,
@@ -1835,7 +1868,7 @@ def pre_annotate_dataset_item(
             "confidence": inference.get("confidence"),
             "object_count": inference.get("object_count"),
             "classification": inference.get("classification"),
-            "elapsed_note": "预标注结果尚未保存为训练真值，请人工确认后保存。",
+            "elapsed_note": "AI 标注已自动保存，可直接用于训练，仍可手动修改。",
         },
     }
 

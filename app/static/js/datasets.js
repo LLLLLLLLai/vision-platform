@@ -134,12 +134,11 @@
       const expectedTask = modelTaskForAnnotation(annotationType(dataset));
       setPreAnnotationStatus(expectedTask ? `请先在“模型中心”发布一个可用的 ${annotationTypeLabel(annotationType(dataset))} 模型。` : "当前数据集不支持自动预标注。", "warning");
     } else {
-      setPreAnnotationStatus("模型会生成可编辑的候选标注；请检查后再保存为训练真值。");
+      setPreAnnotationStatus("模型结果自动保存为已标注，可直接训练，也可继续手动修改。");
     }
   }
 
   function annotationSummary(item, dataset) {
-    if (item.annotation_status === "AI_SUGGESTED") return "AI 标注待复核";
     if (item.annotation_status !== "LABELED") return "待标注";
     const annotation = item.annotation_json || {};
     if (annotationType(dataset) === "DETECTION") return `已框选 ${(annotation.boxes || []).length} 个目标`;
@@ -181,8 +180,12 @@
       : '<div class="empty-state"><span>▤</span><strong>暂无数据集</strong><p>创建一个场景评测或 YOLO 训练数据集开始管理素材。</p></div>';
   }
 
+  function isAiAnnotation(item) {
+    return item.annotation_status === "LABELED"
+      && item.annotation_json?._meta?.source === "AI_PREANNOTATION";
+  }
+
   function itemAnnotationGroup(item) {
-    if (item.annotation_status === "AI_SUGGESTED") return "AI_SUGGESTED";
     if (item.annotation_status === "LABELED") return "LABELED";
     return "PENDING";
   }
@@ -195,7 +198,8 @@
     const splitFilter = byId("datasetItemSplitFilter").value;
     const sort = byId("datasetItemSort").value;
     const filtered = items.filter((item) => (
-      (state.itemFilter === "ALL" || itemAnnotationGroup(item) === state.itemFilter)
+      (state.itemFilter === "ALL" || itemAnnotationGroup(item) === state.itemFilter
+        || (state.itemFilter === "AI_LABELED" && isAiAnnotation(item)))
       && (sourceFilter === "ALL" || (sourceFilter === "AUTO"
         ? ["AUTO_COLLECTION", "AUTO_ROI", "AUTO_ROI_RECIPE", "AUTO_ORIGINAL"].includes(String(item.source || "").toUpperCase())
         : String(item.source || "UPLOAD").toUpperCase() === sourceFilter))
@@ -221,10 +225,11 @@
   function renderItemFilters(dataset, matchingCount, firstVisible, lastVisible) {
     const training = isTraining(dataset);
     byId("datasetItemFilters").hidden = !training;
-    const counts = { ALL: 0, PENDING: 0, AI_SUGGESTED: 0, LABELED: 0 };
+    const counts = { ALL: 0, PENDING: 0, AI_LABELED: 0, LABELED: 0 };
     for (const item of dataset.items || []) {
       counts.ALL += 1;
       counts[itemAnnotationGroup(item)] += 1;
+      if (isAiAnnotation(item)) counts.AI_LABELED += 1;
     }
     byId("datasetItemFilters").querySelectorAll("[data-item-filter]").forEach((button) => {
       const active = button.dataset.itemFilter === state.itemFilter;
@@ -266,7 +271,7 @@
           ? `<button class="btn btn-sm ${item.ground_truth === "OK" ? "btn-success" : "btn-outline-success"}" data-item-truth="OK" data-item-id="${item.id}" type="button">OK</button><button class="btn btn-sm ${item.ground_truth === "NG" ? "btn-danger" : "btn-outline-danger"}" data-item-truth="NG" data-item-id="${item.id}" type="button">NG</button>`
           : "";
         const annotationAction = isTraining(dataset)
-          ? `<button class="btn btn-sm ${item.annotation_status === "LABELED" ? "btn-outline-success" : "btn-primary"}" data-item-annotate="${item.id}" type="button">${item.annotation_status === "AI_SUGGESTED" ? "复核 AI 标注" : annotationType(dataset) === "DETECTION" ? (item.annotation_status === "LABELED" ? "编辑检测框" : "框选标注") : (item.annotation_status === "LABELED" ? "编辑标注" : "添加标注")}</button>`
+          ? `<button class="btn btn-sm ${item.annotation_status === "LABELED" ? "btn-outline-success" : "btn-primary"}" data-item-annotate="${item.id}" type="button">${annotationType(dataset) === "DETECTION" ? (item.annotation_status === "LABELED" ? "编辑检测框" : "框选标注") : (item.annotation_status === "LABELED" ? "编辑标注" : "添加标注")}</button>`
           : "";
         const augmentationAction = supportsDatasetAugmentation(dataset)
           && item.annotation_status === "LABELED"
@@ -304,13 +309,13 @@
     const markedCount = isTraining(dataset)
       ? items.filter((item) => item.annotation_status === "LABELED").length
       : items.filter((item) => item.ground_truth).length;
-    const pendingAiCount = items.filter((item) => item.annotation_status === "AI_SUGGESTED").length;
+    const aiLabeledCount = items.filter(isAiAnnotation).length;
     const splits = dataset.split_counts || {};
     const summary = isTraining(dataset)
       ? [
         ["素材", dataset.item_count || 0],
         ["已标注", markedCount],
-        ["AI 待复核", pendingAiCount],
+        ["其中 AI 已标注", aiLabeledCount],
         ["增强素材", dataset.augmented_count || 0],
         ["训练 / 验证 / 测试", `${splits.TRAIN || 0} / ${splits.VAL || 0} / ${splits.TEST || 0}${splits.UNASSIGNED ? ` · 未切分 ${splits.UNASSIGNED}` : ""}`],
       ]
@@ -641,7 +646,7 @@
     const percent = Number.isFinite(Number(progress.percent)) ? Number(progress.percent) : total ? processed / total * 100 : 0;
     const status = { QUEUED: "排队中", RUNNING: "执行中", COMPLETED: "已完成", FAILED: "失败" }[job.status] || job.status;
     const failures = (result.failures || []).slice(0, 3).map((failure) => `<li>${escapeHtml(failure.name)}：${escapeHtml(failure.error)}</li>`).join("");
-    panel.innerHTML = `<div class="dataset-batch-heading"><strong>批量 AI 标注 · ${escapeHtml(status)}</strong><span>${processed} / ${total}</span></div><div class="progress" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, percent))}%"></div></div><small>待复核 ${Number(result.suggested || 0)} · 保留/跳过 ${Number(result.skipped || 0)} · 失败 ${Number(result.failed || 0)}</small>${job.error_message ? `<p class="text-danger mb-0">${escapeHtml(job.error_message)}</p>` : ""}${failures ? `<details><summary>查看失败样本</summary><ul>${failures}</ul></details>` : ""}`;
+    panel.innerHTML = `<div class="dataset-batch-heading"><strong>批量 AI 标注 · ${escapeHtml(status)}</strong><span>${processed} / ${total}</span></div><div class="progress" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, percent))}%"></div></div><small>${result.labeled === undefined ? "历史生成" : "已标注"} ${Number(result.labeled ?? result.suggested ?? 0)} · 保留/跳过 ${Number(result.skipped || 0)} · 失败 ${Number(result.failed || 0)}</small>${job.error_message ? `<p class="text-danger mb-0">${escapeHtml(job.error_message)}</p>` : ""}${failures ? `<details><summary>查看失败样本</summary><ul>${failures}</ul></details>` : ""}`;
   }
 
   async function loadBatchJob() {
@@ -707,7 +712,7 @@
       state.batchJobDatasetId = dataset.id;
       closeModal("datasetBatchAnnotationModal");
       renderBatchProgress();
-      notify("批量自动标注已排队，结果会标记为待复核。", "success");
+      notify("批量自动标注已排队，成功结果自动保存为已标注。", "success");
       await loadBatchJob();
     } catch (error) {
       notify(error.message, "danger");
@@ -1374,7 +1379,7 @@
     const list = byId("detectionAnnotationList");
     list.innerHTML = boxes.length
       ? boxes.map((box, index) => {
-        const candidate = box.autoGenerated ? ` · AI 候选${Number.isFinite(Number(box.confidence)) ? ` ${(Number(box.confidence) * 100).toFixed(0)}%` : ""}` : "";
+        const candidate = box.autoGenerated ? ` · AI 标注${Number.isFinite(Number(box.confidence)) ? ` ${(Number(box.confidence) * 100).toFixed(0)}%` : ""}` : "";
         return `<div class="annotation-box-row"><button class="annotation-box-select ${index === state.annotation.selectedBoxIndex ? "active" : ""}" style="--annotation-color:${annotationColor(box.label)}" data-box-select="${index}" type="button"><span class="annotation-box-color-dot"></span><span><strong>${escapeHtml(box.label || `目标 ${index + 1}`)}</strong><small>对象 ${index + 1} · ${(box.width * 100).toFixed(1)}% × ${(box.height * 100).toFixed(1)}%${candidate}</small></span></button><button class="btn btn-sm btn-outline-danger annotation-box-remove" data-box-remove="${index}" type="button" title="删除对象">×</button></div>`;
       }).join("")
       : '<div class="annotation-empty">选择“框选”工具，输入类别后拖动鼠标绘制检测框。没有目标的负样本可保持为空。</div>';
@@ -1671,7 +1676,7 @@
       : type === "CLASSIFICATION"
         ? Boolean(byId("classificationAnnotationLabel").value.trim())
         : Boolean(byId("annotationJson").value.trim() && byId("annotationJson").value.trim() !== JSON.stringify(annotationExample(dataset), null, 2));
-    if (hasExistingAnnotation && !window.confirm("AI 预标注会替换当前页面中尚未保存的标注候选。是否继续？")) return;
+    if ((hasExistingAnnotation || state.annotation.dirty) && !window.confirm("AI 自动标注会替换并保存当前图片的标注，未保存的修改将被覆盖。是否继续？")) return;
     const confidence = Number(byId("annotationPreConfidence").value);
     if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
       notify("置信度阈值需在 0 到 1 之间。", "warning");
@@ -1680,7 +1685,7 @@
     }
     button.disabled = true;
     button.textContent = "生成中…";
-    setPreAnnotationStatus("模型正在生成候选标注，请稍候…");
+    setPreAnnotationStatus("模型正在自动标注并保存，请稍候…");
     try {
       const response = await request(`${api}/datasets/${dataset.id}/items/${itemId}/pre-annotations`, {
         method: "POST",
@@ -1688,6 +1693,10 @@
         body: JSON.stringify({ vision_model_version_id: modelVersionId, confidence }),
       });
       const annotation = response.annotation || {};
+      const storedItem = dataset.items.find((item) => Number(item.id) === itemId);
+      if (storedItem && response.item) Object.assign(storedItem, response.item);
+      if (response.labels) dataset.labels = response.labels;
+      if (Number(state.annotation.itemId) !== itemId || selected()?.id !== dataset.id) return;
       state.annotation.preannotationMeta = annotation._meta || null;
       state.annotation.history = [];
       state.annotation.selectedBoxIndex = null;
@@ -1700,19 +1709,22 @@
       } else {
         byId("annotationJson").value = JSON.stringify(annotation, null, 2);
       }
-      setAnnotationDirty(true);
-      const warningText = [...(response.warnings || []), (response.unknown_labels || []).length ? `待确认类别：${response.unknown_labels.join("、")}` : ""]
+      setAnnotationDirty(false);
+      renderLabelOptions();
+      renderAnnotationLabels();
+      renderDetail();
+      const warningText = [...(response.warnings || [])]
         .filter(Boolean)
         .join(" ");
       const modelName = response.model?.name || "所选模型";
       const candidateCount = Number(response.candidate_count || 0);
-      setPreAnnotationStatus(`${modelName} 已生成 ${candidateCount} 个候选标注。${warningText ? ` ${warningText}` : " 请检查、修改后再保存。"}`, warningText ? "warning" : "success");
-      notify(`AI 预标注完成：${candidateCount} 个候选，请人工确认后保存。`);
+      setPreAnnotationStatus(`${modelName} 已自动保存 ${candidateCount} 个标注，可直接训练。${warningText ? ` ${warningText}` : " 仍可手动修改并保存。"}`, warningText ? "warning" : "success");
+      notify(`AI 自动标注完成：${candidateCount} 个标注已保存，无需复核。`);
     } catch (error) {
-      setPreAnnotationStatus(`AI 预标注失败：${error.message}`, "warning");
+      setPreAnnotationStatus(`AI 自动标注失败：${error.message}`, "warning");
       notify(error.message, "danger");
     } finally {
-      button.textContent = "AI 预标注";
+      button.textContent = "AI 自动标注";
       button.disabled = !compatiblePreAnnotationModels(dataset).length;
     }
   }
@@ -1749,11 +1761,8 @@
       : type === "CLASSIFICATION"
         ? "为整张图片选择一个类别名称。"
         : "维护分割轮廓点，类别名称需与后续训练模型的识别类别一致。";
-    if (item.annotation_status === "AI_SUGGESTED") {
-      const candidateLabel = item.annotation_json?._meta?.ai_candidate_label;
-      byId("annotationHint").textContent = candidateLabel
-        ? `AI 建议类别：${candidateLabel}。原类别已保留，请比较后选择并保存确认。`
-        : "AI 已生成待复核标注；请检查类别与区域，保存后才会进入训练数据。";
+    if (isAiAnnotation(item)) {
+      byId("annotationHint").textContent = "AI 标注已自动保存，可直接训练；如需调整，可修改后保存。";
     }
     const labels = datasetLabels(dataset);
     byId("annotationCurrentLabel").value = item.annotation_json?.boxes?.[0]?.label || labels[0] || "";

@@ -6,11 +6,36 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecipeDatasetUiAssetTests(unittest.TestCase):
+    def test_recipe_details_follow_displayed_version_not_production_fallback(self) -> None:
+        script = (PROJECT_ROOT / "app/static/js/workspace.js").read_text(encoding="utf-8")
+        action = script.split('if (event.target.closest(".detail-recipe")) {', 1)[1].split("} else if", 1)[0]
+        self.assertIn("recipeDetailUrl(recipeId)", action)
+        self.assertNotIn("sourceRecipeId", action)
+        self.assertIn("href=\"${recipeDetailUrl(version.id)}\"", script)
+
+    def test_recipe_detail_versions_keep_readonly_navigation(self) -> None:
+        template = (PROJECT_ROOT / "app/templates/workspace.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app/static/js/workspace.js").read_text(encoding="utf-8")
+        self.assertIn('id="recipeDetailVersion"', template)
+        self.assertIn("&mode=view", script.split("function recipeDetailUrl(", 1)[1].split("\n}", 1)[0])
+        self.assertIn("renderRecipeDetailVersions();", script)
+        fields = script.split("function recipeFields()", 1)[1].split("\n}", 1)[0]
+        self.assertIn('byId("recipeForm").elements', fields)
+        self.assertNotIn("formValues(", fields)
+
+    def test_recipe_image_failures_are_visible_and_do_not_mix_versions(self) -> None:
+        template = (PROJECT_ROOT / "app/templates/workspace.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app/static/js/workspace.js").read_text(encoding="utf-8")
+        self.assertIn('id="recipeImageNotice"', template)
+        self.assertIn('baseImage.addEventListener("error"', script)
+        self.assertIn("当前查看版本未配置基准图片", script)
+        self.assertIn("不会自动替换为其他版本的图片", script)
+
     def test_dataset_items_can_be_filtered_by_annotation_status(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
 
-        for status in ("ALL", "PENDING", "AI_SUGGESTED", "LABELED"):
+        for status in ("ALL", "PENDING", "AI_LABELED", "LABELED"):
             self.assertIn(f'data-item-filter="{status}"', template)
         for element_id in (
             "datasetItemSearch",
@@ -52,6 +77,17 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
         self.assertIn("function startBatchAnnotation(", script)
         self.assertIn("function toggleDatasetCollection(", script)
         self.assertIn("function loadBatchJob(", script)
+
+    def test_ai_annotations_are_saved_without_manual_review(self) -> None:
+        template = (PROJECT_ROOT / "app/templates/datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app/static/js/datasets.js").read_text(encoding="utf-8")
+        self.assertNotIn("待复核", template + script)
+        self.assertNotIn("请人工确认后保存", template + script)
+        self.assertIn("AI 已标注", template)
+        handler = script.split("async function runAnnotationPrelabel()", 1)[1].split("function openAnnotation(", 1)[0]
+        self.assertIn("setAnnotationDirty(false)", handler)
+        self.assertIn("Object.assign(storedItem, response.item)", handler)
+        self.assertIn("renderDetail()", handler)
 
     def test_recipe_history_uses_in_page_version_selector(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "workspace.html").read_text(encoding="utf-8")
@@ -232,7 +268,7 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', template)
         self.assertIn("function runAnnotationPrelabel()", script)
         self.assertIn("/pre-annotations", script)
-        self.assertIn("AI 预标注会替换当前页面中尚未保存的标注候选", script)
+        self.assertIn("AI 自动标注会替换并保存当前图片的标注", script)
 
     def test_detection_record_detail_exposes_manual_review_entry(self) -> None:
         script = (PROJECT_ROOT / "app" / "static" / "js" / "workspace.js").read_text(encoding="utf-8")

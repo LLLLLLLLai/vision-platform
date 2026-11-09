@@ -73,7 +73,7 @@
           <div class="dataset-item-filter-tabs" role="group" aria-label="按标注状态筛选素材">
             <button class="dataset-item-filter active" data-item-filter="ALL" type="button" aria-pressed="true">全部 <span data-filter-count="ALL">0</span></button>
             <button class="dataset-item-filter" data-item-filter="PENDING" type="button" aria-pressed="false">待标注 <span data-filter-count="PENDING">0</span></button>
-            <button class="dataset-item-filter" data-item-filter="AI_SUGGESTED" type="button" aria-pressed="false">AI 待复核 <span data-filter-count="AI_SUGGESTED">0</span></button>
+            <button class="dataset-item-filter" data-item-filter="AI_LABELED" type="button" aria-pressed="false">AI 已标注 <span data-filter-count="AI_LABELED">0</span></button>
             <button class="dataset-item-filter" data-item-filter="LABELED" type="button" aria-pressed="false">已标注 <span data-filter-count="LABELED">0</span></button>
           </div>
           <div class="dataset-item-filter-controls">
@@ -151,7 +151,7 @@
         <label><span>已发布模型</span><select class="form-select" id="datasetBatchModel"></select></label>
         <label><span>置信度阈值</span><input class="form-control" id="datasetBatchConfidence" type="number" min="0" max="1" step="0.05" value="0.25"></label>
         <label><span>已有标注</span><select class="form-select" id="datasetBatchExisting"><option value="PRESERVE">保留：旧标注不删，合并 AI 新标注（推荐）</option><option value="REPLACE">替换：重新标注全部原图</option></select></label>
-        <small class="muted-copy">结果保存为“AI 待复核”，不会直接进入训练。请逐张检查并保存确认；增强图不参与批量标注。</small>
+        <small class="muted-copy">成功结果直接保存为已标注，无需复核，可直接训练；增强图不参与批量标注。</small>
       </div>
       <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="startDatasetBatchAnnotation" type="button">开始批量标注</button></div>
     </div></div>
@@ -166,13 +166,13 @@
         <p id="annotationHint" class="muted-copy"></p>
         <section class="annotation-ai-assistant" id="annotationAiAssistant">
           <div class="annotation-ai-assistant-copy">
-            <strong>AI 预标注</strong>
-            <small>参考 X-AnyLabeling / CVAT 的“模型建议 + 人工确认”方式。模型结果只作为可编辑候选，点击“保存标注”后才会成为训练数据。</small>
+            <strong>AI 自动标注</strong>
+            <small>模型结果自动保存，可直接训练；仍可手动调整标注。</small>
           </div>
           <div class="annotation-ai-assistant-controls">
             <label><span>已发布模型</span><select id="annotationPreModel" class="form-select form-select-sm"></select></label>
             <label><span>置信度阈值</span><input id="annotationPreConfidence" class="form-control form-control-sm" type="number" min="0" max="1" step="0.05" value="0.25"></label>
-            <button class="btn btn-sm btn-primary" id="runAnnotationPrelabel" type="button">AI 预标注</button>
+            <button class="btn btn-sm btn-primary" id="runAnnotationPrelabel" type="button">AI 自动标注</button>
           </div>
           <small class="annotation-ai-assistant-status" id="annotationAiAssistantStatus">正在加载可用模型…</small>
         </section>
@@ -339,5 +339,5 @@
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261103-3" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261108-1"></script>
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261109-ai-labels"></script>
 {% endblock %}

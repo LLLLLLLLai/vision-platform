@@ -602,11 +602,8 @@ class AutomationWorker:
 
     async def _pre_annotate_dataset(self, database: Any, job: AutomationJob) -> None:
         from app.api.routes.datasets import (
-            _annotation_labels,
-            _invalidate_augmented_children,
-            _merge_pre_annotation,
             _pre_annotation_from_inference,
-            _validate_training_annotation,
+            _save_pre_annotation,
         )
 
         dataset = database.get(Dataset, job.dataset_id)
@@ -646,40 +643,16 @@ class AutomationWorker:
                         },
                     )
                     annotation, warnings = _pre_annotation_from_inference(dataset, inference)
-                    _validate_training_annotation(dataset, annotation)
-                    candidates = _annotation_labels(dataset, annotation)
-                    if not candidates:
-                        raise ValueError("模型没有返回可用标注，原标注保持不变。")
-                    if dataset.annotation_type == "CLASSIFICATION":
-                        known_labels = {label.casefold() for label in dataset.label_schema_json or []}
-                        if any(label.casefold() not in known_labels for label in candidates):
-                            raise ValueError("分类结果不在数据集类别中，请先维护类别字典。")
-                    previous = dict(item.annotation_json or {})
-                    previous_meta = dict(previous.get("_meta") or {})
-                    previous_meta.pop("previous_annotation", None)
-                    if previous:
-                        previous["_meta"] = previous_meta
-                    if config.get("existing_annotations") == "PRESERVE" and previous:
-                        annotation, changed = _merge_pre_annotation(dataset, previous, annotation)
-                    else:
-                        changed = True
+                    changed = _save_pre_annotation(
+                        database, dataset, item, annotation,
+                        model=model, version=version, warnings=warnings,
+                        confidence=config.get("confidence", 0.25),
+                        existing_annotations=config.get("existing_annotations", "PRESERVE"),
+                    )
                     if not changed:
                         result["skipped"] = result.get("skipped", 0) + 1
                     else:
-                        annotation["_meta"] = {
-                            **dict(annotation.get("_meta") or {}),
-                            "model_version_id": version.id,
-                            "model_name": model.name,
-                            "generated_at": datetime.utcnow().isoformat(),
-                            "review_required": True,
-                            "warnings": warnings,
-                            **({"previous_annotation": previous} if previous else {}),
-                        }
-                        _invalidate_augmented_children(database, dataset_id=dataset.id, source_id=item.id)
-                        item.annotation_json = annotation
-                        item.annotation_status = "AI_SUGGESTED"
-                        dataset.revision += 1
-                        result["suggested"] = result.get("suggested", 0) + 1
+                        result["labeled"] = result.get("labeled", 0) + 1
                 except Exception as exc:
                     result["failed"] = result.get("failed", 0) + 1
                     if len(failures) < 20:

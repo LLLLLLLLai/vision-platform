@@ -1,13 +1,15 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import Index, inspect, select, text
+from sqlalchemy.orm import Session
 
 from app.core.config import PROJECT_ROOT, settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.recipe import RecipeFeatureAnchor, RegionOfInterest
 from app.models.reference import ReferenceGroup, ReferenceObjectType
-from app.models.intelligence import Dataset
+from app.models.intelligence import Dataset, DatasetItem
 
 
 DEFAULT_REFERENCE_OBJECT_TYPES = (
@@ -287,8 +289,61 @@ def init_database() -> None:
     _upgrade_dataset_collection_schema()
     _upgrade_report_selection_schema()
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as database:
+        migrate_ai_annotations(database)
     _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()
+
+
+def migrate_ai_annotations(database: Session) -> int:
+    from fastapi import HTTPException
+    from app.api.routes.datasets import (
+        _annotation_labels,
+        _merge_dataset_labels,
+        _resolve_dataset_classification_label,
+        _validate_training_annotation,
+    )
+
+    rows = database.execute(
+        select(DatasetItem, Dataset).join(Dataset, Dataset.id == DatasetItem.dataset_id).where(
+            DatasetItem.annotation_status == "AI_SUGGESTED",
+            DatasetItem.is_deleted.is_(False),
+            DatasetItem.media_type == "IMAGE",
+            Dataset.is_deleted.is_(False),
+            Dataset.purpose == "TRAIN",
+        )
+    )
+    migrated = 0
+    for item, dataset in rows:
+        raw_annotation = item.annotation_json
+        annotation = dict(raw_annotation) if isinstance(raw_annotation, dict) else {"_legacy_annotation": raw_annotation}
+        raw_metadata = annotation.get("_meta")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        try:
+            _validate_training_annotation(dataset, annotation)
+            if not _annotation_labels(dataset, annotation):
+                raise ValueError("历史 AI 标注没有可用目标，请重新标注。")
+            if dataset.annotation_type == "CLASSIFICATION":
+                annotation["label"] = _resolve_dataset_classification_label(dataset, annotation["label"])
+            _merge_dataset_labels(dataset, _annotation_labels(dataset, annotation))
+        except (HTTPException, ValueError, TypeError) as exc:
+            item.annotation_status = "PENDING"
+            metadata["migration_error"] = str(getattr(exc, "detail", exc))
+        else:
+            item.annotation_status = "LABELED"
+            metadata.update({
+                "source": "AI_PREANNOTATION",
+                "auto_accepted": True,
+                "accepted_at": datetime.now(UTC).isoformat(),
+            })
+            metadata.pop("ai_candidate_label", None)
+            migrated += 1
+        metadata["review_required"] = False
+        annotation["_meta"] = metadata
+        item.annotation_json = annotation
+        dataset.revision += 1
+    database.commit()
+    return migrated
 
 
 def _seed_reference_object_types() -> None:

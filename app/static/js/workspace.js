@@ -101,7 +101,9 @@ function normalizeCode(value) {
 }
 
 function recipeFields() {
-  const values = formValues(byId("recipeForm"));
+  const values = Object.fromEntries(Array.from(byId("recipeForm").elements)
+    .filter((field) => field.name)
+    .map((field) => [field.name, field.value]));
   return {
     projectName: values.project_name.trim(),
     lineCode: normalizeCode(values.line_code),
@@ -583,7 +585,26 @@ function applyEditorAccessMode() {
   });
   ["baseImageUploadLabel", "emptyImageUploadLabel"].forEach((id) => {
     byId(id)?.classList.toggle("disabled", readOnly || passThrough);
+    byId(id).hidden = readOnly;
   });
+  renderRecipeDetailVersions();
+}
+
+function recipeDetailUrl(recipeId) {
+  return `/recipes/editor?recipe_id=${Number(recipeId)}&mode=view`;
+}
+
+function renderRecipeDetailVersions() {
+  const panel = byId("recipeDetailVersionPanel");
+  panel.hidden = !state.editorReadOnly || !state.recipe;
+  if (panel.hidden) return;
+  const familyCode = state.recipe.recipe_family_code || state.recipe.code;
+  const versions = state.recipes.filter((recipe) =>
+    (recipe.recipe_family_code || recipe.code) === familyCode);
+  if (!versions.some((recipe) => recipe.id === state.recipe.id)) versions.unshift(state.recipe);
+  byId("recipeDetailVersion").innerHTML = versions.map((recipe) =>
+    `<option value="${recipe.id}">${escapeHtml(recipe.display_version || recipe.version)} · ${escapeHtml(recipe.execution_mode === "PASS_THROUGH" ? "无需检测" : "ROI 检测")}</option>`).join("");
+  byId("recipeDetailVersion").value = String(state.recipe.id);
 }
 
 function resetEditor() {
@@ -629,6 +650,7 @@ async function loadRecipe(recipeId) {
   state.drawMode = "ROI";
   populateRecipeForm(state.recipe);
   setRecipeStatus(state.recipe.status, state.recipe);
+  byId("recipeImageNotice").hidden = true;
   if (state.recipe.base_image_url) {
     const imageChanged = baseImage.dataset.sourceUrl !== state.recipe.base_image_url;
     if (imageChanged) {
@@ -655,6 +677,10 @@ async function loadRecipe(recipeId) {
     byId("selectRoiDrawMode").disabled = true;
     byId("selectFeatureAnchorDrawMode").disabled = true;
     clearCanvas();
+    if (state.editorReadOnly) {
+      byId("recipeImageNotice").textContent = "当前查看版本未配置基准图片。请通过上方“查看版本”确认是否需要查看草稿或其他历史版本。";
+      byId("recipeImageNotice").hidden = false;
+    }
   }
   renderConfiguredObjects();
   applyEditorAccessMode();
@@ -1225,8 +1251,16 @@ canvas.addEventListener("pointercancel", (event) => {
 });
 
 baseImage.addEventListener("load", () => {
+  byId("recipeImageNotice").hidden = true;
+  imageSurface.hidden = false;
+  byId("emptyStage").style.display = "none";
   syncCanvas(state.imageView.resetOnLoad);
   state.imageView.resetOnLoad = false;
+});
+baseImage.addEventListener("error", () => {
+  imageSurface.hidden = true;
+  byId("recipeImageNotice").textContent = "当前版本的基准图片加载失败，请检查图片文件是否存在及图片访问权限；不会自动替换为其他版本的图片。";
+  byId("recipeImageNotice").hidden = false;
 });
 window.addEventListener("resize", () => {
   if (baseImage.src) syncCanvas(true);
@@ -2665,7 +2699,7 @@ function openRecipeHistory(history, sourceRecipeId) {
           <small>${escapeHtml(version.code || "-")} · 创建于 ${escapeHtml(formatRecipeHistoryTime(version.created_at))}</small>
           <div class="recipe-history-item-meta"><span>${escapeHtml(statusLabel)}</span>${current ? "<span>当前生产参考版本</span>" : ""}${version.source_recipe_id ? `<span>来源 #${version.source_recipe_id}</span>` : ""}</div>
         </div>
-        <div>${action}${disabledHint}</div>
+        <div><a class="btn btn-sm btn-outline-secondary" href="${recipeDetailUrl(version.id)}">查看详情</a> ${action}${disabledHint}</div>
       </article>`;
     }).join("")
     : '<div class="recipe-history-empty">当前配方还没有可用的历史版本。</div>';
@@ -3537,7 +3571,7 @@ byId("configurationLibrary").addEventListener("click", async (event) => {
   const sourceRecipeId = productionRecipeId || recipeId;
   try {
     if (event.target.closest(".detail-recipe")) {
-      window.location.href = `/recipes/editor?recipe_id=${sourceRecipeId}&mode=view`;
+      window.location.href = recipeDetailUrl(recipeId);
     } else if (event.target.closest(".edit-recipe")) {
       const targetId = draftRecipeId || (await request(`${api}/configuration/recipes/${sourceRecipeId}/draft`, { method: "POST" })).id;
       window.location.href = `/recipes/editor?recipe_id=${targetId}`;
@@ -3604,6 +3638,11 @@ byId("recipeHistoryList").addEventListener("click", async (event) => {
   }
 });
 
+byId("recipeDetailVersion").addEventListener("change", (event) => {
+  if (state.editorReadOnly && event.target.value) {
+    window.location.href = recipeDetailUrl(event.target.value);
+  }
+});
 byId("newRecipeFromLibrary").addEventListener("click", () => {
   byId("createRecipeForm").reset();
   byId("createRecipeForm").elements.capture_index.value = "1";
