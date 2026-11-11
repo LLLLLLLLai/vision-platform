@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     smb_connection_timeout_seconds: float = 15.0
     smb_transfer_parallelism: int = 2
     vlm_secret_key: str = ""
+    vlm_secret_key_file: str = "data/secrets/vlm.key"
+    ocr_service_base_url: str = "http://127.0.0.1:9024"
+    ocr_service_api_key: str = ""
+    ocr_service_timeout_seconds: float = 120.0
     vlm_request_max_image_pixels: int = 1_003_520
     vlm_request_jpeg_quality: int = 90
     # Historical reference-vector data remains readable for record traceability.

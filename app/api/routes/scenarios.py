@@ -60,6 +60,7 @@ NODE_TYPES = {
     "START",
     "VLM",
     "VISION_MODEL",
+    "OCR",
     "IMAGE_CROP",
     "IMAGE_ANNOTATE",
     "RULE",
@@ -371,6 +372,19 @@ def _validate_published_vision_model_node(database: Session, node: ScenarioNode)
             status_code=400,
             detail=f"模型节点“{node.name}”引用的权重文件不存在，不能发布场景。",
         )
+
+
+def _validate_ocr_node(node: ScenarioNode) -> None:
+    config = node.config_json or {}
+    try:
+        score = float(config.get("min_score", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="OCR 最低文字置信度必须是 0 到 1 的数字。") from exc
+    if not 0 <= score <= 1:
+        raise HTTPException(status_code=400, detail="OCR 最低文字置信度必须在 0 到 1 之间。")
+    image = (config.get("input_mapping") or {}).get("image_path") or config.get("image_path")
+    if not isinstance(image, str) or not image.strip():
+        raise HTTPException(status_code=400, detail="OCR 节点必须配置输入图片。")
 
 
 def _validate_image_crop_node(
@@ -730,7 +744,7 @@ def _validate_loop_body(database: Session, loop_node: ScenarioNode, add: Any) ->
     if not isinstance(body, list) or not 1 <= len(body) <= 20:
         add("ERROR", "LOOP_BODY_REQUIRED", f"循环节点“{loop_node.name}”需要添加 1 到 20 个循环体节点。", node=loop_node)
         return
-    allowed = {"VLM", "VISION_MODEL", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"}
+    allowed = {"VLM", "VISION_MODEL", "OCR", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"}
     previous_keys = {"loop_start"}
     entries: list[dict[str, Any]] = []
     for index, entry in enumerate(body, start=1):
@@ -752,6 +766,8 @@ def _validate_loop_body(database: Session, loop_node: ScenarioNode, add: Any) ->
                 _validate_vlm_node(database, child)
             elif node_type == "VISION_MODEL":
                 _validate_published_vision_model_node(database, child)
+            elif node_type == "OCR":
+                _validate_ocr_node(child)
             elif node_type == "IMAGE_CROP" and not (node_config.get("bbox") or node_config.get("objects") or (node_config.get("input_mapping") or {}).get("bbox") or (node_config.get("input_mapping") or {}).get("objects")):
                 raise HTTPException(status_code=400, detail="图片裁剪节点需要 bbox 或目标列表。")
             elif node_type == "IMAGE_ANNOTATE" and not (node_config.get("bbox") or node_config.get("objects") or (node_config.get("input_mapping") or {}).get("bbox") or (node_config.get("input_mapping") or {}).get("objects")):
@@ -907,12 +923,12 @@ def _workflow_preflight(
             node.node_type.upper() in {"LOOP", "ITERATION", "CONDITION_LOOP"}
             and (node.node_type.upper() != "LOOP" or (node.config_json or {}).get("operation") == "SUBFLOW")
             and any(
-                isinstance(child, dict) and child.get("node_type") in {"VLM", "VISION_MODEL"}
+                isinstance(child, dict) and child.get("node_type") in {"VLM", "VISION_MODEL", "OCR"}
                 for child in ((node.config_json or {}).get("body_nodes") or [])
             ) for node in nodes
         )
-        if node_types.isdisjoint({"VLM", "VISION_MODEL"}) and not has_loop_vlm and not has_loop_body_vision:
-            add("ERROR", "VISION_NODE_REQUIRED", "工作流至少需要一个 VLM 检测或模型检测节点。", suggestion="从节点库添加并连接 VLM 检测或训练模型节点。")
+        if node_types.isdisjoint({"VLM", "VISION_MODEL", "OCR"}) and not has_loop_vlm and not has_loop_body_vision:
+            add("ERROR", "VISION_NODE_REQUIRED", "工作流至少需要一个 VLM、训练模型或 OCR 节点。", suggestion="从节点库添加并连接识别节点。")
         try:
             _validate_workflow_graph(version)
         except HTTPException as exc:
@@ -921,6 +937,7 @@ def _workflow_preflight(
         validators: dict[str, Any] = {
             "VLM": lambda node: _validate_vlm_node(database, node),
             "VISION_MODEL": lambda node: _validate_published_vision_model_node(database, node),
+            "OCR": lambda node: _validate_ocr_node(node),
             "IMAGE_CROP": lambda node: _validate_image_crop_node(database, version, node),
             "IMAGE_ANNOTATE": lambda node: _validate_image_annotate_node(database, version, node),
         }
@@ -1936,6 +1953,7 @@ def _assistant_version(mode: str, design: SceneDesign, catalog: dict[str, Any]) 
         "START": set(), "END": {"output"},
         "VLM": {"vlm_model_id", "prompt", "image_path"},
         "VISION_MODEL": {"model_version_id", "image_path", "confidence"},
+        "OCR": {"image_path", "min_score"},
         "RULE": {"actual", "operator", "expected"},
         "IMAGE_CROP": {"image_path", "bbox", "objects", "padding_ratio"},
         "IMAGE_ANNOTATE": {"image_path", "bbox", "objects"},
@@ -2342,17 +2360,19 @@ def publish_scenario_version(
         node_types = {node.node_type.upper() for node in version.nodes if node.enabled}
         has_nested_vision = any(
             node.enabled and node.node_type.upper() in {"LOOP", "ITERATION", "CONDITION_LOOP"}
-            and any(isinstance(child, dict) and child.get("node_type") in {"VLM", "VISION_MODEL"} for child in (node.config_json or {}).get("body_nodes", []))
+            and any(isinstance(child, dict) and child.get("node_type") in {"VLM", "VISION_MODEL", "OCR"} for child in (node.config_json or {}).get("body_nodes", []))
             for node in version.nodes
         )
-        if node_types.isdisjoint({"VLM", "VISION_MODEL"}) and not has_nested_vision:
-            raise HTTPException(status_code=400, detail="工作流至少需要一个 VLM 检测或模型检测节点。")
+        if node_types.isdisjoint({"VLM", "VISION_MODEL", "OCR"}) and not has_nested_vision:
+            raise HTTPException(status_code=400, detail="工作流至少需要一个 VLM、训练模型或 OCR 节点。")
         _validate_workflow_graph(version)
         for node in version.nodes:
             if node.enabled and node.node_type.upper() == "VLM":
                 _validate_vlm_node(database, node)
             if node.enabled and node.node_type.upper() == "VISION_MODEL":
                 _validate_published_vision_model_node(database, node)
+            if node.enabled and node.node_type.upper() == "OCR":
+                _validate_ocr_node(node)
             if node.enabled and node.node_type.upper() == "IMAGE_CROP":
                 _validate_image_crop_node(database, version, node)
             if node.enabled and node.node_type.upper() == "IMAGE_ANNOTATE":

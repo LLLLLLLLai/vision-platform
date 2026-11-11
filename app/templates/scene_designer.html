@@ -154,7 +154,7 @@
     <aside class="workflow-palette" id="workflowPalette" aria-label="节点库">
         <div class="workflow-palette-header">
         <div><small>NODE LIBRARY</small><h2>节点库</h2><p>拖入画布后连接节点，配置会实时保存在当前草稿。</p></div>
-        <div class="workbench-panel-header-actions"><span class="workflow-palette-count" id="workflowPaletteCount">10</span><button class="workbench-panel-close" id="workflowPaletteClose" type="button" title="收起节点库" aria-label="收起节点库">‹</button></div>
+        <div class="workbench-panel-header-actions"><span class="workflow-palette-count" id="workflowPaletteCount">11</span><button class="workbench-panel-close" id="workflowPaletteClose" type="button" title="收起节点库" aria-label="收起节点库">‹</button></div>
       </div>
       <label class="workflow-palette-search" for="workflowNodeSearch"><span aria-hidden="true">⌕</span><input id="workflowNodeSearch" type="search" placeholder="搜索节点" autocomplete="off"></label>
       <div class="workflow-palette-scroll">
@@ -163,6 +163,7 @@
           <button type="button" class="palette-node palette-vision" draggable="true" data-node-type="VISION_MODEL" data-node-keywords="yolo 模型 训练 目标检测 分割 分类"><b>◉</b><span><strong>训练模型</strong><small>引用已发布的 YOLO 模型</small></span><i aria-hidden="true">＋</i></button>
         </div>
         <div class="palette-group" data-palette-group="image"><small>图像处理</small>
+          <button type="button" class="palette-node palette-ocr" draggable="true" data-node-type="OCR" data-node-keywords="ocr paddleocr 文字 文本 识别"><b>文</b><span><strong>OCR 文字识别</strong><small>PaddleOCR 图片转文字</small></span><i aria-hidden="true">＋</i></button>
           <button type="button" class="palette-node palette-crop" draggable="true" data-node-type="IMAGE_CROP" data-node-keywords="裁剪 图片 bbox 检测框 目标框 roi 批量"><b>✂</b><span><strong>图片裁剪</strong><small>单框或目标列表批量裁剪</small></span><i aria-hidden="true">＋</i></button>
           <button type="button" class="palette-node palette-annotate" draggable="true" data-node-type="IMAGE_ANNOTATE" data-node-keywords="画框 标注 图片 bbox 检测框 分割 mask 结果图"><b>▣</b><span><strong>图片画框</strong><small>把目标框和轮廓绘制到图片</small></span><i aria-hidden="true">＋</i></button>
         </div>
@@ -222,7 +223,7 @@
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260929-02" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/scene_designer.css') }}?v=20261008-01" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/scene_designer_dify.css') }}?v=20261104-4" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20261108-collection"></script>
+<script src="{{ url_for('static', path='/js/scene_designer.js') }}?v=20261111-ocr"></script>
 <link href="{{ url_for('static', path='/css/scene_assistant.css') }}?v=20261104-1" rel="stylesheet">
 <script src="{{ url_for('static', path='/js/scene_design_assistant.js') }}?v=20261104-1"></script>
 {% endblock %}

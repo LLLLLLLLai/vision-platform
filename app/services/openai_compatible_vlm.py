@@ -22,6 +22,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from app.core.config import settings
 from app.models.intelligence import VlmModelConfig
 from app.services.inference_concurrency import vlm_inference_gate
+from app.services.vlm_secret_store import load_master_key
 
 
 class VlmConfigurationError(RuntimeError):
@@ -41,14 +42,9 @@ INSPECTION_VLM_SYSTEM_PROMPT = (
 )
 
 
-def _fernet() -> Any:
+def _fernet(*, create: bool = False) -> Any:
     """Load Fernet lazily so read-only installations need no crypto dependency."""
 
-    if not settings.vlm_secret_key:
-        raise VlmConfigurationError(
-            "未设置 VLM_SECRET_KEY，不能把 API Key 保存到数据库。"
-            "请改用环境变量名称，或在 .env 中配置 Fernet 密钥。"
-        )
     try:
         from cryptography.fernet import Fernet
     except ImportError as exc:  # pragma: no cover - depends on deployment extras
@@ -56,13 +52,17 @@ def _fernet() -> Any:
             "缺少 cryptography 依赖，无法加密保存 API Key。"
         ) from exc
     try:
-        return Fernet(settings.vlm_secret_key.encode("utf-8"))
-    except (TypeError, ValueError) as exc:
-        raise VlmConfigurationError("VLM_SECRET_KEY 不是有效的 Fernet 密钥。") from exc
+        return Fernet(load_master_key(create=create))
+    except FileNotFoundError as exc:
+        raise VlmConfigurationError("VLM 加密主密钥缺失，请恢复原 data/secrets/vlm.key 或配置原 VLM_SECRET_KEY；不要生成新密钥覆盖旧配置。") from exc
+    except OSError as exc:
+        raise VlmConfigurationError("无法读写 VLM 加密密钥文件，请检查 VLM_SECRET_KEY_FILE 及目录权限。") from exc
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise VlmConfigurationError("VLM 加密主密钥格式无效，需要有效的 Fernet 密钥。") from exc
 
 
-def encrypt_api_key(value: str) -> str:
-    return _fernet().encrypt(value.encode("utf-8")).decode("utf-8")
+def encrypt_api_key(value: str, *, allow_create: bool = True) -> str:
+    return _fernet(create=allow_create).encrypt(value.encode("utf-8")).decode("utf-8")
 
 
 def decrypt_api_key(value: str) -> str:

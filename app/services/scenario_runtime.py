@@ -43,6 +43,7 @@ from app.services.openai_compatible_vlm import (
 from app.services.dataset_collection_service import collect_scene_image, is_collection_only, try_collect_roi_for_matching_datasets
 from app.services.loop_body_graph import loop_body_connections
 from app.services.node_trace_status import node_trace_state
+from app.services.paddle_ocr_client import recognize_text
 from app.services.remote_yolo_inference import run_remote_yolo_inference
 from app.services.scene_s3_storage import SceneS3Storage, SceneS3StorageError
 from app.services.vision_model_runtime import (
@@ -792,6 +793,16 @@ class ScenarioRuntime:
                             result["preview_image_url"] = preview["image_url"]
                         except ScenarioRuntimeError as exc:
                             result["preview_error"] = str(exc)
+                elif node_type == "OCR":
+                    config = node.config_json or {}
+                    node_context = _node_input_mapping(config, runtime_context)
+                    node_runtime_context = {**runtime_context, "params": node_context}
+                    node_image_path = node_context.get("image_path") if "image_path" in node_context else _render(config.get("image_path"), node_runtime_context)
+                    if not isinstance(node_image_path, str) or not node_image_path.strip():
+                        raise ScenarioRuntimeError("OCR 输入图片引用为空，请检查上游裁剪输出；不会改用原图识别。")
+                    min_score = float(_render(config.get("min_score", 0.0), node_runtime_context))
+                    trace_input = {"image_path": node_image_path, "min_score": min_score, "engine": "PaddleOCR"}
+                    result = await recognize_text(node_image_path, min_score=min_score)
                 elif node_type == "IMAGE_CROP":
                     config = node.config_json or {}
                     node_context = _node_input_mapping(config, runtime_context)
@@ -936,7 +947,7 @@ class ScenarioRuntime:
                         )
                     else:
                         previous = dict(final_output or {})
-                        if last_node_type in {"VISION_MODEL", "IMAGE_CROP", "IMAGE_ANNOTATE"}:
+                        if last_node_type in {"VISION_MODEL", "OCR", "IMAGE_CROP", "IMAGE_ANNOTATE"}:
                             previous.pop("result", None)
                             previous.pop("reason", None)
                         result = _complete_workflow_end_output(previous, quality_output)
@@ -1485,7 +1496,7 @@ class ScenarioRuntime:
         aggregate = str(config.get("aggregate") or "ALL_OK").upper()
         if aggregate not in {"ALL_OK", "ANY_OK", "COLLECT_ONLY"}:
             raise ScenarioRuntimeError("循环汇总方式不受支持。")
-        allowed_types = {"VLM", "VISION_MODEL", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"}
+        allowed_types = {"VLM", "VISION_MODEL", "OCR", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"}
         keys = {"loop_start", "loop_end"}
         body_nodes = [ScenarioNode(id=0, node_key="loop_start", name="循环开始", node_type="START", sort_order=0, config_json={}, enabled=True)]
         for position, item in enumerate(body, start=1):

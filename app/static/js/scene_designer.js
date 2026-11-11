@@ -71,10 +71,10 @@
   const isDraft = () => currentVersion()?.status === "DRAFT";
   const modeLabel = (mode) => mode === "WORKFLOW" ? "流程检测" : "VLM 检测";
   const nodeTypeLabel = (type) => ({
-    START: "开始", END: "结束", VLM: "VLM 检测", VISION_MODEL: "训练模型", IMAGE_CROP: "图片裁剪", IMAGE_ANNOTATE: "图片画框", RULE: "规则判断", WEB_API: "Web 接口", S3_UPLOAD: "S3 上传", IF: "条件分支", LOOP: "旧版循环", ITERATION: "遍历处理", CONDITION_LOOP: "条件循环",
+    START: "开始", END: "结束", VLM: "VLM 检测", VISION_MODEL: "训练模型", OCR: "OCR 文字识别", IMAGE_CROP: "图片裁剪", IMAGE_ANNOTATE: "图片画框", RULE: "规则判断", WEB_API: "Web 接口", S3_UPLOAD: "S3 上传", IF: "条件分支", LOOP: "旧版循环", ITERATION: "遍历处理", CONDITION_LOOP: "条件循环",
   }[String(type || "").toUpperCase()] || type);
   const nodeTypeIcon = (type) => ({
-    START: "▶", END: "■", VLM: "◇", VISION_MODEL: "◉", IMAGE_CROP: "✂", IMAGE_ANNOTATE: "▣", RULE: "✓", WEB_API: "↗", S3_UPLOAD: "☁", IF: "?", LOOP: "↻", ITERATION: "⇢", CONDITION_LOOP: "↻",
+    START: "▶", END: "■", VLM: "◇", VISION_MODEL: "◉", OCR: "文", IMAGE_CROP: "✂", IMAGE_ANNOTATE: "▣", RULE: "✓", WEB_API: "↗", S3_UPLOAD: "☁", IF: "?", LOOP: "↻", ITERATION: "⇢", CONDITION_LOOP: "↻",
   }[String(type || "").toUpperCase()] || "◇");
   const statusClass = (status) => {
     const value = String(status || "DRAFT").toLowerCase();
@@ -746,6 +746,7 @@
   function defaultNodeConfig(type) {
     if (type === "VLM") return { vlm_mode: "CUSTOM", prompt: "请检查图片并严格按 JSON 返回 result、confidence、reason。", context: {}, vlm_parameters: { temperature: 0, max_tokens: 1024 } };
     if (type === "VISION_MODEL") return { confidence: 0.25, iou: 0.45, context: {} };
+    if (type === "OCR") return { image_path: "{{ input.image_path }}", min_score: 0, output_mapping: {} };
     if (type === "IMAGE_CROP") return { image_path: "{{ input.image_path }}", bbox: "", objects: "", padding_ratio: 0.05, output_mapping: {} };
     if (type === "IMAGE_ANNOTATE") return { image_path: "{{ input.image_path }}", objects: "", bbox: "", draw_masks: true, show_label: true, show_confidence: true, line_width: 3, output_mapping: {} };
     if (type === "RULE") return { actual: "", operator: "EQUALS", expected: "OK" };
@@ -758,7 +759,7 @@
     return {};
   }
   function nodeKeyFor(type) {
-    const prefix = ({ VLM: "vlm", VISION_MODEL: "model", IMAGE_CROP: "crop", IMAGE_ANNOTATE: "annotate", RULE: "rule", WEB_API: "api", S3_UPLOAD: "s3", IF: "if", LOOP: "loop", ITERATION: "iteration", CONDITION_LOOP: "condition_loop" }[type] || "node");
+    const prefix = ({ VLM: "vlm", VISION_MODEL: "model", OCR: "ocr", IMAGE_CROP: "crop", IMAGE_ANNOTATE: "annotate", RULE: "rule", WEB_API: "api", S3_UPLOAD: "s3", IF: "if", LOOP: "loop", ITERATION: "iteration", CONDITION_LOOP: "condition_loop" }[type] || "node");
     let index = 1;
     const keys = new Set([...(currentVersion()?.nodes || []).map((node) => node.node_key), ...state.pendingNodeKeys]);
     while (keys.has(`${prefix}_${index}`)) index += 1;
@@ -1161,6 +1162,12 @@
         contractDescriptor("task_type", "TEXT", "模型任务类型"),
         contractDescriptor("image", "JSON", "图片尺寸信息"),
       ],
+      OCR: [
+        contractDescriptor("text", "TEXT", "识别文字（换行合并）"),
+        contractDescriptor("texts", "JSON", "文字行数组"),
+        contractDescriptor("lines", "JSON", "文字、置信度及坐标"),
+        contractDescriptor("text_count", "NUMBER", "文字行数"),
+      ],
       IMAGE_CROP: [
         contractDescriptor("result", "RESULT", "裁剪状态"),
         contractDescriptor("image_path", "IMAGE", "裁剪图片"),
@@ -1276,6 +1283,7 @@
         contractDescriptor("image_path", "IMAGE", "待检测图片"),
         ...Object.keys(config.input_mapping ?? config.context ?? {}).map((name) => contractDescriptor(name, "ANY", `模型参数 · ${name}`)),
       ],
+      OCR: [contractDescriptor("image_path", "IMAGE", "待识别图片")],
       IMAGE_CROP: [contractDescriptor("image_path", "IMAGE", "输入图片"), contractDescriptor("bbox", "BBOX", "单个定位框"), contractDescriptor("objects", "OBJECT_LIST", "目标列表（批量裁剪）")],
       IMAGE_ANNOTATE: [contractDescriptor("image_path", "IMAGE", "输入图片"), contractDescriptor("objects", "OBJECT_LIST", "目标列表"), contractDescriptor("bbox", "BBOX", "单个定位框")],
       RULE: [contractDescriptor("actual", "ANY", "实际值"), contractDescriptor("expected", "ANY", "期望值")],
@@ -1834,7 +1842,7 @@
     setInspectorTab(state.inspectorTab);
   }
 
-  const loopBodyTypes = ["VLM", "VISION_MODEL", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"];
+  const loopBodyTypes = ["VLM", "VISION_MODEL", "OCR", "IMAGE_CROP", "IMAGE_ANNOTATE", "RULE", "IF", "WEB_API", "S3_UPLOAD"];
   const loopTypes = new Set(["LOOP", "ITERATION", "CONDITION_LOOP"]);
 
   function conditionUpdateRowMarkup(key = "", update = {}, readonly = false) {
@@ -1935,6 +1943,7 @@
     if (entry.node_type === "IMAGE_ANNOTATE") return `${imageField()}${loopBodyField("目标列表", "objects", config.objects || "", { placeholder: "{{ nodes.body_model_1.objects }}" })}${loopBodyField("单个 bbox", "bbox", config.bbox || "", { placeholder: "{{ input.item.bbox }}" })}`;
     if (["RULE", "IF"].includes(entry.node_type)) return `${loopBodyField("实际值", "actual", config.actual || "", { placeholder: "{{ nodes.body_model_1.predicted_label }}" })}<label><span>运算符</span><select class="form-select form-select-sm" data-loop-field="operator">${ruleOperators.map(([operator, label]) => `<option value="${operator}" ${config.operator === operator ? "selected" : ""}>${label}</option>`).join("")}</select></label>${loopBodyField("期望值", "expected", config.expected ?? "", { placeholder: "{{ input.expected_label }}" })}`;
     if (entry.node_type === "WEB_API") return `<label><span>请求方法</span><select class="form-select form-select-sm" data-loop-field="method">${["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => `<option value="${method}" ${(config.method || "POST") === method ? "selected" : ""}>${method}</option>`).join("")}</select></label>${loopBodyField("接口地址", "url", config.url || "", { placeholder: "https://..." })}${loopBodyField("请求头 JSON", "headers", typeof config.headers === "string" ? config.headers : JSON.stringify(config.headers || {}), { multiline: true })}<label><span>请求格式</span><select class="form-select form-select-sm" data-loop-field="request_format"><option value="JSON" ${(config.request_format || "JSON") === "JSON" ? "selected" : ""}>JSON</option><option value="TEXT" ${config.request_format === "TEXT" ? "selected" : ""}>文本</option></select></label>${loopBodyField("请求体（支持变量）", "body", typeof config.body === "string" ? config.body : JSON.stringify(config.body || {}), { multiline: true })}<label><span>响应格式</span><select class="form-select form-select-sm" data-loop-field="response_format"><option value="JSON" ${(config.response_format || "JSON") === "JSON" ? "selected" : ""}>JSON</option><option value="TEXT" ${config.response_format === "TEXT" ? "selected" : ""}>文本</option></select></label>`;
+    if (entry.node_type === "OCR") return `${imageField()}${loopBodyField("最低文字置信度（0~1）", "min_score", config.min_score ?? 0, { type: "number" })}`;
     if (entry.node_type === "S3_UPLOAD") return `${imageField()}${loopBodyField("对象键（可选）", "key", config.key || "")}`;
     return "";
   }
@@ -2303,6 +2312,8 @@
           ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>${profile.supports_mask ? '分割模型输出目标类别、置信度、bbox 和 mask；流程调试会显示轮廓预览。' : '目标检测只输出目标数量、类别、置信度和 bbox；流程调试会显示画框预览。'}需要质量判定时，再单独连接规则节点。</p></div><div class="form-row"><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label><label><span>IoU 阈值</span><input id="nodeIou" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.iou ?? 0.45)}" ${readonly ? "readonly" : ""}></label></div>`
           : `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>请先由该模型适配器声明实际输出字段后，再把特定字段映射给后续节点。</p></div><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label>`;
       fields = `<label><span>已发布训练模型版本</span><select id="nodeVisionModelVersion" class="form-select" ${readonly ? "disabled" : ""}>${modelVersionOptions(config.model_version_id)}</select></label>${taskFields}${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
+    } else if (node.node_type === "OCR") {
+      fields = `<div class="node-model-task-note"><strong>PaddleOCR 文字识别</strong><p>只识别文字，不判断 OK/NG。后续节点可引用 text 或 texts；多张裁剪图可放入遍历节点逐张识别。</p></div>${variableFieldMarkup({ label: "输入图片", id: "nodeOcrImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ nodes.crop_1.image_path }}", scope: "INPUT", acceptedTypes: "IMAGE", ariaLabel: "OCR 输入图片", readonly })}<label><span>最低文字置信度</span><input id="nodeOcrMinScore" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.min_score ?? 0)}" ${readonly ? "readonly" : ""}></label>${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_CROP") {
       fields = `<div class="node-model-task-note"><strong>单框或多目标裁剪</strong><p>填“目标列表”时，对每个 bbox 裁剪并输出 <code>crops[]</code>，交给循环节点逐项处理；不填时按单个 bbox 裁剪。分割模型同样使用目标 bbox 裁剪，mask 不会作为裁剪边界。</p>${cropBboxSourceHint(node)}</div>${variableFieldMarkup({ label: "输入图片", id: "nodeCropImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ input.image_path }}", scope: "INPUT", acceptedTypes: "IMAGE", ariaLabel: "输入图片", readonly })}${variableFieldMarkup({ label: "目标列表（批量裁剪）", id: "nodeCropObjects", value: config.objects || "", placeholder: "{{ nodes.model_1.objects }}", scope: "INPUT", acceptedTypes: "OBJECT_LIST", ariaLabel: "批量裁剪目标列表", readonly })}${variableFieldMarkup({ label: "单个裁剪框（bbox）", id: "nodeCropBbox", value: config.bbox || "", placeholder: "{{ nodes.model_1.objects.0.bbox }} 或 [20, 40, 320, 280]", scope: "INPUT", acceptedTypes: "BBOX", ariaLabel: "裁剪框", readonly })}<label><span>边缘扩展比例</span><input id="nodeCropPadding" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.padding_ratio ?? 0.05)}" ${readonly ? "readonly" : ""}></label>${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_ANNOTATE") {
@@ -2736,6 +2747,9 @@
   }
 
   function workflowTraceArtifactMarkup(output) {
+    if (typeof output?.text === "string" && Array.isArray(output?.texts)) {
+      return `<section class="workflow-ocr-output"><header><strong>识别文字</strong><small>${escapeHtml(output.text_count ?? output.texts.length)} 行</small></header><pre>${escapeHtml(output.text || "未识别到文字")}</pre></section>`;
+    }
     const entries = Array.isArray(output?.crops) ? output.crops : output?.aggregate && Array.isArray(output?.items) ? output.items : null;
     if (entries) {
       if (!entries.length) return '<p class="muted-copy">没有可展示的目标裁剪图。</p>';
@@ -2925,6 +2939,12 @@
         }
         config.input_mapping = readParameterRows("nodeInputParameters", "节点输入参数");
         config.context = config.input_mapping;
+        config.output_mapping = readParameterRows("nodeOutputParameters", "节点输出参数");
+      } else if (node.node_type === "OCR") {
+        config.image_path = byId("nodeOcrImagePath").value.trim();
+        config.min_score = Number(byId("nodeOcrMinScore").value);
+        if (!config.image_path) throw new Error("请选择 OCR 输入图片。");
+        if (!Number.isFinite(config.min_score) || config.min_score < 0 || config.min_score > 1) throw new Error("OCR 最低文字置信度必须在 0 到 1 之间。");
         config.output_mapping = readParameterRows("nodeOutputParameters", "节点输出参数");
       } else if (node.node_type === "IMAGE_CROP") {
         const bbox = byId("nodeCropBbox").value.trim();

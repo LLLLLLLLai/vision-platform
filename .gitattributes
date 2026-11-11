@@ -1,0 +1,2 @@
+vision-models/paddleocr/**/inference.* -text
+vision-models/paddleocr/**/*.pdiparams binary

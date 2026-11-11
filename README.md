@@ -4,6 +4,8 @@
 
 ## 当前文档
 
+- [OCR 流程节点与 VLM 密钥保存说明](docs/OCR-Node-and-VLM-Keys.md)
+
 - [场景仅采集模式：使用、接口约定和回归验证](docs/Collection-Only-Scenes.md)
 
 ### 无模型时先采集 ROI
@@ -82,11 +84,11 @@ app/static/vendor/bootstrap/5.3.7/LICENSE
 
 这些文件已与 [Bootstrap 5.3.7 npm 发布包](https://www.npmjs.com/package/bootstrap/v/5.3.7)逐项核对 SHA-256；`bootstrap.bundle.min.js` 已包含页面所需的 Popper。项目自有样式和脚本位于 `app/static/css/`、`app/static/js/`。迁移到无公网环境时，只需将仓库中的 `app/static/` 一并部署，不需要在浏览器端额外下载 CSS 或 JS；Python 依赖、模型权重、数据库、SMB/S3 和 VLM 服务仍须按部署环境准备。
 
-仓库不包含运行时 `.env`、图片、训练产物或模型权重；它们由 `.gitignore` 排除，部署前应通过安全渠道单独迁移，不要为了“完整上传”而提交凭证或生产数据。
+仓库包含 `vision-models/paddleocr/` 下的 PP-OCRv5 mobile 检测与识别推理模型（普通 Git 文件，无需 Git LFS），可随代码离线部署。运行时 `.env`、加密主密钥、生产图片、训练产物及其他模型权重仍由 `.gitignore` 排除，部署前应通过安全渠道单独迁移，不要提交凭证或生产数据。
 
-## 本地模型服务已下线
+## 模型接入与 OCR 服务
 
-以下旧版独立服务及其启动、下载脚本已删除：
+以下旧版独立服务及其启动、下载脚本已删除，不再用于生产检测：
 
 ```text
 DINOv2
@@ -95,7 +97,7 @@ PaddleOCR
 本地 Qwen3-VL
 ```
 
-当前平台仅通过“VLM 模型配置”调用用户维护的 **OpenAI 兼容 VLM 接口**，并通过流程场景调用已发布的 YOLO 权重。
+当前平台通过“VLM 模型配置”调用用户维护的 **OpenAI 兼容 VLM 接口**，并通过流程场景调用已发布的 YOLO 权重。新增加的 **OCR 文字识别节点** 使用独立环境中的 `ocr_service/server.py`，与旧版算法接口无关。默认监听本机 `9024`，通过 `start-ocr.ps1` 或 `bash start-ocr.sh` 启动；输入图片，输出文字、置信度和文字坐标，不自动判断 OK/NG。模型目录配置为空时自动读取仓库附带权重，详见 [OCR 部署说明](docs/OCR-Node-and-VLM-Keys.md)。
 
 - `GET /api/v1/algorithms/status` 仅返回旧服务已下线说明。
 - `POST /api/v1/algorithms/vlm/judge` 返回 `410 Gone`，请改用已发布 VLM 场景接口。
@@ -125,7 +127,9 @@ app/
 config/                   环境和 Harness 配置说明
 scripts/                  初始化、迁移和测试脚本
 tests/                    自动化测试
-vision-models/            YOLO 基础/发布权重，不纳入 Git
+ocr_service/              独立 PaddleOCR 服务和依赖清单
+vision-models/paddleocr/   附带的 OCR 推理权重、许可证及校验和
+vision-models/             其他本地模型权重，不纳入 Git
 uploads/                  配方图和数据集素材，不纳入 Git
 detection_results/        原图暂存、ROI 图和结果图，不纳入 Git
 data/training_runs/       YOLO 训练产物，不纳入 Git

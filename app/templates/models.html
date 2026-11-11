@@ -55,7 +55,8 @@
       <div class="modal-header"><div><small class="text-primary">OPENAI COMPATIBLE API</small><h2 class="modal-title fs-5" id="vlmModelModalTitle">创建 VLM 模型</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="关闭"></button></div>
       <div class="modal-body stack-form">
         <input id="vlmEditId" type="hidden">
-        <p class="muted-copy">Base URL 可填写服务根地址或 <code>/v1</code> 地址，例如 <code>http://127.0.0.1:8000</code>。误粘贴 <code>/v1/models</code> 也会自动兼容。API Key 优先使用环境变量，也可在设置 <code>VLM_SECRET_KEY</code> 后加密保存。</p>
+        <div class="alert alert-danger" id="vlmModelFormAlert" role="alert" hidden></div>
+        <p class="muted-copy">Base URL 填写服务根地址或 <code>/v1</code> 地址。API Key 可直接填写，平台自动加密保存；编辑时留空保留原密钥，不回显明文。</p>
         <div class="form-row">
           <label><span>模型编码</span><input class="form-control" name="code" placeholder="QWEN_VL_REVIEW" required></label>
           <label><span>模型名称</span><input class="form-control" name="name" placeholder="Qwen 视觉复核" required></label>
@@ -63,7 +64,7 @@
         <label><span>Base URL</span><input class="form-control" name="base_url" placeholder="https://example.com/v1" required></label>
         <label><span>模型 ID</span><input class="form-control" name="model_name" placeholder="Qwen/Qwen3-VL-4B-Instruct" required></label>
         <div class="form-row">
-          <label><span>API Key 环境变量（推荐）</span><input class="form-control" name="api_key_env_name" placeholder="OPENAI_API_KEY"></label>
+          <label><span>API Key 环境变量（可选，与直接填写二选一）</span><input class="form-control" name="api_key_env_name" placeholder="高级部署可填 OPENAI_API_KEY"></label>
           <label><span>API Key（加密保存）</span><input class="form-control" name="api_key" type="password" placeholder="编辑时留空可保留原配置"><small id="vlmApiKeyState" class="muted-copy">未填写时不会保存 API Key。</small></label>
         </div>
         <div class="form-check"><input class="form-check-input" name="thinking_enabled" type="checkbox" id="thinkingEnabled"><label class="form-check-label" for="thinkingEnabled">启用思考模式（由服务端决定是否支持）</label></div>
@@ -186,5 +187,5 @@
 </div>
 
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20261103-06" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/models.js') }}?v=20261104-07"></script>
+<script src="{{ url_for('static', path='/js/models.js') }}?v=20261111-key"></script>
 {% endblock %}

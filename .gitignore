@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .env
+data/secrets/
+*.key
 data/*.db
 data/*.sqlite3
 data/logs/
@@ -27,6 +29,18 @@ embeddings/*
 !embeddings/.gitkeep
 vision-models/**
 !vision-models/README.md
+!vision-models/paddleocr/
+!vision-models/paddleocr/README.md
+!vision-models/paddleocr/LICENSE
+!vision-models/paddleocr/SHA256SUMS
+!vision-models/paddleocr/PP-OCRv5_mobile_det/
+!vision-models/paddleocr/PP-OCRv5_mobile_det/inference.json
+!vision-models/paddleocr/PP-OCRv5_mobile_det/inference.pdiparams
+!vision-models/paddleocr/PP-OCRv5_mobile_det/inference.yml
+!vision-models/paddleocr/PP-OCRv5_mobile_rec_infer/
+!vision-models/paddleocr/PP-OCRv5_mobile_rec_infer/inference.json
+!vision-models/paddleocr/PP-OCRv5_mobile_rec_infer/inference.pdiparams
+!vision-models/paddleocr/PP-OCRv5_mobile_rec_infer/inference.yml
 vision-models/**/.cache/
 weights/
 *.pt

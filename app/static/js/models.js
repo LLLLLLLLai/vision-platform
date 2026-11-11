@@ -412,6 +412,7 @@
   function openVlmModal(model = null) {
     const form = byId("vlmModelForm");
     form.reset();
+    byId("vlmModelFormAlert").hidden = true;
     byId("vlmEditId").value = model?.id || "";
     form.elements.code.readOnly = Boolean(model);
     byId("vlmModelModalTitle").textContent = model ? "编辑 VLM 模型" : "创建 VLM 模型";
@@ -529,8 +530,13 @@
     };
     delete payload.extra_params_json;
     payload.extra_params_json = extra;
-    if (!payload.api_key) delete payload.api_key;
-    if (!payload.api_key_env_name) delete payload.api_key_env_name;
+    if (!payload.api_key?.trim()) delete payload.api_key;
+    if (!payload.api_key_env_name?.trim()) delete payload.api_key_env_name;
+    if (payload.api_key && payload.api_key_env_name) {
+      byId("vlmModelFormAlert").textContent = "API Key 和环境变量名称只能填写一种；直接保存密钥时请清空环境变量名称。";
+      byId("vlmModelFormAlert").hidden = false;
+      return;
+    }
     if (editId) delete payload.code;
     try {
       await request(editId ? `${api}/vlm-models/${editId}` : `${api}/vlm-models`, {
@@ -546,7 +552,8 @@
       await loadData();
       notify(editId ? "VLM 模型已更新。" : "VLM 模型已创建。卡片已加入模型中心。");
     } catch (error) {
-      notify(error.message, "danger");
+      byId("vlmModelFormAlert").textContent = error.message;
+      byId("vlmModelFormAlert").hidden = false;
     }
   }
 

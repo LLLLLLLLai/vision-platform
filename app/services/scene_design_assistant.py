@@ -21,7 +21,7 @@ class DesignNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_key: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
     name: str = Field(min_length=1, max_length=100)
-    node_type: Literal["START", "END", "VLM", "VISION_MODEL", "RULE", "IMAGE_CROP", "IMAGE_ANNOTATE"]
+    node_type: Literal["START", "END", "VLM", "VISION_MODEL", "OCR", "RULE", "IMAGE_CROP", "IMAGE_ANNOTATE"]
     config_json: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -81,6 +81,7 @@ DESIGN_SYSTEM_PROMPT = """你是工业视觉平台的场景设计助手，不是
 START：{}，系统会注入图片image_path及input_fields。
 VLM：{"vlm_model_id":ID,"prompt":"检测提示词", "image_path":"{{ input.image_path }}"}，输出result、confidence、reason。
 VISION_MODEL：{"model_version_id":ID,"image_path":"{{ input.image_path }}","confidence":0.25}。
+OCR：{"image_path":"{{ input.image_path }}","min_score":0}，使用 PaddleOCR 输出 text（换行合并文字）、texts 数组、lines 文字与置信度，不做 OK/NG 判断；可连接 RULE 校验文字。
 分类模型输出predicted_label、classification.top1_label、confidence，不输出bbox；
 目标检测/分割输出objects（每项label、bbox、confidence）、object_count；分割另有mask。模型节点本身不判断OK/NG。
 RULE：{"actual":"{{ nodes.classify.predicted_label }}","operator":"EQUALS","expected":"{{ input.expected_label }}"}；

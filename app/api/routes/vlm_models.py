@@ -76,12 +76,15 @@ def _validate_secret_inputs(api_key: str | None, api_key_env_name: str | None) -
         )
 
 
-def _apply_api_key(model: VlmModelConfig, api_key: str | None) -> None:
-    if not api_key:
+def _apply_api_key(database: Session, model: VlmModelConfig, api_key: str | None) -> None:
+    if not api_key or not api_key.strip():
         return
     try:
-        model.api_key_ciphertext = encrypt_api_key(api_key.strip())
+        with database.no_autoflush:
+            existing = database.scalar(select(VlmModelConfig.id).where(VlmModelConfig.api_key_ciphertext.is_not(None)).limit(1))
+        model.api_key_ciphertext = encrypt_api_key(api_key.strip(), allow_create=existing is None)
         model.api_key_hint = api_key_hint(api_key.strip())
+        model.api_key_env_name = None
     except VlmConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -117,7 +120,7 @@ def create_vlm_model(
         max_tokens=payload.max_tokens,
         timeout_seconds=payload.timeout_seconds,
     )
-    _apply_api_key(model, payload.api_key)
+    _apply_api_key(database, model, payload.api_key)
     if model.api_key_env_name:
         model.api_key_hint = f"env:{model.api_key_env_name}"
     database.add(model)
@@ -158,7 +161,7 @@ def update_vlm_model(
         if model.api_key_env_name:
             model.api_key_ciphertext = None
             model.api_key_hint = f"env:{model.api_key_env_name}"
-    _apply_api_key(model, api_key)
+    _apply_api_key(database, model, api_key)
     for key, value in values.items():
         if key == "api_key_env_name":
             continue
