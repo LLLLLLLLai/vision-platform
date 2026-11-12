@@ -6,6 +6,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecipeDatasetUiAssetTests(unittest.TestCase):
+    def test_dataset_augmentation_errors_stay_visible_and_helpers_load_first(self) -> None:
+        template = (PROJECT_ROOT / "app/templates/datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app/static/js/datasets.js").read_text(encoding="utf-8")
+        self.assertLess(template.index("dataset_helpers.js"), template.index("/datasets.js"))
+        self.assertIn('id="augmentationFeedback"', template)
+        self.assertIn("formatRequestError(payload, response.status)", script)
+        self.assertIn("augmentationBatches(sourceIds, payload.copies_per_item", script)
+        self.assertIn("showAugmentationFeedback(message)", script)
+        self.assertIn("勿重复生成", script)
+
+    def test_annotation_fill_has_explicit_translucent_fallback(self) -> None:
+        script = (PROJECT_ROOT / "app/static/js/datasets.js").read_text(encoding="utf-8")
+        styles = (PROJECT_ROOT / "app/static/css/datasets.css").read_text(encoding="utf-8")
+        box_styles = styles.split("\n.annotation-svg-box {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("color-mix", box_styles)
+        self.assertIn("fill-opacity: .08", box_styles)
+        self.assertIn("stroke-width: 1.5px", box_styles)
+        self.assertIn('fill="${color}" fill-opacity="0.08" stroke="${color}"', script)
+
     def test_recipe_details_follow_displayed_version_not_production_fallback(self) -> None:
         script = (PROJECT_ROOT / "app/static/js/workspace.js").read_text(encoding="utf-8")
         action = script.split('if (event.target.closest(".detail-recipe")) {', 1)[1].split("} else if", 1)[0]

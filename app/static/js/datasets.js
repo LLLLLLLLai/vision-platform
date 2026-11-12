@@ -2,6 +2,7 @@
   const api = "/api/v1";
   const itemPageSize = 48;
   const augmentationBatchImageLimit = 200;
+  const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor } = window.VisionDatasetHelpers;
   const state = {
     datasets: [],
     selectedId: null,
@@ -51,7 +52,7 @@
   const request = async (url, options = {}) => {
     const response = await fetch(url, options);
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.detail || payload.message || "请求失败");
+    if (!response.ok) throw new Error(formatRequestError(payload, response.status));
     return payload;
   };
   const notify = (message, type = "success") => {
@@ -367,24 +368,18 @@
 
   function augmentationRange(enabledId, minimumId, maximumId, minimumKey, maximumKey, neutral) {
     if (!byId(enabledId).checked) return { [minimumKey]: neutral, [maximumKey]: neutral };
-    const minimum = Number(byId(minimumId).value);
-    const maximum = Number(byId(maximumId).value);
-    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum > maximum) {
-      throw new Error("增强参数的最小值不能大于最大值，并且必须为有效数字。");
+    const minimum = augmentationNumber(byId(minimumId).value, minimumKey);
+    const maximum = augmentationNumber(byId(maximumId).value, maximumKey);
+    if (minimum > maximum) {
+      throw new Error(`${byId(enabledId).closest("label").textContent.trim()}：最小值不能大于最大值。`);
     }
     return { [minimumKey]: minimum, [maximumKey]: maximum };
   }
 
   function buildAugmentationPayload() {
-    const copiesPerItem = Number(byId("augmentationCopiesPerItem").value);
-    if (!Number.isInteger(copiesPerItem) || copiesPerItem < 1 || copiesPerItem > 20) {
-      throw new Error("每张原图生成数量需为 1 到 20。");
-    }
+    const copiesPerItem = augmentationNumber(byId("augmentationCopiesPerItem").value, "copies_per_item");
     const seedText = byId("augmentationSeed").value.trim();
-    const seed = seedText ? Number(seedText) : null;
-    if (seed !== null && (!Number.isInteger(seed) || seed < 0 || seed > 2147483647)) {
-      throw new Error("随机种子需为 0 到 2147483647 的整数。");
-    }
+    const seed = seedText ? augmentationNumber(seedText, "seed") : null;
     return {
       copies_per_item: copiesPerItem,
       seed,
@@ -438,6 +433,13 @@
     byId("augmentationProgress").querySelector(".progress").setAttribute("aria-valuenow", String(percentage));
   }
 
+  function showAugmentationFeedback(message = "", tone = "danger") {
+    const element = byId("augmentationFeedback");
+    element.hidden = !message;
+    element.className = `alert alert-${tone} mb-0`;
+    element.textContent = message;
+  }
+
   function openDatasetAugmentation() {
     const dataset = selected();
     if (!supportsDatasetAugmentation(dataset)) {
@@ -445,6 +447,7 @@
       return;
     }
     byId("datasetAugmentationForm").reset();
+    showAugmentationFeedback();
     byId("augmentationCopiesPerItem").value = "1";
     byId("augmentationSeed").value = "";
     const eligibleIds = new Set((dataset.items || [])
@@ -463,11 +466,12 @@
     if (state.augmentationRunning) return;
     const dataset = selected();
     if (!supportsDatasetAugmentation(dataset)) return;
+    showAugmentationFeedback();
     let payload;
     try {
       payload = buildAugmentationPayload();
     } catch (error) {
-      notify(error.message, "warning");
+      showAugmentationFeedback(error.message, "warning");
       return;
     }
     const hasTransform = payload.horizontal_flip || payload.vertical_flip || [
@@ -479,19 +483,19 @@
       [payload.gaussian_noise_std_min, payload.gaussian_noise_std_max, 0],
     ].some(([minimum, maximum, neutral]) => minimum !== neutral || maximum !== neutral);
     if (!hasTransform) {
-      notify("请至少选择一种会改变图片的增强方式。", "warning");
+      showAugmentationFeedback("请至少选择一种会改变图片的增强方式。", "warning");
       return;
     }
     const sourceIds = augmentationSourceIds(dataset, byId("augmentationSelectedSourceMode").checked);
     if (!sourceIds.length) {
-      notify("请先选择已标注的原始图片；增强图不能再次作为来源。", "warning");
+      showAugmentationFeedback("请先选择已标注的原始图片；增强图不能再次作为来源。", "warning");
       return;
     }
     const plannedCount = sourceIds.length * payload.copies_per_item;
     if (plannedCount > 2000 && !window.confirm(`本次最多生成 ${plannedCount} 张图片，可能占用较多磁盘空间。确认继续？`)) return;
     if (payload.seed === null) payload.seed = Math.floor(Math.random() * 2_147_483_648);
-    const batchSize = Math.max(1, Math.floor(augmentationBatchImageLimit / payload.copies_per_item));
-    const batchCount = Math.ceil(sourceIds.length / batchSize);
+    const batches = augmentationBatches(sourceIds, payload.copies_per_item, augmentationBatchImageLimit);
+    const batchCount = batches.length;
     const button = byId("runDatasetAugmentation");
     state.augmentationCancelRequested = false;
     setAugmentationRunning(true);
@@ -504,9 +508,8 @@
     let failure = null;
     updateAugmentationProgress(processed, sourceIds.length, created, batchesCompleted, batchCount);
     try {
-      for (let offset = 0; offset < sourceIds.length; offset += batchSize) {
+      for (const batchIds of batches) {
         if (state.augmentationCancelRequested) break;
-        const batchIds = sourceIds.slice(offset, offset + batchSize);
         const result = await request(`${api}/datasets/${dataset.id}/augmentations`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -526,19 +529,26 @@
       button.textContent = "生成增强素材";
       byId("stopDatasetAugmentation").disabled = false;
       byId("stopDatasetAugmentation").textContent = "停止后续批次";
-      closeModal("datasetAugmentationModal");
+      let refreshFailure = null;
       try {
         await selectDataset(dataset.id);
       } catch (error) {
-        failure = failure || error;
+        refreshFailure = error;
       }
       const notes = [
         skipped ? `${skipped} 张验证/测试素材未增强` : "",
         duplicate ? `跳过 ${duplicate} 张重复图片` : "",
       ].filter(Boolean).join("；");
-      if (failure) notify(`已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源；第 ${batchesCompleted + 1} 批失败：${failure.message}。${notes}`, "danger");
-      else if (state.augmentationCancelRequested) notify(`已停止后续批次；已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源。${notes}`, "warning");
-      else notify(`已生成 ${created} 张增强训练素材。${notes}`, created ? "success" : "warning");
+      if (failure) {
+        const message = `已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源；第 ${batchesCompleted + 1} 批失败：${failure.message}。${notes}`;
+        showAugmentationFeedback(message);
+        notify(message, "danger");
+      } else {
+        closeModal("datasetAugmentationModal");
+        if (refreshFailure) notify(`已生成 ${created} 张，但列表刷新失败：${refreshFailure.message}。请点击刷新查看，勿重复生成。`, "warning");
+        else if (state.augmentationCancelRequested) notify(`已停止后续批次；已生成 ${created} 张，处理 ${processed}/${sourceIds.length} 张来源。${notes}`, "warning");
+        else notify(`已生成 ${created} 张增强训练素材。${notes}`, created ? "success" : "warning");
+      }
     }
   }
 
@@ -1164,7 +1174,6 @@
     });
   }
 
-  const ANNOTATION_COLORS = ["#2563eb", "#16a34a", "#ea580c", "#9333ea", "#db2777", "#0891b2", "#ca8a04", "#4f46e5"];
 
   function cloneAnnotationBoxes(boxes = state.annotation.boxes) {
     return boxes.map((box) => ({
@@ -1176,12 +1185,6 @@
       autoGenerated: Boolean(box.autoGenerated),
       confidence: Number.isFinite(Number(box.confidence)) ? Number(box.confidence) : null,
     }));
-  }
-
-  function annotationColor(label) {
-    const text = String(label || "未命名");
-    const seed = [...text].reduce((total, character) => ((total * 31) + character.codePointAt(0)) >>> 0, 7);
-    return ANNOTATION_COLORS[seed % ANNOTATION_COLORS.length];
   }
 
   function selectedAnnotationBox() {
@@ -1358,9 +1361,9 @@
 
   function detectionBoxMarkup(box, index, draft = false) {
     const selected = !draft && index === state.annotation.selectedBoxIndex;
-    const color = draft ? "#f79009" : annotationColor(box.label);
+    const color = annotationColor(box.label);
     const handles = selected ? annotationBoxHandles(box, index) : "";
-    return `<g class="annotation-svg-object" data-box-index="${index}" style="--annotation-color:${color}"><rect class="annotation-svg-box ${draft ? "annotation-svg-draft" : ""} ${box.autoGenerated ? "ai-candidate" : ""} ${selected ? "selected" : ""}" data-box-index="${index}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}"></rect>${handles}</g>`;
+    return `<g class="annotation-svg-object" data-box-index="${index}" style="--annotation-color:${color}"><rect class="annotation-svg-box ${draft ? "annotation-svg-draft" : ""} ${box.autoGenerated ? "ai-candidate" : ""} ${selected ? "selected" : ""}" fill="${color}" fill-opacity="0.08" stroke="${color}" data-box-index="${index}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}"></rect>${handles}</g>`;
   }
 
   function detectionDrawOriginMarkup() {

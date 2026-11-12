@@ -270,6 +270,7 @@
           <div class="alert alert-info mb-0"><strong>安全策略：</strong>仅增强已标注训练原图；平台自动分批处理，整次操作不再限制为 200 张。验证集和测试集不参与增强，处理中请勿关闭页面。</div>
           <div class="alert alert-warning mb-0">文字、颜色和安装方向需要保持真实：这类素材请谨慎选择翻转、旋转与颜色变化，生成后抽查图片和标注。</div>
         <form id="datasetAugmentationForm" class="stack-form">
+          <div id="augmentationFeedback" class="alert alert-danger mb-0" role="alert" hidden></div>
           <div class="row g-3">
             <label class="col-md-6"><span>每张原图生成数量</span><input id="augmentationCopiesPerItem" class="form-control" type="number" min="1" max="20" value="1"></label>
             <label class="col-md-6"><span>随机种子（可选）</span><input id="augmentationSeed" class="form-control" type="number" min="0" max="2147483647" placeholder="留空由平台生成"></label>
@@ -338,6 +339,7 @@
   </div>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261103-3" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261109-ai-labels"></script>
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261112-augmentation-colors" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/dataset_helpers.js') }}?v=20261112-augmentation-colors"></script>
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261112-augmentation-colors"></script>
 {% endblock %}
