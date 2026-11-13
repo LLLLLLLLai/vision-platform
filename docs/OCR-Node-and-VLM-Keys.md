@@ -40,7 +40,7 @@ OCR_RECOGNITION_MODEL_DIR=
 
 模型目录配置为空时，依次查找项目 `vision-models/paddleocr/<模型名称>`、`vision-models/paddleocr/<模型名称>_infer`、当前用户 `~/.paddlex/official_models/<模型名称>`。目录缺失时明确报错，不在生产请求中自动下载。目录需含完整推理配置和权重，例如 `inference.yml`、`inference.json`、`inference.pdiparams`。
 
-本次已将两套默认 OCR 推理权重提交到 Git：`PP-OCRv5_mobile_det/` 与 `PP-OCRv5_mobile_rec_infer/`。服务器拉取代码后无需再次下载这两套模型；如 `.env` 原来指定了失效的旧机器模型路径，应清空两个目录配置或改为服务器上的绝对路径。许可证、来源和 SHA-256 校验见 [模型说明](../vision-models/paddleocr/README.md)。离线环境仍需提前准备 Python/Paddle 依赖，本仓库不包含虚拟环境或依赖安装包；其他 YOLO/VLM 权重不在此次上传范围。
+五套 OCR 推理模型已提交到 Git：默认文字检测 `PP-OCRv5_mobile_det/`、文字识别 `PP-OCRv5_mobile_rec_infer/`，以及整图方向分类、文字行方向分类、UVDoc 去畸变三套预处理模型。服务器拉取代码后无需再次下载这五套模型；如 `.env` 原来指定了失效的旧机器模型路径，应清空对应目录配置或改为服务器上的绝对路径。许可证、来源和 SHA-256 校验见 [模型说明](../vision-models/paddleocr/README.md)。离线环境仍需提前准备 Python/Paddle 依赖，本仓库不包含虚拟环境或依赖安装包；其他 YOLO/VLM 权重不在此次上传范围。
 
 ### OCR 节点可选预处理
 
@@ -49,7 +49,7 @@ OCR_RECOGNITION_MODEL_DIR=
 - **方向分类**（`use_orientation_classify`）：启用整图 0/90/180/270 度方向分类和文字行 0/180 度分类；不是任意角度线束的形状校正保证。
 - **去畸变**（`use_doc_unwarping`）：启用 UVDoc 文档图像矫正。主要针对文档形变，不保证改善圆柱线束/严重遮挡文字，建议逐项对比开启前后的真实 ROI 效果与耗时。
 
-联网准备机器执行 `python scripts/download_ocr_preprocessing.py`，将完整 `vision-models/paddleocr` 目录拷贝到离线 OCR 服务机器。模型来源：[整图方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/doc_img_orientation_classification.html)、[文字行方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/textline_orientation_classification.html)、[UVDoc](https://www.paddleocr.ai/main/en/version3.x/module_usage/text_image_unwarping.html)。脚本使用官方模型下载地址，不在检测请求中联网。可选权重不会自动随普通 Git 拉取下发。
+三套预处理权重现已随普通 Git 拉取下发，无需 Git LFS 或额外联网下载。将完整 `vision-models/paddleocr` 目录随代码部署到 OCR 服务机器即可。模型来源：[整图方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/doc_img_orientation_classification.html)、[文字行方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/textline_orientation_classification.html)、[UVDoc](https://www.paddleocr.ai/main/en/version3.x/module_usage/text_image_unwarping.html)。仅在模型文件缺失时，可在联网准备机器执行 `python scripts/download_ocr_preprocessing.py` 补下载；脚本使用官方模型下载地址，不在检测请求中联网。
 
 默认查找 `PP-LCNet_x1_0_doc_ori_infer`、`PP-LCNet_x1_0_textline_ori_infer`、`UVDoc_infer`。也可在 OCR 服务 `.env` 分别配置 `OCR_DOC_ORIENTATION_MODEL_DIR`、`OCR_TEXTLINE_ORIENTATION_MODEL_DIR`、`OCR_UNWARPING_MODEL_DIR` 指向完整模型目录。缺少权重时返回明确错误，不静默关闭功能。第一次开启会加载额外模型，增加时间及内存；后续每次请求仍按该节点开关执行，其他节点不开启不会被连带开启。
 
