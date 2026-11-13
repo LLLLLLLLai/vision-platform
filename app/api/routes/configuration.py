@@ -629,7 +629,7 @@ def _reference_group_context(
     if item is None:
         return None, None
     roi = database.get(RegionOfInterest, item.roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         return None, None
     return database.get(Recipe, roi.recipe_id), roi
 
@@ -1037,7 +1037,7 @@ def update_roi(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     roi = database.get(RegionOfInterest, roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         raise HTTPException(status_code=404, detail="ROI not found.")
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None:
@@ -1070,7 +1070,7 @@ async def capture_roi_reference(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     roi = database.get(RegionOfInterest, roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         raise HTTPException(status_code=404, detail="ROI not found.")
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None or not recipe.base_image_path:
@@ -1186,7 +1186,7 @@ def analyze_color(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     roi = database.get(RegionOfInterest, roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         raise HTTPException(status_code=404, detail="ROI not found.")
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None or not recipe.base_image_path:
@@ -1205,16 +1205,21 @@ def analyze_color(
 @router.delete("/rois/{roi_id}")
 def delete_roi(roi_id: int, database: Session = Depends(get_db)) -> dict[str, bool]:
     roi = database.get(RegionOfInterest, roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         raise HTTPException(status_code=404, detail="ROI not found.")
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     _ensure_recipe_editable(recipe)
     _ensure_recipe_supports_inspection_configuration(recipe)
-    database.delete(roi)
+    roi.is_deleted = True
+    roi.enabled = False
+    binding = database.scalar(select(RoiScenarioBinding).where(RoiScenarioBinding.roi_id == roi.id))
+    if binding is not None:
+        binding.enabled = False
     _mark_recipe_changed(recipe)
     database.commit()
+    database.expire(recipe, ["rois"])
     return {"deleted": True}
 
 
@@ -1225,7 +1230,7 @@ def create_inspection_item(
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
     roi = database.get(RegionOfInterest, roi_id)
-    if roi is None:
+    if roi is None or roi.is_deleted:
         raise HTTPException(status_code=404, detail="ROI not found.")
     recipe = database.get(Recipe, roi.recipe_id)
     if recipe is None:

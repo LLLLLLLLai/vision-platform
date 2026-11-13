@@ -376,6 +376,9 @@ def _validate_published_vision_model_node(database: Session, node: ScenarioNode)
 
 def _validate_ocr_node(node: ScenarioNode) -> None:
     config = node.config_json or {}
+    for field in ("use_orientation_classify", "use_doc_unwarping"):
+        if type(config.get(field, False)) is not bool:
+            raise HTTPException(status_code=400, detail="OCR 方向分类和去畸变开关必须是布尔值。")
     try:
         score = float(config.get("min_score", 0.0))
     except (TypeError, ValueError) as exc:
@@ -1953,7 +1956,7 @@ def _assistant_version(mode: str, design: SceneDesign, catalog: dict[str, Any]) 
         "START": set(), "END": {"output"},
         "VLM": {"vlm_model_id", "prompt", "image_path"},
         "VISION_MODEL": {"model_version_id", "image_path", "confidence"},
-        "OCR": {"image_path", "min_score"},
+        "OCR": {"image_path", "min_score", "use_orientation_classify", "use_doc_unwarping"},
         "RULE": {"actual", "operator", "expected"},
         "IMAGE_CROP": {"image_path", "bbox", "objects", "padding_ratio"},
         "IMAGE_ANNOTATE": {"image_path", "bbox", "objects"},

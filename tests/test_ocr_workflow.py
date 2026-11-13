@@ -128,7 +128,7 @@ class OcrWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace["execution_status"], "COMPLETED")
         self.assertIsNone(trace["detection_result"])
         self.assertIn("elapsed_ms", trace)
-        recognize.assert_awaited_once_with("roi.png", min_score=0.0)
+        recognize.assert_awaited_once_with("roi.png", min_score=0.0, use_orientation_classify=False, use_doc_unwarping=False)
 
     async def test_ocr_error_stops_workflow(self):
         self.graph([("start", "START", {}), ("ocr", "OCR", {"image_path": "{{ input.image_path }}"}), ("end", "END", {})])
@@ -163,7 +163,7 @@ class OcrWorkflowTests(unittest.IsolatedAsyncioTestCase):
     def test_invalid_settings_block_publish(self):
         from fastapi import HTTPException
 
-        for config in ({}, {"image_path": "image.png", "min_score": "nan"}, {"image_path": "image.png", "min_score": 2}):
+        for config in ({}, {"image_path": "image.png", "min_score": "nan"}, {"image_path": "image.png", "min_score": 2}, {"image_path": "image.png", "use_doc_unwarping": "false"}, {"image_path": "image.png", "use_orientation_classify": 1}):
             with self.subTest(config=config), self.assertRaises(HTTPException):
                 _validate_ocr_node(SimpleNamespace(config_json=config))
 

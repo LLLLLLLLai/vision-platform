@@ -7,7 +7,7 @@ from pathlib import Path
 import secrets
 import threading
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -15,6 +15,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 app = FastAPI(title="Vision Platform PaddleOCR")
 logger = logging.getLogger("uvicorn.error")
 _engine = None
+_engine_features = {"use_orientation_classify": False, "use_doc_unwarping": False}
 _engine_lock = threading.Lock()
 _admission = threading.BoundedSemaphore(2)
 
@@ -29,33 +30,72 @@ def _model_directory(kind: str, name: str) -> str:
     return str(directory.resolve())
 
 
-def _get_engine():
+class OcrModelConfigurationError(RuntimeError):
+    pass
+
+
+def _get_engine(*, use_orientation_classify: bool = False, use_doc_unwarping: bool = False):
     global _engine
-    if _engine is None:
+    features = {
+        "use_orientation_classify": _engine_features["use_orientation_classify"] or use_orientation_classify,
+        "use_doc_unwarping": _engine_features["use_doc_unwarping"] or use_doc_unwarping,
+    }
+    if _engine is None or features != _engine_features:
         from paddleocr import PaddleOCR
 
         detection_name = os.getenv("OCR_DETECTION_MODEL_NAME", "PP-OCRv5_mobile_det")
         recognition_name = os.getenv("OCR_RECOGNITION_MODEL_NAME", "PP-OCRv5_mobile_rec")
-        _engine = PaddleOCR(
+        optional_models = {}
+        if features["use_orientation_classify"]:
+            optional_models.update({
+                "doc_orientation_classify": ("DOC_ORIENTATION", "PP-LCNet_x1_0_doc_ori"),
+                "textline_orientation": ("TEXTLINE_ORIENTATION", "PP-LCNet_x1_0_textline_ori"),
+            })
+        if features["use_doc_unwarping"]:
+            optional_models["doc_unwarping"] = ("UNWARPING", "UVDoc")
+        model_options = {}
+        for parameter, (kind, default_name) in optional_models.items():
+            name = os.getenv(f"OCR_{kind}_MODEL_NAME", default_name)
+            try:
+                directory = _model_directory(kind, name)
+            except RuntimeError as exc:
+                raise OcrModelConfigurationError(f"OCR 预处理模型 {name} 未部署，请配置 OCR_{kind}_MODEL_DIR 或将模型放入 vision-models/paddleocr。") from exc
+            model_options[f"{parameter}_model_name"] = name
+            model_options[f"{parameter}_model_dir"] = directory
+        engine = PaddleOCR(
             text_detection_model_name=detection_name,
             text_detection_model_dir=_model_directory("DETECTION", detection_name),
             text_recognition_model_name=recognition_name,
             text_recognition_model_dir=_model_directory("RECOGNITION", recognition_name),
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
+            use_doc_orientation_classify=features["use_orientation_classify"],
+            use_doc_unwarping=features["use_doc_unwarping"],
+            use_textline_orientation=features["use_orientation_classify"],
             device=os.getenv("OCR_DEVICE", "cpu"),
             enable_mkldnn=False,
             cpu_threads=4,
+            **model_options,
         )
+        _engine = engine
+        _engine_features.update(features)
     return _engine
 
 
-def recognize_image(image: np.ndarray) -> dict:
+def recognize_image(image: np.ndarray, *, use_orientation_classify: bool = False, use_doc_unwarping: bool = False) -> dict:
     with _engine_lock:
-        predictions = _get_engine().predict(image, text_rec_score_thresh=0.0)
+        predictions = _get_engine(
+            use_orientation_classify=use_orientation_classify, use_doc_unwarping=use_doc_unwarping,
+        ).predict(
+            image, text_rec_score_thresh=0.0,
+            use_doc_orientation_classify=use_orientation_classify,
+            use_textline_orientation=use_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+        )
         lines = []
+        doc_angle = None
         for prediction in predictions:
+            angle = (prediction.get("doc_preprocessor_res") or {}).get("angle", -1)
+            if angle in (0, 90, 180, 270):
+                doc_angle = int(angle)
             texts = prediction.get("rec_texts", [])
             scores = prediction.get("rec_scores", [])
             polygons = prediction.get("rec_polys", [])
@@ -67,7 +107,12 @@ def recognize_image(image: np.ndarray) -> dict:
                     raise RuntimeError("PaddleOCR 返回无效置信度。")
                 if str(text).strip():
                     lines.append({"text": str(text), "confidence": confidence, "polygon": np.asarray(polygon, dtype=float).tolist()})
-        return {"status": "COMPLETED", "lines": lines}
+        return {"status": "COMPLETED", "lines": lines, "preprocessing": {
+            "use_orientation_classify": use_orientation_classify,
+            "use_doc_unwarping": use_doc_unwarping,
+            "doc_angle_degrees": doc_angle,
+            "coordinate_space": "PREPROCESSED_IMAGE" if use_orientation_classify or use_doc_unwarping else "INPUT_IMAGE",
+        }}
 
 
 @app.get("/health")
@@ -76,7 +121,11 @@ def health() -> dict:
 
 
 @app.post("/ocr")
-async def ocr(image: UploadFile = File(...), x_ocr_api_key: str = Header(default="")) -> dict:
+async def ocr(
+    image: UploadFile = File(...), x_ocr_api_key: str = Header(default=""),
+    use_orientation_classify: bool = Form(default=False),
+    use_doc_unwarping: bool = Form(default=False),
+) -> dict:
     expected_key = os.getenv("OCR_SERVICE_API_KEY", "")
     if expected_key and not secrets.compare_digest(x_ocr_api_key, expected_key):
         raise HTTPException(status_code=401, detail="OCR authentication failed")
@@ -93,9 +142,15 @@ async def ocr(image: UploadFile = File(...), x_ocr_api_key: str = Header(default
                 pixels = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))[:, :, ::-1].copy()
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
             raise HTTPException(status_code=400, detail="Invalid image") from exc
-        return await asyncio.to_thread(recognize_image, pixels)
+        return await asyncio.to_thread(
+            recognize_image, pixels,
+            use_orientation_classify=use_orientation_classify, use_doc_unwarping=use_doc_unwarping,
+        )
     except HTTPException:
         raise
+    except OcrModelConfigurationError as exc:
+        logger.warning("%s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("PaddleOCR recognition failed")
         raise HTTPException(status_code=503, detail="PaddleOCR unavailable; check service logs") from exc

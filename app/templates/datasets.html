@@ -31,6 +31,7 @@
 
     <section class="entity-detail-card" id="datasetDetail" hidden>
       <div class="card-heading"><div><small id="datasetDetailCode">DATASET</small><h2 id="datasetDetailName">数据集</h2></div><div class="detail-actions"><span id="datasetDetailMeta" class="status-pill draft"></span><button class="btn btn-sm btn-outline-primary" id="openDatasetAugmentation" type="button" hidden>数据增强</button><button class="btn btn-sm btn-outline-danger" id="deleteDataset" type="button">删除数据集</button></div></div>
+      <div class="detail-actions mb-2"><button class="btn btn-sm btn-outline-secondary" id="openDatasetType" type="button" hidden>切换标注类型</button></div>
       <div class="dataset-summary-grid" id="datasetSummary"></div>
 
       <section class="dataset-upload-card dataset-action-card">
@@ -106,6 +107,20 @@
     </section>
   </div>
 
+  <div class="modal fade" id="datasetTypeModal" tabindex="-1" aria-hidden="true" aria-labelledby="datasetTypeTitle">
+    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title" id="datasetTypeTitle">切换标注类型</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+      <div class="modal-body">
+        <p id="datasetTypeCurrent"></p>
+        <label class="form-label" for="datasetTypeTarget">新的标注类型</label>
+        <select class="form-select" id="datasetTypeTarget"><option value="DETECTION">目标检测（框）</option><option value="CLASSIFICATION">图像分类（类别）</option><option value="SEGMENTATION">实例分割（轮廓）</option></select>
+        <div class="alert alert-warning mt-3">切换后全部图片（含增强图）的旧标注和 AI 标注会被清空，恢复为待标注。图片文件、类别字典及训练/验证/测试划分保留，不会自动把检测框转换为分类或分割标注。已有训练模型和历史任务不变。</div>
+        <label class="form-check"><input class="form-check-input" id="datasetTypeConfirm" type="checkbox"><span class="form-check-label">我确认清空旧标注，并按新类型重新标注（不可撤销）</span></label>
+        <div id="datasetTypeError" class="text-danger mt-2" role="alert"></div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-danger" id="saveDatasetType" type="button" disabled>确认清空并切换</button></div>
+    </div></div>
+  </div>
   <div class="modal fade" id="datasetCreateModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog"><div class="modal-content">
       <div class="modal-header"><h2 class="modal-title fs-5">新建数据集</h2><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
@@ -341,5 +356,5 @@
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
 <link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261112-augmentation-colors" rel="stylesheet">
 <script src="{{ url_for('static', path='/js/dataset_helpers.js') }}?v=20261112-augmentation-colors"></script>
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261112-augmentation-colors"></script>
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261112-annotation-type"></script>
 {% endblock %}

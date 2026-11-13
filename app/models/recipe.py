@@ -62,6 +62,7 @@ class Recipe(TimestampMixin, Base):
     rois: Mapped[list["RegionOfInterest"]] = relationship(
         back_populates="recipe",
         cascade="all, delete-orphan",
+        primaryjoin="and_(Recipe.id == RegionOfInterest.recipe_id, RegionOfInterest.is_deleted == False)",
     )
     feature_anchor: Mapped["RecipeFeatureAnchor | None"] = relationship(
         back_populates="recipe",

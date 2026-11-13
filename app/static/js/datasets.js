@@ -20,6 +20,7 @@
     batchJobDatasetId: null,
     batchPollTimer: null,
     enableCollectionAfterSettings: false,
+    typeChange: null,
     annotation: {
       itemId: null,
       type: null,
@@ -331,6 +332,7 @@
     byId("datasetDetailMeta").textContent = purposeLabel(dataset);
     byId("datasetDetailMeta").className = `status-pill ${isTraining(dataset) ? "draft" : "published"}`;
     byId("openDatasetAugmentation").hidden = !supportsDatasetAugmentation(dataset);
+    byId("openDatasetType").hidden = !supportsDatasetAugmentation(dataset);
     byId("datasetSummary").innerHTML = summary.map(([label, value]) => `<div class="summary-metric"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("");
     byId("datasetUploadTruthWrap").hidden = isTraining(dataset);
     byId("datasetUploadTruth").disabled = isTraining(dataset);
@@ -364,6 +366,49 @@
         input.disabled = !enabled;
       });
     });
+  }
+
+  function syncDatasetTypeConfirm() {
+    byId("saveDatasetType").disabled = !byId("datasetTypeConfirm").checked
+      || byId("datasetTypeTarget").value === state.typeChange?.annotation_type;
+  }
+
+  function openDatasetType() {
+    const dataset = selected();
+    if (!dataset || state.augmentationRunning) {
+      notify("请等待数据增强结束后再切换类型。", "warning");
+      return;
+    }
+    state.typeChange = { id: dataset.id, revision: dataset.revision, annotation_type: dataset.annotation_type };
+    byId("datasetTypeCurrent").textContent = `${dataset.name} · ${purposeLabel(dataset)} · ${dataset.item_count || 0} 张图片`;
+    byId("datasetTypeTarget").value = dataset.annotation_type;
+    byId("datasetTypeConfirm").checked = false;
+    byId("datasetTypeError").textContent = "";
+    syncDatasetTypeConfirm();
+    openModal("datasetTypeModal");
+  }
+
+  async function saveDatasetType() {
+    const pending = state.typeChange;
+    if (!pending || byId("saveDatasetType").disabled) return;
+    byId("saveDatasetType").disabled = true;
+    try {
+      const result = await request(`${api}/datasets/${pending.id}/annotation-type`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ annotation_type: byId("datasetTypeTarget").value,
+          expected_revision: pending.revision, confirm_clear_annotations: byId("datasetTypeConfirm").checked }),
+      });
+      state.augmentationSelectedIds.clear();
+      state.itemFilter = "ALL";
+      state.itemPage = 1;
+      closeModal("datasetTypeModal");
+      await loadData();
+      notify(`已切换标注类型，${result.cleared_count} 张图片恢复为待标注。`);
+    } catch (error) {
+      byId("datasetTypeError").textContent = error.message;
+    } finally {
+      syncDatasetTypeConfirm();
+    }
   }
 
   function augmentationRange(enabledId, minimumId, maximumId, minimumKey, maximumKey, neutral) {
@@ -1897,6 +1942,10 @@
     byId("createDataset").addEventListener("click", createDataset);
     byId("deleteDataset").addEventListener("click", deleteDataset);
     byId("openDatasetAugmentation").addEventListener("click", openDatasetAugmentation);
+    byId("openDatasetType").addEventListener("click", openDatasetType);
+    byId("datasetTypeTarget").addEventListener("change", syncDatasetTypeConfirm);
+    byId("datasetTypeConfirm").addEventListener("change", syncDatasetTypeConfirm);
+    byId("saveDatasetType").addEventListener("click", saveDatasetType);
     byId("openDatasetBatchAnnotation").addEventListener("click", openBatchAnnotation);
     byId("startDatasetBatchAnnotation").addEventListener("click", startBatchAnnotation);
     byId("datasetAutoCollectToggle").addEventListener("change", toggleDatasetCollection);

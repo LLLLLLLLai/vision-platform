@@ -42,7 +42,20 @@ OCR_RECOGNITION_MODEL_DIR=
 
 本次已将两套默认 OCR 推理权重提交到 Git：`PP-OCRv5_mobile_det/` 与 `PP-OCRv5_mobile_rec_infer/`。服务器拉取代码后无需再次下载这两套模型；如 `.env` 原来指定了失效的旧机器模型路径，应清空两个目录配置或改为服务器上的绝对路径。许可证、来源和 SHA-256 校验见 [模型说明](../vision-models/paddleocr/README.md)。离线环境仍需提前准备 Python/Paddle 依赖，本仓库不包含虚拟环境或依赖安装包；其他 YOLO/VLM 权重不在此次上传范围。
 
-服务默认关闭文档旋转、文档矫正、文字行方向模型，避免额外下载；严重旋转或模糊文字并不保证识别准确，应先用真实 ROI 测试。更换 PP-OCRv6 等模型时同时配置匹配的名称、目录及 Paddle 版本。
+### OCR 节点可选预处理
+
+节点输入区新增两个独立开关，均默认关闭，保存到节点配置，普通流程和遍历体均生效：
+
+- **方向分类**（`use_orientation_classify`）：启用整图 0/90/180/270 度方向分类和文字行 0/180 度分类；不是任意角度线束的形状校正保证。
+- **去畸变**（`use_doc_unwarping`）：启用 UVDoc 文档图像矫正。主要针对文档形变，不保证改善圆柱线束/严重遮挡文字，建议逐项对比开启前后的真实 ROI 效果与耗时。
+
+联网准备机器执行 `python scripts/download_ocr_preprocessing.py`，将完整 `vision-models/paddleocr` 目录拷贝到离线 OCR 服务机器。模型来源：[整图方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/doc_img_orientation_classification.html)、[文字行方向分类](https://www.paddleocr.ai/main/en/version3.x/module_usage/textline_orientation_classification.html)、[UVDoc](https://www.paddleocr.ai/main/en/version3.x/module_usage/text_image_unwarping.html)。脚本使用官方模型下载地址，不在检测请求中联网。可选权重不会自动随普通 Git 拉取下发。
+
+默认查找 `PP-LCNet_x1_0_doc_ori_infer`、`PP-LCNet_x1_0_textline_ori_infer`、`UVDoc_infer`。也可在 OCR 服务 `.env` 分别配置 `OCR_DOC_ORIENTATION_MODEL_DIR`、`OCR_TEXTLINE_ORIENTATION_MODEL_DIR`、`OCR_UNWARPING_MODEL_DIR` 指向完整模型目录。缺少权重时返回明确错误，不静默关闭功能。第一次开启会加载额外模型，增加时间及内存；后续每次请求仍按该节点开关执行，其他节点不开启不会被连带开启。
+
+输出新增 `preprocessing`，包含两个开关的实际请求配置、整图方向角和坐标空间。开启任一预处理时 `lines[].polygon` 属于 **PREPROCESSED_IMAGE**，不能直接叠加到原图；均关闭时属于 **INPUT_IMAGE**。主平台和 OCR 服务须同时升级；旧 OCR 服务不确认开关时主平台报错，避免界面开启但实际未执行。
+
+严重旋转或模糊文字并不保证识别准确，应先用真实 ROI 测试。更换 PP-OCRv6 等模型时同时配置匹配的名称、目录及 Paddle 版本。
 
 服务 `GET /health` 返回进程状态和 `model_loaded`，尚未加载模型不等于识别已可用；首个 `/ocr` 请求加载模型。平台以 multipart 的 `image` 字段上传图片内容，跨服务器不依赖同名本地路径。默认仅监听回环；远程部署必须配置双方相同的 `OCR_SERVICE_API_KEY`、网络访问限制及 TLS 代理。请求头为 `X-OCR-API-Key`。单图片上限 20 MB、3200 万像素；单推理实例串行使用模型，最多接收两项并发工作，额外请求 429，不无限积压。
 

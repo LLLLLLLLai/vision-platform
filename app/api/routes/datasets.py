@@ -8,12 +8,12 @@ import zipfile
 from tempfile import TemporaryDirectory
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -89,6 +89,12 @@ class DatasetItemUpdate(BaseModel):
     annotation_status: str | None = Field(default=None, max_length=30)
     annotation_json: dict[str, Any] | None = None
     split: str | None = Field(default=None, max_length=30)
+
+
+class DatasetAnnotationTypeChange(BaseModel):
+    annotation_type: Literal["CLASSIFICATION", "DETECTION", "SEGMENTATION"]
+    confirm_clear_annotations: StrictBool = False
+    expected_revision: int = Field(ge=0)
 
 
 class DatasetItemPreAnnotationRequest(BaseModel):
@@ -724,6 +730,45 @@ def update_dataset(
         setattr(dataset, key, value.strip() if isinstance(value, str) else value)
     database.commit()
     return _dataset_payload(dataset)
+
+
+@router.post("/{dataset_id}/annotation-type")
+def change_dataset_annotation_type(
+    dataset_id: int,
+    payload: DatasetAnnotationTypeChange,
+    database: Session = Depends(get_db),
+) -> dict[str, Any]:
+    dataset = database.scalar(select(Dataset).where(Dataset.id == dataset_id).with_for_update())
+    if dataset is None or dataset.is_deleted:
+        raise HTTPException(status_code=404, detail="数据集不存在。")
+    if dataset.purpose != "TRAIN" or dataset.media_type != "IMAGE" or dataset.annotation_type not in {"CLASSIFICATION", "DETECTION", "SEGMENTATION"}:
+        raise HTTPException(status_code=400, detail="仅 YOLO 图片训练集支持切换标注类型。")
+    if dataset.annotation_type == payload.annotation_type:
+        return {"changed": False, "cleared_count": 0, "dataset": _dataset_payload(dataset)}
+    if not payload.confirm_clear_annotations:
+        raise HTTPException(status_code=400, detail="请先确认清空旧标注，图片文件会保留。")
+    if dataset.revision != payload.expected_revision:
+        raise HTTPException(status_code=409, detail="数据集已更新，请刷新后重新确认。")
+    active_job = database.scalar(select(AutomationJob.id).where(
+        AutomationJob.dataset_id == dataset.id,
+        AutomationJob.status.in_(["QUEUED", "WAITING_GPU", "RUNNING", "CANCEL_REQUESTED"]),
+        AutomationJob.is_deleted.is_(False),
+    ).limit(1))
+    if active_job is not None:
+        raise HTTPException(status_code=409, detail=f"数据集仍被任务 #{active_job} 使用，请先停止任务再切换。")
+    items = database.scalars(select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset.id, DatasetItem.is_deleted.is_(False),
+    ).with_for_update()).all()
+    for item in items:
+        source_metadata = (item.annotation_json or {}).get("_meta")
+        metadata = source_metadata.get("augmentation") if isinstance(source_metadata, dict) else None
+        item.annotation_json = {"_meta": {"augmentation": metadata}} if item.source == "AUGMENTED" and metadata else {}
+        item.annotation_status = "PENDING"
+        item.ground_truth = None
+    dataset.annotation_type = payload.annotation_type
+    dataset.revision += 1
+    database.commit()
+    return {"changed": True, "cleared_count": len(items), "dataset": _dataset_payload(dataset)}
 
 
 @router.delete("/{dataset_id}")
@@ -1830,6 +1875,9 @@ def pre_annotate_dataset_item(
     except VisionModelRuntimeError as exc:
         raise HTTPException(status_code=422, detail=f"自动预标注失败：{exc}") from exc
 
+    database.refresh(dataset, with_for_update=True)
+    if dataset.is_deleted or dataset.annotation_type != annotation_type:
+        raise HTTPException(status_code=409, detail="数据集标注类型已更改，本次旧类型的 AI 标注未保存，请刷新。")
     annotation, warnings = _pre_annotation_from_inference(dataset, inference)
     candidate_count = (
         len(annotation.get("boxes") or [])

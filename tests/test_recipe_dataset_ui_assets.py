@@ -6,6 +6,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecipeDatasetUiAssetTests(unittest.TestCase):
+    def test_roi_deletion_uses_page_confirmation_and_reports_errors(self):
+        script = (PROJECT_ROOT / "app/static/js/workspace.js").read_text(encoding="utf-8")
+        action = script.split('if (event.target.closest(".delete-object")) {', 1)[1].split("selectRoi(roiId)", 1)[0]
+        self.assertIn('confirmWorkspaceAction("删除检测区域"', action)
+        self.assertNotIn("window.confirm", action)
+        self.assertIn("删除失败", action)
+
+    def test_annotation_type_change_requires_explicit_confirmation(self):
+        template = (PROJECT_ROOT / "app/templates/datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app/static/js/datasets.js").read_text(encoding="utf-8")
+        self.assertIn('id="datasetTypeConfirm"', template)
+        self.assertIn("不可撤销", template)
+        self.assertIn("expected_revision: pending.revision", script)
+        self.assertIn('confirm_clear_annotations: byId("datasetTypeConfirm").checked', script)
+
     def test_dataset_augmentation_errors_stay_visible_and_helpers_load_first(self) -> None:
         template = (PROJECT_ROOT / "app/templates/datasets.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "app/static/js/datasets.js").read_text(encoding="utf-8")

@@ -801,8 +801,12 @@ class ScenarioRuntime:
                     if not isinstance(node_image_path, str) or not node_image_path.strip():
                         raise ScenarioRuntimeError("OCR 输入图片引用为空，请检查上游裁剪输出；不会改用原图识别。")
                     min_score = float(_render(config.get("min_score", 0.0), node_runtime_context))
-                    trace_input = {"image_path": node_image_path, "min_score": min_score, "engine": "PaddleOCR"}
-                    result = await recognize_text(node_image_path, min_score=min_score)
+                    ocr_options = {
+                        "use_orientation_classify": config.get("use_orientation_classify", False),
+                        "use_doc_unwarping": config.get("use_doc_unwarping", False),
+                    }
+                    trace_input = {"image_path": node_image_path, "min_score": min_score, "engine": "PaddleOCR", **ocr_options}
+                    result = await recognize_text(node_image_path, min_score=min_score, **ocr_options)
                 elif node_type == "IMAGE_CROP":
                     config = node.config_json or {}
                     node_context = _node_input_mapping(config, runtime_context)

@@ -3397,10 +3397,19 @@ byId("configuredObjectList").addEventListener("click", async (event) => {
   if (event.target.closest(".delete-object")) {
     if (state.editorReadOnly) return;
     const roi = state.recipe.rois.find((item) => item.id === roiId);
-    if (!window.confirm(`确定删除“${roi?.name || "该检测区域"}”及其全部规则吗？`)) return;
-    await request(`${api}/configuration/rois/${roiId}`, { method: "DELETE" });
-    await loadRecipe(state.recipe.id);
-    notify("检测区域及其规则已删除，图片上的对应框已同步移除", "success", false);
+    const confirmation = await confirmWorkspaceAction("删除检测区域", `确定删除“${roi?.name || "该检测区域"}”及其全部规则吗？历史检测记录会保留。`);
+    if (!confirmation) return;
+    const button = event.target.closest(".delete-object");
+    button.disabled = true;
+    try {
+      await request(`${api}/configuration/rois/${roiId}`, { method: "DELETE" });
+      await loadRecipe(state.recipe.id);
+      notify("检测区域及其规则已删除，图片上的对应框已同步移除", "success", false);
+    } catch (error) {
+      notify(`删除失败：${error.message}`, "danger", false);
+    } finally {
+      button.disabled = false;
+    }
     return;
   }
   selectRoi(roiId);
