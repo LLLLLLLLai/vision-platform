@@ -506,6 +506,13 @@ def _dataset_payload(dataset: Dataset, *, include_items: bool = False) -> dict[s
     return payload
 
 
+def _preserve_collection_metadata(item: DatasetItem, annotation: dict[str, Any]) -> dict[str, Any]:
+    collection = (item.annotation_json or {}).get("collection")
+    if item.source in {"AUTO_ROI", "AUTO_ROI_RECIPE", "AUTO_ORIGINAL"} and isinstance(collection, dict):
+        return {**annotation, "collection": collection}
+    return annotation
+
+
 def _item_payload(item: DatasetItem) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -762,7 +769,8 @@ def change_dataset_annotation_type(
     for item in items:
         source_metadata = (item.annotation_json or {}).get("_meta")
         metadata = source_metadata.get("augmentation") if isinstance(source_metadata, dict) else None
-        item.annotation_json = {"_meta": {"augmentation": metadata}} if item.source == "AUGMENTED" and metadata else {}
+        cleared = {"_meta": {"augmentation": metadata}} if item.source == "AUGMENTED" and metadata else {}
+        item.annotation_json = _preserve_collection_metadata(item, cleared)
         item.annotation_status = "PENDING"
         item.ground_truth = None
     dataset.annotation_type = payload.annotation_type
@@ -1708,7 +1716,7 @@ def _save_pre_annotation(
     }
     _merge_dataset_labels(dataset, _annotation_labels(dataset, annotation))
     _invalidate_augmented_children(database, dataset_id=dataset.id, source_id=item.id)
-    item.annotation_json = annotation
+    item.annotation_json = _preserve_collection_metadata(item, annotation)
     item.annotation_status = "LABELED"
     dataset.revision += 1
     return True
@@ -1959,6 +1967,8 @@ def update_dataset_item(
     if "split" in values and values["split"]:
         values["split"] = _normalize(values["split"])
     invalidated_count = 0
+    if isinstance(values.get("annotation_json"), dict):
+        values["annotation_json"] = _preserve_collection_metadata(item, values["annotation_json"])
     source_label_changed = "annotation_json" in values and values["annotation_json"] != item.annotation_json
     source_unlabeled = values.get("annotation_status") not in (None, "LABELED")
     source_left_training = values.get("split") not in (None, "TRAIN")

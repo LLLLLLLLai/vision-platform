@@ -477,6 +477,7 @@ class ScenarioRuntime:
                 collection = collect_scene_image(
                     database, scenario_version, execution_id=execution.id, roi_id=roi_id,
                     source=source, image_path=image_path, context=input_payload,
+                    detection_task_id=detection_task_id,
                 )
                 output = {"result": "NOT_INSPECTED", "run_mode": "COLLECT_ONLY",
                           "reason": collection["message"], "collection": collection}
@@ -509,6 +510,8 @@ class ScenarioRuntime:
                     roi_id=roi_id,
                     source=source,
                     roi_image_path=image_path,
+                    context=input_payload,
+                    detection_task_id=detection_task_id,
                 )
                 if collected_item_ids:
                     execution.output_json["collected_dataset_item_ids"] = collected_item_ids

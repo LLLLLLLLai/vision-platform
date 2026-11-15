@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor } = require("../app/static/js/dataset_helpers.js");
+const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave } = require("../app/static/js/dataset_helpers.js");
 
 test("FastAPI validation errors display field names and constraints, not object Object", () => {
   const message = formatRequestError({ detail: [
@@ -57,4 +57,112 @@ test("category colors are stable, saturated, translucent-ready and not black or 
     assert.ok(Number(lightness) >= 45 && Number(lightness) <= 54);
   }
   assert.equal(annotationColor(" 线束 "), annotationColor("线束"));
+});
+
+test("opening or skipping an unchanged image never creates an annotation", async () => {
+  const writes = [];
+  const saver = createAnnotationAutosave({ read: () => ({ label: "FU5" }), write: async (value) => writes.push(value), onState: () => {} });
+  await saver.flush();
+  assert.deepEqual(writes, []);
+  assert.equal(saver.dirty(), false);
+  saver.dispose();
+});
+
+test("rapid edits debounce to the final category and save automatically", async () => {
+  let label = "FU5";
+  const writes = [];
+  const saver = createAnnotationAutosave({ delay: 5, read: () => ({ label }), write: async (value) => writes.push(value), onState: () => {} });
+  saver.change();
+  label = "FU6";
+  saver.change();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(writes, [{ label: "FU6" }]);
+  assert.equal(saver.dirty(), false);
+  saver.dispose();
+});
+
+test("navigation flush serializes changes during a slow save and waits for the newest state", async () => {
+  let label = "FU5";
+  let release;
+  const writes = [];
+  const states = [];
+  const saver = createAnnotationAutosave({
+    read: () => ({ label }),
+    write: async (value) => { writes.push(value); if (writes.length === 1) await new Promise((resolve) => { release = resolve; }); },
+    onState: (status) => states.push(status),
+  });
+  saver.change();
+  const pending = saver.flush();
+  await Promise.resolve();
+  label = "FU7";
+  saver.change();
+  assert.equal(saver.flush(), pending);
+  release();
+  await pending;
+  assert.deepEqual(writes, [{ label: "FU5" }, { label: "FU7" }]);
+  assert.equal(saver.dirty(), false);
+  assert.equal(states.at(-1), "saved");
+  saver.dispose();
+});
+
+test("save failures preserve dirty state and explicit retry saves the same value", async () => {
+  let failing = true;
+  const states = [];
+  const writes = [];
+  const saver = createAnnotationAutosave({
+    read: () => ({ label: "FU5" }),
+    write: async (value) => { if (failing) throw new Error("网络异常"); writes.push(value); },
+    onState: (status) => states.push(status),
+  });
+  saver.change();
+  await assert.rejects(saver.flush(), /网络异常/);
+  assert.equal(saver.dirty(), true);
+  assert.equal(states.at(-1), "error");
+  failing = false;
+  await saver.flush();
+  assert.deepEqual(writes, [{ label: "FU5" }]);
+  assert.equal(saver.dirty(), false);
+  saver.dispose();
+});
+
+test("invalid annotation does not write; correcting it permits retry", async () => {
+  let valid = false;
+  let count = 0;
+  const saver = createAnnotationAutosave({
+    read: () => { if (!valid) throw new Error("JSON格式错误"); return { polygons: [] }; },
+    write: async () => { count += 1; }, onState: () => {},
+  });
+  saver.change();
+  await assert.rejects(saver.flush(), /JSON/);
+  assert.equal(count, 0);
+  valid = true;
+  saver.change();
+  await saver.flush();
+  assert.equal(count, 1);
+  saver.dispose();
+});
+
+test("dragging defers writes until the interaction finishes", async () => {
+  let width = 0.2;
+  const writes = [];
+  const saver = createAnnotationAutosave({ delay: 5, read: () => ({ width }), write: async (value) => writes.push(value), onState: () => {} });
+  saver.change(true);
+  width = 0.4;
+  saver.change(true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(writes.length, 0);
+  saver.change();
+  await saver.flush();
+  assert.deepEqual(writes, [{ width: 0.4 }]);
+  saver.dispose();
+});
+
+test("leaving a saved session cancels timers so the next image is not overwritten", async () => {
+  const writes = [];
+  const saver = createAnnotationAutosave({ delay: 5, read: () => ({ label: "old" }), write: async (value) => writes.push(value), onState: () => {} });
+  saver.change();
+  await saver.flush();
+  saver.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(writes, [{ label: "old" }]);
 });

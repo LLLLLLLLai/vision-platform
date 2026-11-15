@@ -234,10 +234,16 @@ class DetectSceneCollectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(collected), 1)
             self.assertEqual(collected[0].source, "AUTO_ROI")
             self.assertEqual(collected[0].annotation_status, "PENDING")
+            for part in ("生产检测_场景ROI", "配方相机一检测配方", "场景线束-VLM-测试", "相机CAMERA1", "条码CN000798263700002"):
+                self.assertIn(part, collected[0].original_name)
+            self.assertEqual(collected[0].annotation_json["collection"]["recipe_id"], recipe.id)
+            self.assertIn(collected[0].annotation_json["collection"]["source_filename"], {source_path.name, second_source_path.name})
             self.assertTrue(Path(collected[0].media_path).is_file())
             self.assertEqual(len(original_collected), 1)
             self.assertEqual(original_collected[0].source, "AUTO_ORIGINAL")
             self.assertEqual(original_collected[0].annotation_status, "PENDING")
+            self.assertIn("生产检测_相机原图", original_collected[0].original_name)
+            self.assertIn("条码CN000798263700002", original_collected[0].original_name)
             self.assertTrue(Path(original_collected[0].media_path).is_file())
             self.assertEqual(
                 original_collected[0].annotation_json["collection"]["recipe_id"],

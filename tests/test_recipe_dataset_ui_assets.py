@@ -245,6 +245,19 @@ class RecipeDatasetUiAssetTests(unittest.TestCase):
         self.assertIn("function renderClassificationLabelOptions(", script)
         self.assertIn("请选择数据集已维护的图片类别", script)
 
+    def test_annotation_session_supports_images_autosave_and_safe_navigation(self) -> None:
+        template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")
+        for element_id in ("classificationAnnotationImage", "segmentationAnnotationImage", "classificationLabelButtons", "annotationSaveStatus", "annotationSaveError"):
+            self.assertIn(f'id="{element_id}"', template)
+        self.assertEqual(template.count('id="annotationPreviousItem"'), 1)
+        self.assertLess(template.index('id="annotationPreviousItem"'), template.index('id="annotationDetectionEditor"'))
+        self.assertIn("createAnnotationAutosave", script)
+        self.assertIn("openAnnotation(itemId, itemIds)", script)
+        self.assertIn('addEventListener("hide.bs.modal"', script)
+        self.assertIn('addEventListener("beforeunload"', script)
+        self.assertNotIn("当前图片的标注尚未保存，请先保存后再切换图片", script)
+
     def test_training_dataset_exposes_configurable_safe_augmentation(self) -> None:
         template = (PROJECT_ROOT / "app" / "templates" / "datasets.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "app" / "static" / "js" / "datasets.js").read_text(encoding="utf-8")

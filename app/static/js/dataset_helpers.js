@@ -69,7 +69,53 @@
     return `hsl(${seed % 360}, ${70 + ((seed >>> 8) % 15)}%, ${45 + ((seed >>> 16) % 10)}%)`;
   }
 
-  const helpers = { augmentationNumber, augmentationBatches, formatRequestError, annotationColor };
+  function createAnnotationAutosave({ read, write, onState, delay = 500 }) {
+    let revision = 0;
+    let savedRevision = 0;
+    let timer = null;
+    let running = null;
+    let disposed = false;
+    let deferred = false;
+    const dirty = () => revision !== savedRevision;
+    const cancelTimer = () => { clearTimeout(timer); timer = null; };
+    async function drain() {
+      while (!disposed && !deferred && dirty()) {
+        const targetRevision = revision;
+        try {
+          const snapshot = read();
+          onState("saving");
+          await write(snapshot);
+          savedRevision = targetRevision;
+          if (!disposed) onState(dirty() ? "pending" : "saved");
+        } catch (error) {
+          cancelTimer();
+          if (!disposed) onState("error", error);
+          throw error;
+        }
+      }
+    }
+    function flush() {
+      cancelTimer();
+      if (disposed) return Promise.resolve();
+      if (!running) running = Promise.resolve().then(drain).finally(() => { running = null; });
+      return running;
+    }
+    return {
+      dirty,
+      flush,
+      change(defer = false) {
+        if (disposed) return;
+        revision += 1;
+        deferred = defer;
+        cancelTimer();
+        onState("pending");
+        if (!defer) timer = setTimeout(() => { flush().catch(() => {}); }, delay);
+      },
+      dispose() { disposed = true; cancelTimer(); },
+    };
+  }
+
+  const helpers = { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave };
   if (typeof module !== "undefined" && module.exports) module.exports = helpers;
   if (typeof window !== "undefined") window.VisionDatasetHelpers = helpers;
 })();

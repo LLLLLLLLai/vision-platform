@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from app.api.routes.datasets import DatasetUpdate, update_dataset
+from app.api.routes.datasets import (
+    DatasetAnnotationTypeChange, DatasetItemUpdate, DatasetUpdate,
+    change_dataset_annotation_type, update_dataset, update_dataset_item,
+    _save_pre_annotation,
+)
 from app.db.base import Base
 from app.models.intelligence import (
     Dataset,
@@ -16,7 +21,8 @@ from app.models.intelligence import (
     InspectionScenario,
     InspectionScenarioVersion,
 )
-from app.models.recipe import Recipe
+from app.models.recipe import Recipe, RegionOfInterest
+from app.models.inspection import DetectionTask
 from app.models.system import Product, Station
 from app.services import dataset_collection_service as collection_module
 
@@ -232,7 +238,10 @@ class DatasetCollectionTests(unittest.TestCase):
         self.assertEqual(item.source, "AUTO_ORIGINAL")
         self.assertEqual(item.annotation_status, "PENDING")
         self.assertTrue(Path(item.media_path).is_file())
-        self.assertEqual(item.original_name, "AS01-CAMERA1PICTURE1-SN001.png")
+        self.assertIn("生产检测_相机原图_配方线束相机一配方", item.original_name)
+        self.assertIn("相机CAMERA1_拍照1", item.original_name)
+        self.assertIn("T301_IMG1", item.original_name)
+        self.assertEqual(item.annotation_json["collection"]["source_filename"], "AS01-CAMERA1PICTURE1-SN001.png")
         self.assertEqual(item.annotation_json["collection"]["scope"], "ORIGINAL")
         self.assertEqual(item.annotation_json["collection"]["recipe_id"], self.recipe.id)
         self.assertEqual(item.annotation_json["collection"]["inspection_result"], "OK")
@@ -255,6 +264,77 @@ class DatasetCollectionTests(unittest.TestCase):
         )
         self.assertEqual(duplicated, [])
         self.assertEqual(mismatched_recipe, [])
+
+    def test_recipe_roi_names_capture_location_and_preserve_images(self) -> None:
+        self.original_dataset.collection_scope = "ROI_RECIPE"
+        roi = RegionOfInterest(
+            recipe_id=self.recipe.id, code="ROI6", name="线束端子",
+            x_ratio=0, y_ratio=0, width_ratio=1, height_ratio=1,
+        )
+        task = DetectionTask(request_id="collection-name-test", sn="CN123456",
+                             recipe_id=self.recipe.id, recipe_version=self.recipe.version)
+        self.database.add_all((roi, task))
+        self.database.flush()
+        collected = collection_module.collect_recipe_roi_for_matching_datasets(
+            self.database, recipe_id=self.recipe.id, detection_task_id=task.id,
+            image_index=2, roi_id=roi.id, source="PRODUCTION",
+            roi_image_path=str(self.roi_path), source_image_path=r"\\server\share\camera-source.png",
+        )
+        item = self.database.get(DatasetItem, collected[0])
+        for part in ("配方ROI", "配方线束相机一配方", "版本V1", "拉线L1", "物料MAT_HARNESS",
+                     "工序AS01", "相机CAMERA1", "区域ROI6", "条码CN123456", "IMG2"):
+            self.assertIn(part, item.original_name)
+        provenance = item.annotation_json["collection"]
+        self.assertEqual(provenance["source_filename"], "camera-source.png")
+        self.assertEqual(provenance["roi_name"], "线束端子")
+        self.assertEqual(Path(item.media_path).read_bytes(), self.roi_path.read_bytes())
+        self.assertIn(f"recipe_{self.recipe.id}_roi_{roi.id}_task_", Path(item.media_path).name)
+        before_name, before_path = item.original_name, item.media_path
+        update_dataset_item(self.original_dataset.id, item.id, DatasetItemUpdate(
+            annotation_json={"boxes": [{"label": "harness", "x": 0, "y": 0, "width": 0.5, "height": 0.5}]},
+        ), database=self.database)
+        self.assertEqual(item.annotation_json["collection"], provenance)
+        change_dataset_annotation_type(self.original_dataset.id, DatasetAnnotationTypeChange(
+            annotation_type="CLASSIFICATION", confirm_clear_annotations=True,
+            expected_revision=self.original_dataset.revision,
+        ), database=self.database)
+        self.assertEqual(item.annotation_json, {"collection": provenance})
+        self.assertEqual(item.annotation_status, "PENDING")
+        self.assertEqual((item.original_name, item.media_path), (before_name, before_path))
+        self.original_dataset.label_schema_json = ["harness"]
+        _save_pre_annotation(
+            self.database, self.original_dataset, item, {"label": "harness"},
+            model=SimpleNamespace(name="自动标注模型", task_type="YOLO_CLASSIFICATION"),
+            version=SimpleNamespace(id=1, version="V1"), warnings=[], confidence=0.8,
+        )
+        self.assertEqual(item.annotation_json["label"], "harness")
+        self.assertEqual(item.annotation_json["collection"], provenance)
+
+    def test_collection_only_scene_api_is_named_without_a_recipe(self) -> None:
+        result = collection_module.collect_scene_image(
+            self.database, self.scenario_version, execution_id=900, roi_id=None,
+            source="SCENE_API", image_path=str(self.roi_path), context={"sn": "API001"},
+        )
+        item = self.database.get(DatasetItem, result["collected_item_ids"][0])
+        self.assertIn("场景接口_场景ROI_场景线束检测场景", item.original_name)
+        self.assertIn("条码API001", item.original_name)
+        self.assertIn("E900", item.original_name)
+        self.assertNotIn("配方", item.original_name)
+        self.assertEqual(item.annotation_json["collection"]["source_filename"], "roi.png")
+        self.assertIsNone(item.annotation_json["collection"]["recipe_id"])
+
+    def test_safe_display_names_are_bounded_and_keep_full_metadata(self) -> None:
+        self.recipe.name = '../bad\\name:*?"<>|\n' + "线束" * 100
+        metadata = collection_module._collection_metadata(
+            self.database, scope="ORIGINAL", source="PRODUCTION", image_path=str(self.original_path),
+            recipe_id=self.recipe.id, detection_task_id=301, context={"sn": "产品" * 200},
+        )
+        name = collection_module._collection_name(metadata, str(self.original_path))
+        self.assertLessEqual(len(name), 500)
+        self.assertNotRegex(name, r'[<>:"/\\|?*\x00-\x1f]')
+        self.assertEqual(metadata["recipe_name"], self.recipe.name)
+        self.assertEqual(metadata["sn"], "产品" * 200)
+        self.assertTrue(name.endswith(".png"))
 
 
 if __name__ == "__main__":

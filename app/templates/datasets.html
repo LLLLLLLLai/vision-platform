@@ -174,7 +174,16 @@
 
   <div class="modal fade" id="datasetAnnotationModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
-      <div class="modal-header"><div><small class="text-primary">TRAINING ANNOTATION</small><h2 class="modal-title fs-5">训练图片标注</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal"></button></div>
+      <div class="modal-header"><div><small class="text-primary">TRAINING ANNOTATION</small><h2 class="modal-title fs-5">连续标注</h2></div><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="保存并关闭"></button></div>
+      <div class="annotation-session-toolbar">
+        <div class="annotation-session-navigation">
+          <button class="btn btn-sm btn-outline-secondary" id="annotationPreviousItem" type="button">← 上一张</button>
+          <strong id="annotationItemPosition">第 0 / 0 张</strong>
+          <button class="btn btn-sm btn-outline-secondary" id="annotationNextItem" type="button">下一张 →</button>
+        </div>
+        <span id="annotationSaveStatus" role="status" aria-live="polite">修改后自动保存</span>
+      </div>
+      <div id="annotationSaveError" class="annotation-save-error" role="alert" hidden></div>
       <div class="modal-body stack-form">
         <input id="annotationItemId" type="hidden">
         <p id="annotationItemName" class="muted-copy mb-0"></p>
@@ -207,11 +216,8 @@
               <header class="annotation-canvas-header">
                 <div>
                   <strong id="annotationCanvasTitle">检测框标注</strong>
-                  <small id="annotationItemPosition">第 0 / 0 张</small>
                 </div>
                 <div class="annotation-canvas-actions">
-                  <button class="btn btn-sm btn-outline-secondary" id="annotationPreviousItem" type="button">← 上一张</button>
-                  <button class="btn btn-sm btn-outline-secondary" id="annotationNextItem" type="button">下一张 →</button>
                   <span class="annotation-zoom-value" id="annotationZoomValue">100%</span>
                 </div>
               </header>
@@ -263,18 +269,25 @@
           </div>
         </section>
 
-        <section id="annotationClassificationEditor" class="annotation-editor" hidden>
-          <label><span>图片类别</span><select id="classificationAnnotationLabel" class="form-select" aria-label="图片类别"><option value="">请先选择类别</option></select></label>
-          <p class="muted-copy mb-0">只能从数据集“类别”中选择；如无可选项，请先关闭标注窗口并在数据集详情的“类别”中添加。</p>
+        <section id="annotationClassificationEditor" class="annotation-editor annotation-image-editor" hidden>
+          <div class="annotation-image-preview"><img id="classificationAnnotationImage" alt="当前分类图片"><span class="annotation-image-status"></span></div>
+          <aside class="annotation-classification-controls">
+            <label><span>图片类别</span><select id="classificationAnnotationLabel" class="form-select" aria-label="图片类别"><option value="">请先选择类别</option></select></label>
+            <div id="classificationLabelButtons" class="classification-label-buttons" aria-label="快捷选择类别"></div>
+            <p class="muted-copy mb-0">选择类别即自动保存。使用上一张 / 下一张连续标注，也可按 ← / → 切换。</p>
+          </aside>
         </section>
 
-        <section id="annotationJsonEditor" class="annotation-editor" hidden>
-          <label><span>分割标注 JSON</span><textarea id="annotationJson" class="form-control font-monospace" rows="12"></textarea></label>
-          <p class="muted-copy mb-0">当前分割数据支持粘贴轮廓点 JSON；目标检测请使用图片框选。</p>
+        <section id="annotationJsonEditor" class="annotation-editor annotation-image-editor" hidden>
+          <div class="annotation-image-preview"><img id="segmentationAnnotationImage" alt="当前分割图片"><span class="annotation-image-status"></span></div>
+          <aside class="annotation-classification-controls">
+            <label><span>分割标注 JSON</span><textarea id="annotationJson" class="form-control font-monospace" rows="12"></textarea></label>
+            <p class="muted-copy mb-0">修改后自动保存；格式错误时保留当前图片，请修正后切换。</p>
+          </aside>
         </section>
         <datalist id="annotationLabelOptions"></datalist>
       </div>
-      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="saveDatasetAnnotation" type="button">保存标注</button></div>
+      <div class="modal-footer"><small id="annotationFooterHint" class="me-auto muted-copy">修改自动保存，切图前会完成保存。</small><button class="btn btn-outline-primary" id="saveDatasetAnnotation" type="button">立即保存</button><button class="btn btn-primary" type="button" data-bs-dismiss="modal">完成</button></div>
     </div></div>
   </div>
 
@@ -354,7 +367,7 @@
   </div>
 </div>
 <link href="{{ url_for('static', path='/css/management.css') }}?v=20260923-04" rel="stylesheet">
-<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261112-augmentation-colors" rel="stylesheet">
-<script src="{{ url_for('static', path='/js/dataset_helpers.js') }}?v=20261112-augmentation-colors"></script>
-<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261112-annotation-type"></script>
+<link href="{{ url_for('static', path='/css/datasets.css') }}?v=20261115-continuous-annotation" rel="stylesheet">
+<script src="{{ url_for('static', path='/js/dataset_helpers.js') }}?v=20261115-continuous-annotation"></script>
+<script src="{{ url_for('static', path='/js/datasets.js') }}?v=20261115-continuous-annotation"></script>
 {% endblock %}

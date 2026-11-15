@@ -124,6 +124,9 @@ class CollectionOnlyScenesTests(unittest.IsolatedAsyncioTestCase):
             with Image.open(item.media_path) as image:
                 self.assertEqual(image.size, (40, 30))
             self.assertEqual(item.annotation_json["collection"]["roi_code"], "ROI1")
+            self.assertIn("生产检测_场景ROI", item.original_name)
+            self.assertIn("区域ROI1", item.original_name)
+            self.assertTrue(item.annotation_json["collection"]["recipe_name"])
         records = self.database.scalars(select(DetectionApiCall)).all()
         self.assertEqual(len(records), 1)
         detail = (await self.client.get(f"/inspection/call-records/{records[0].id}")).json()

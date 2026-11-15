@@ -9,7 +9,9 @@ path; a missing destination directory must never turn a product into NG.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 import logging
+import re
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -20,9 +22,85 @@ from sqlalchemy.orm import Session
 
 from app.core.config import PROJECT_ROOT
 from app.models.intelligence import Dataset, DatasetItem, InspectionScenarioVersion
+from app.models.inspection import DetectionTask
+from app.models.recipe import Recipe, RegionOfInterest
 
 
 logger = logging.getLogger(__name__)
+
+
+def _collection_metadata(
+    database: Session, *, scope: str, source: str, image_path: str,
+    version: InspectionScenarioVersion | None = None, roi_id: int | None = None,
+    recipe_id: int | None = None, detection_task_id: int | None = None,
+    execution_id: int | None = None, image_index: int | None = None,
+    context: dict | None = None,
+) -> dict:
+    context = context or {}
+    roi = database.get(RegionOfInterest, roi_id) if roi_id is not None else None
+    task = database.get(DetectionTask, detection_task_id) if detection_task_id is not None else None
+    recipe_id = recipe_id or (roi.recipe_id if roi else None) or (task.recipe_id if task else None)
+    recipe = database.get(Recipe, recipe_id) if recipe_id is not None else None
+    scene = version.scenario if version else None
+    source_image_path = context.get("source_image_path") or image_path
+    return {
+        "name_version": 1, "scope": scope, "source": source,
+        "collected_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "source_image_path": source_image_path,
+        "source_filename": str(source_image_path).replace("\\", "/").rsplit("/", 1)[-1],
+        "recipe_id": recipe_id,
+        "recipe_code": recipe.code if recipe else context.get("recipe_code"),
+        "recipe_name": recipe.name if recipe else None,
+        "recipe_version": recipe.version if recipe else context.get("recipe_version"),
+        "line_code": recipe.line_code if recipe else None,
+        "material_code": recipe.material_code if recipe else None,
+        "process_code": recipe.process_code if recipe else None,
+        "camera_code": recipe.camera_code if recipe else None,
+        "capture_index": recipe.capture_index if recipe else None,
+        "scenario_id": scene.id if scene else None,
+        "scenario_code": scene.code if scene else None,
+        "scenario_name": scene.name if scene else None,
+        "scenario_version_id": version.id if version else None,
+        "scenario_version": version.version if version else None,
+        "roi_id": roi_id, "roi_code": roi.code if roi else context.get("roi_code"),
+        "roi_name": roi.name if roi else context.get("roi_name"),
+        "sn": task.sn if task else context.get("sn"),
+        "detection_task_id": detection_task_id, "execution_id": execution_id,
+        "image_index": image_index,
+    }
+
+
+def _collection_name(metadata: dict, image_path: str) -> str:
+    trigger = {"PRODUCTION": "生产检测", "SCENE_API": "场景接口"}.get(metadata["source"], "场景测试")
+    scope = {"ROI": "场景ROI", "ROI_RECIPE": "配方ROI", "ORIGINAL": "相机原图"}[metadata["scope"]]
+    parts = [trigger, scope]
+    fields = (
+        ("配方", metadata.get("recipe_name") or metadata.get("recipe_code"), 40),
+        ("版本", metadata.get("recipe_version"), 16),
+        ("拉线", metadata.get("line_code"), 24),
+        ("物料", metadata.get("material_code"), 32),
+        ("工序", metadata.get("process_code"), 24),
+        ("相机", metadata.get("camera_code"), 24),
+        ("拍照", metadata.get("capture_index"), 8),
+        ("场景", metadata.get("scenario_name"), 40),
+        ("场景版本", metadata.get("scenario_version"), 16),
+        ("区域", metadata.get("roi_code") or metadata.get("roi_id"), 32),
+        ("条码", metadata.get("sn"), 64),
+    )
+    for label, value, limit in fields:
+        if value is not None and str(value).strip():
+            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f\s]+', "-", str(value)).strip(" .-")
+            if safe:
+                parts.append(f"{label}{safe[:limit]}")
+    collected_at = datetime.fromisoformat(metadata["collected_at"])
+    parts.append(collected_at.strftime("%Y%m%d-%H%M%S-%f")[:-3])
+    for label, key in (("T", "detection_task_id"), ("E", "execution_id"), ("IMG", "image_index")):
+        if metadata.get(key) is not None:
+            parts.append(f"{label}{metadata[key]}")
+    suffix = Path(image_path).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}:
+        suffix = ".jpg"
+    return "_".join(parts)[:480] + suffix
 
 
 def is_collection_only(version: InspectionScenarioVersion) -> bool:
@@ -45,6 +123,7 @@ def scene_collection_targets(database: Session, version: InspectionScenarioVersi
 def collect_scene_image(
     database: Session, version: InspectionScenarioVersion, *, execution_id: int,
     roi_id: int | None, source: str, image_path: str, context: dict,
+    detection_task_id: int | None = None,
 ) -> dict:
     source_path = Path(image_path)
     with Image.open(source_path) as image:
@@ -89,6 +168,11 @@ def collect_scene_image(
                 if preview:
                     outcome.update(status="PREVIEW", message="采集检查通过；测试图片不写入生产数据集")
                     continue
+                metadata = _collection_metadata(
+                    database, scope="ROI", source=source, image_path=image_path,
+                    version=version, roi_id=roi_id, execution_id=execution_id,
+                    detection_task_id=detection_task_id, context=context,
+                )
                 target_dir = (PROJECT_ROOT / "uploads" / "datasets" / dataset.code / "auto").resolve()
                 allowed_root = (PROJECT_ROOT / "uploads" / "datasets").resolve()
                 if not target_dir.is_relative_to(allowed_root):
@@ -100,16 +184,14 @@ def collect_scene_image(
                 temporary_path.replace(target_path)
                 item = DatasetItem(
                     dataset_id=dataset.id, media_path=str(target_path),
-                    original_name=source_path.name, media_type="IMAGE", source="AUTO_ROI",
+                    original_name=_collection_name(metadata, image_path), media_type="IMAGE", source="AUTO_ROI",
                     content_hash=content_hash, annotation_status="PENDING",
                     annotation_json={"collection": {
+                        **metadata,
                         "run_mode": "COLLECT_ONLY", "scenario_version_id": version.id,
                         "configured_scenario_version_id": dataset.collection_scenario_version_id,
                         "execution_id": execution_id, "roi_id": roi_id,
-                        "source": source, "source_image_path": context.get("source_image_path"),
-                        "recipe_code": context.get("recipe_code"), "recipe_version": context.get("recipe_version"),
-                        "roi_code": context.get("roi_code"), "roi_bbox": context.get("roi_bbox"),
-                        "sn": context.get("sn"),
+                        "roi_bbox": context.get("roi_bbox"),
                     }},
                 )
                 database.add(item)
@@ -142,6 +224,8 @@ def collect_roi_for_matching_datasets(
     roi_id: int | None,
     source: str,
     roi_image_path: str,
+    context: dict | None = None,
+    detection_task_id: int | None = None,
 ) -> list[int]:
     """Copy a production ROI into eligible scene-linked datasets.
 
@@ -181,6 +265,11 @@ def collect_roi_for_matching_datasets(
     if not datasets:
         return []
 
+    metadata = _collection_metadata(
+        database, scope="ROI", source=source, image_path=roi_image_path,
+        version=executed_version, roi_id=roi_id, execution_id=execution_id,
+        detection_task_id=detection_task_id, context=context,
+    )
     payload = source_path.read_bytes()
     content_hash = hashlib.sha256(payload).hexdigest()
     collected_ids: list[int] = []
@@ -214,11 +303,12 @@ def collect_roi_for_matching_datasets(
         item = DatasetItem(
             dataset_id=dataset.id,
             media_path=str(target_path),
-            original_name=target_path.name,
+            original_name=_collection_name(metadata, roi_image_path),
             media_type="IMAGE",
             annotation_status="PENDING",
             annotation_json={
                 "collection": {
+                    **metadata,
                     "scenario_version_id": scenario_version_id,
                     "configured_scenario_version_id": dataset.collection_scenario_version_id,
                     "roi_id": roi_id,
@@ -266,6 +356,11 @@ def collect_recipe_roi_for_matching_datasets(
     if not datasets:
         return []
 
+    metadata = _collection_metadata(
+        database, scope="ROI_RECIPE", source=source, image_path=roi_image_path,
+        recipe_id=recipe_id, detection_task_id=detection_task_id, roi_id=roi_id,
+        image_index=image_index, context={"source_image_path": source_image_path},
+    )
     payload = source_path.read_bytes()
     content_hash = hashlib.sha256(payload).hexdigest()
     collected_ids: list[int] = []
@@ -304,11 +399,12 @@ def collect_recipe_roi_for_matching_datasets(
         item = DatasetItem(
             dataset_id=dataset.id,
             media_path=str(target_path),
-            original_name=target_path.name,
+            original_name=_collection_name(metadata, roi_image_path),
             media_type="IMAGE",
             annotation_status="PENDING",
             annotation_json={
                 "collection": {
+                    **metadata,
                     "scope": "ROI_RECIPE",
                     "recipe_id": recipe_id,
                     "detection_task_id": detection_task_id,
@@ -356,9 +452,13 @@ def collect_original_image_for_matching_datasets(
     if not datasets:
         return []
 
+    metadata = _collection_metadata(
+        database, scope="ORIGINAL", source=source, image_path=image_path,
+        recipe_id=recipe_id, detection_task_id=detection_task_id, image_index=image_index,
+        context={"source_image_path": source_image_path},
+    )
     payload = source_path.read_bytes()
     content_hash = hashlib.sha256(payload).hexdigest()
-    filename = str(source_image_path or image_path).replace("\\", "/").rsplit("/", 1)[-1]
     collected_ids: list[int] = []
     for dataset in datasets:
         collected_count = database.scalar(
@@ -390,11 +490,12 @@ def collect_original_image_for_matching_datasets(
         item = DatasetItem(
             dataset_id=dataset.id,
             media_path=str(target_path),
-            original_name=filename or target_path.name,
+            original_name=_collection_name(metadata, image_path),
             media_type="IMAGE",
             annotation_status="PENDING",
             annotation_json={
                 "collection": {
+                    **metadata,
                     "scope": "ORIGINAL",
                     "recipe_id": recipe_id,
                     "detection_task_id": detection_task_id,

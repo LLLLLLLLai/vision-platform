@@ -17,6 +17,16 @@
 .dataset-item-pagination .form-control { width: 56px; text-align: center; }
 .dataset-item-grid.training-paged { max-height: min(68vh, 700px); overflow-y: auto; align-content: start; padding: 2px 4px 2px 2px; scrollbar-gutter: stable; }
 .dataset-item-load-more { display: block; margin: 1rem auto 0; }
+.management-page[data-page="datasets"] .dataset-item-content strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dataset-item-preview-modal .modal-header > div { min-width: 0; }
+#datasetItemPreviewTitle { overflow-wrap: anywhere; max-height: 7rem; overflow-y: auto; }
+.dataset-item-preview-modal .btn-close { flex-shrink: 0; align-self: flex-start; }
 @media (max-width: 720px) { .dataset-item-filter-controls, .dataset-item-filter-controls .form-control { width: 100%; } }
 .dataset-create-hint strong { color: #1955a6; }
 .dataset-item-preview {
@@ -362,6 +372,32 @@
 .dataset-augmentation-estimate { padding: .5rem .65rem; border-radius: .5rem; color: #315480; background: #eef5ff; font-size: .83rem; }
 .dataset-augmentation-progress { display: grid; gap: .4rem; font-size: .82rem; }
 .dataset-augmentation-progress .progress { height: .55rem; }
+.annotation-session-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 14px; background: #f5f8fc; border-bottom: 1px solid #dbe5f0; flex: 0 0 auto; }
+.annotation-session-navigation { display: flex; align-items: center; gap: 12px; }
+#annotationItemPosition { font-size: .85rem; font-variant-numeric: tabular-nums; }
+#annotationSaveStatus { font-size: .85rem; color: #52616f; }
+#annotationSaveStatus[data-status="saved"] { color: #16844a; }
+#annotationSaveStatus[data-status="error"] { color: #b42318; }
+.annotation-save-error { flex: 0 0 auto; max-height: 100px; overflow: auto; overflow-wrap: anywhere; color: #a51c30; background: #fff1f2; padding: 8px 14px; }
+#datasetAnnotationModal .annotation-image-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); flex: 1 1 auto; min-height: 0; }
+#datasetAnnotationModal #annotationJsonEditor { grid-template-columns: minmax(0, 1fr) minmax(280px, .65fr); }
+#datasetAnnotationModal .annotation-editor[hidden], .annotation-save-error[hidden] { display: none; }
+.annotation-image-preview { position: relative; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 12px; background: #edf2f7; overflow: hidden; }
+#datasetAnnotationModal .annotation-image-preview img { width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.annotation-image-status { position: absolute; padding: 12px; color: #52616f; text-align: center; }
+.annotation-image-status:empty { display: none; }
+.annotation-classification-controls { display: flex; flex-direction: column; gap: 16px; min-height: 0; padding: 16px; overflow: auto; border-left: 1px solid #dbe5f0; }
+.classification-label-buttons { display: flex; flex-direction: column; gap: 8px; }
+.classification-label-button { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #dbe5f0; border-radius: 8px; background: #fff; text-align: left; color: #24344a; }
+.classification-label-button i { width: 10px; height: 10px; flex: 0 0 auto; background: var(--annotation-color); border-radius: 50%; }
+.classification-label-button span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
+.classification-label-button.active { border-color: #3b82f6; background: #eff6ff; }
+.classification-label-button:hover { background: #f0f5fb; }
+@media (max-width: 720px) {
+  #datasetAnnotationModal .annotation-image-editor, #datasetAnnotationModal #annotationJsonEditor { grid-template-columns: 1fr; min-height: 500px; flex: 0 0 auto; }
+  .annotation-image-preview { height: 320px; }
+  .annotation-classification-controls { border-left: 0; border-top: 1px solid #dbe5f0; max-height: 280px; }
+}
 @media (max-width: 1100px) {
   .management-page[data-page="datasets"] .dataset-settings-grid { grid-template-columns: 1fr; }
   .management-page[data-page="datasets"] .dataset-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

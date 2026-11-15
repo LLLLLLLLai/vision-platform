@@ -2,7 +2,7 @@
   const api = "/api/v1";
   const itemPageSize = 48;
   const augmentationBatchImageLimit = 200;
-  const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor } = window.VisionDatasetHelpers;
+  const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave } = window.VisionDatasetHelpers;
   const state = {
     datasets: [],
     selectedId: null,
@@ -645,7 +645,7 @@
       ...labels.map((label) => `<option value="${escapeHtml(label)}">${escapeHtml(label)}</option>`),
     ].join("");
     select.disabled = labels.length === 0;
-    select.value = matched || (requested ? "" : labels.length === 1 ? labels[0] : "");
+    select.value = matched || "";
     return Boolean(matched);
   }
 
@@ -1239,8 +1239,36 @@
 
   function setAnnotationDirty(dirty = true) {
     state.annotation.dirty = dirty;
+    if (dirty) state.annotation.autosave?.change(Boolean(state.annotation.interaction));
     const title = byId("annotationCanvasTitle");
     if (title) title.textContent = dirty ? "检测框标注 · 未保存" : "检测框标注";
+  }
+
+  function showAnnotationSaveState(status, error = null) {
+    state.annotation.dirty = state.annotation.autosave?.dirty() || false;
+    const messages = { pending: "待自动保存…", saving: "正在保存…", saved: "已自动保存", error: "保存失败 · 修改仍保留" };
+    const indicator = byId("annotationSaveStatus");
+    indicator.textContent = messages[status] || "修改后自动保存";
+    indicator.dataset.status = status;
+    byId("annotationSaveError").hidden = status !== "error";
+    byId("annotationSaveError").textContent = error ? `${error.message}。请修正或点击“重试保存”，保存成功后才能切换或关闭。` : "";
+    byId("saveDatasetAnnotation").textContent = status === "error" ? "重试保存" : "立即保存";
+    byId("annotationCanvasTitle").textContent = state.annotation.dirty ? "检测框标注 · 未保存" : "检测框标注";
+    updateAnnotationNavigation();
+  }
+
+  function setAnnotationBusy(busy) {
+    state.annotation.busy = busy;
+    byId("datasetAnnotationModal").querySelector(".modal-body").inert = busy;
+    updateAnnotationNavigation();
+  }
+
+  function renderClassificationButtons() {
+    const current = byId("classificationAnnotationLabel").value;
+    const labels = classificationLabels();
+    byId("classificationLabelButtons").innerHTML = labels.length ? labels.map((label) =>
+      `<button type="button" class="classification-label-button ${label === current ? "active" : ""}" style="--annotation-color:${annotationColor(label)}" data-classification-label="${escapeHtml(label)}" aria-pressed="${label === current}"><i></i><span>${escapeHtml(label)}</span>${label === current ? "<b>✓</b>" : ""}</button>`
+    ).join("") : '<p class="muted-copy">请先在数据集的“类别”中添加选项。</p>';
   }
 
   function annotationImageItems(dataset = selected()) {
@@ -1251,8 +1279,10 @@
     const current = state.annotation.itemIndex;
     const total = state.annotation.itemIds.length;
     byId("annotationItemPosition").textContent = total ? `第 ${current + 1} / ${total} 张` : "第 0 / 0 张";
-    byId("annotationPreviousItem").disabled = current <= 0;
-    byId("annotationNextItem").disabled = current < 0 || current >= total - 1;
+    const busy = state.annotation.busy || Boolean(state.annotation.interaction);
+    byId("annotationPreviousItem").disabled = busy || current <= 0;
+    byId("annotationNextItem").disabled = busy || current < 0 || current >= total - 1;
+    byId("saveDatasetAnnotation").disabled = busy || state.annotation.loading;
   }
 
   function applyAnnotationViewport() {
@@ -1521,6 +1551,7 @@
   }
 
   function startDetectionInteraction(event) {
+    if (state.annotation.busy || state.annotation.loading) return;
     if (state.annotation.type !== "DETECTION") return;
     if (event.pointerType !== "touch" && ![0, 1].includes(event.button)) return;
     const target = event.target;
@@ -1655,6 +1686,8 @@
     }
     state.annotation.interaction = null;
     releaseAnnotationPointer(interaction, event);
+    if (state.annotation.dirty) setAnnotationDirty();
+    updateAnnotationNavigation();
     renderDetectionCanvas();
   }
 
@@ -1668,6 +1701,8 @@
     state.annotation.draft = null;
     state.annotation.interaction = null;
     if (event) releaseAnnotationPointer(interaction, event);
+    if (state.annotation.dirty) setAnnotationDirty();
+    updateAnnotationNavigation();
     renderDetectionCanvas();
   }
 
@@ -1699,17 +1734,25 @@
     if (Number.isInteger(state.annotation.selectedBoxIndex)) renderDetectionCanvas();
   }
 
-  function navigateAnnotation(offset) {
-    if (state.annotation.dirty) {
-      notify("当前图片的标注尚未保存，请先保存后再切换图片。", "warning");
-      return;
-    }
+  async function navigateAnnotation(offset) {
+    if (state.annotation.busy || state.annotation.interaction) return;
     const nextIndex = state.annotation.itemIndex + offset;
     const itemId = state.annotation.itemIds[nextIndex];
-    if (itemId) openAnnotation(itemId);
+    if (!itemId) return;
+    const itemIds = state.annotation.itemIds;
+    setAnnotationBusy(true);
+    try {
+      await state.annotation.autosave.flush();
+      openAnnotation(itemId, itemIds);
+    } catch {
+      byId("annotationSaveError").scrollIntoView({ block: "nearest" });
+    } finally {
+      setAnnotationBusy(false);
+    }
   }
 
   async function runAnnotationPrelabel() {
+    if (state.annotation.busy || state.annotation.loading || state.annotation.interaction) return;
     const dataset = selected();
     const itemId = Number(byId("annotationItemId").value);
     const modelVersionId = Number(byId("annotationPreModel").value);
@@ -1732,9 +1775,11 @@
       return;
     }
     button.disabled = true;
+    setAnnotationBusy(true);
     button.textContent = "生成中…";
     setPreAnnotationStatus("模型正在自动标注并保存，请稍候…");
     try {
+      await state.annotation.autosave.flush();
       const response = await request(`${api}/datasets/${dataset.id}/items/${itemId}/pre-annotations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1754,10 +1799,12 @@
         renderDetectionCanvas();
       } else if (type === "CLASSIFICATION") {
         renderClassificationLabelOptions(dataset, annotation.label);
+        renderClassificationButtons();
       } else {
         byId("annotationJson").value = JSON.stringify(annotation, null, 2);
       }
       setAnnotationDirty(false);
+      showAnnotationSaveState("saved");
       renderLabelOptions();
       renderAnnotationLabels();
       renderDetail();
@@ -1772,17 +1819,19 @@
       setPreAnnotationStatus(`AI 自动标注失败：${error.message}`, "warning");
       notify(error.message, "danger");
     } finally {
+      setAnnotationBusy(false);
       button.textContent = "AI 自动标注";
       button.disabled = !compatiblePreAnnotationModels(dataset).length;
     }
   }
 
-  function openAnnotation(itemId) {
+  function openAnnotation(itemId, sessionItemIds = null) {
     const dataset = selected();
     const item = dataset?.items?.find((candidate) => candidate.id === Number(itemId));
     if (!dataset || !item || !isTraining(dataset)) return;
     const type = annotationType(dataset);
-    const annotationItems = annotationImageItems(dataset);
+    const itemIds = sessionItemIds || annotationImageItems(dataset).map((candidate) => candidate.id);
+    state.annotation.autosave?.dispose();
     state.annotation = {
       itemId: item.id,
       type,
@@ -1794,16 +1843,44 @@
       interaction: null,
       history: [],
       dirty: false,
+      busy: false,
+      loading: true,
+      allowClose: false,
       preannotationMeta: item.annotation_json?._meta || null,
-      itemIds: annotationItems.map((candidate) => candidate.id),
-      itemIndex: annotationItems.findIndex((candidate) => candidate.id === item.id),
+      itemIds,
+      itemIndex: itemIds.indexOf(item.id),
       viewport: { scale: 1, translateX: 0, translateY: 0, spacePressed: false },
     };
+    const session = state.annotation;
+    session.autosave = createAnnotationAutosave({
+      read: buildAnnotationPayload,
+      write: async (annotationJson) => {
+        const result = await request(`${api}/datasets/${dataset.id}/items/${item.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ annotation_status: "LABELED", annotation_json: annotationJson }),
+          signal: AbortSignal.timeout(30000),
+        });
+        Object.assign(item, result);
+        const latestItem = selected()?.id === dataset.id ? selected().items.find((candidate) => candidate.id === item.id) : null;
+        if (latestItem && latestItem !== item) Object.assign(latestItem, result);
+        const invalidated = Number(result.invalidated_augmented_count || 0);
+        if (invalidated) notify(`标注已保存；${invalidated} 张旧增强图已失效，可重新生成。`);
+      },
+      onState: (status, error) => { if (state.annotation === session) showAnnotationSaveState(status, error); },
+    });
+    setAnnotationBusy(false);
+    showAnnotationSaveState("idle");
+    byId("annotationSaveStatus").textContent = item.annotation_status === "LABELED" ? "已保存 · 修改后自动保存" : "未标注 · 修改后自动保存";
     byId("annotationItemId").value = item.id;
     byId("annotationItemName").textContent = `样本：${item.original_name} · ${annotationTypeLabel(type)}`;
+    byId("annotationFooterHint").textContent = type === "DETECTION"
+      ? "修改自动保存；无目标图片可点击“立即保存”确认为空标注。"
+      : "修改自动保存，切图前会完成保存；只浏览不会标记为已标注。";
     byId("annotationDetectionEditor").hidden = type !== "DETECTION";
     byId("annotationClassificationEditor").hidden = type !== "CLASSIFICATION";
     byId("annotationJsonEditor").hidden = type !== "SEGMENTATION";
+    ["annotationDetectionEditor", "annotationClassificationEditor", "annotationJsonEditor"].forEach((id) => { byId(id).inert = true; });
     byId("annotationHint").textContent = type === "DETECTION"
       ? "采用选择、移动和矩形框选工作台。负样本可保留为空框，训练前仍会检查类别和标注完整度。"
       : type === "CLASSIFICATION"
@@ -1817,6 +1894,7 @@
     renderLabelOptions();
     const existingClassificationLabel = item.annotation_json?.label || "";
     const hasKnownClassificationLabel = renderClassificationLabelOptions(dataset, existingClassificationLabel);
+    renderClassificationButtons();
     if (type === "CLASSIFICATION" && existingClassificationLabel && !hasKnownClassificationLabel) {
       byId("annotationHint").textContent = "当前历史标注类别不在数据集类别中，请先在数据集类别中补充或改选标准类别后再保存。";
     }
@@ -1827,32 +1905,48 @@
       renderAnnotationLabels();
       updateAnnotationToolUi();
       updateAnnotationNavigation();
-      const image = byId("detectionAnnotationImage");
-      const hydrateBoxes = () => {
-        if (Number(state.annotation.itemId) !== Number(item.id)) return;
-        state.annotation.boxes = normalizeBoxes(item.annotation_json || {}, image);
-        setAnnotationDirty(false);
+      renderDetectionCanvas();
+    }
+    const image = byId(type === "DETECTION" ? "detectionAnnotationImage" : type === "CLASSIFICATION" ? "classificationAnnotationImage" : "segmentationAnnotationImage");
+    const imageStatus = image.parentElement.querySelector(".annotation-image-status");
+    image.hidden = true;
+    if (imageStatus) imageStatus.textContent = "正在加载图片…";
+    const imageReady = () => {
+      if (state.annotation !== session || !session.loading) return;
+      session.loading = false;
+      image.hidden = false;
+      ["annotationDetectionEditor", "annotationClassificationEditor", "annotationJsonEditor"].forEach((id) => { byId(id).inert = false; });
+      if (imageStatus) imageStatus.textContent = "";
+      if (type === "DETECTION") {
+        session.boxes = normalizeBoxes(item.annotation_json || {}, image);
         fitAnnotationViewport();
         renderDetectionCanvas();
-      };
-      image.onload = hydrateBoxes;
-      image.src = item.file_url || "";
-      if (image.complete && image.naturalWidth) hydrateBoxes();
-    }
+      }
+      updateAnnotationNavigation();
+    };
+    image.onload = imageReady;
+    image.onerror = () => {
+      if (state.annotation !== session) return;
+      const message = "图片加载失败，请检查文件路径；可切换其他图片";
+      if (imageStatus) imageStatus.textContent = message;
+      byId("annotationSaveError").hidden = false;
+      byId("annotationSaveError").textContent = message;
+    };
+    image.src = item.file_url || "";
+    if (image.complete && image.naturalWidth) imageReady();
+    updateAnnotationNavigation();
     openModal("datasetAnnotationModal");
   }
 
-  async function saveAnnotation() {
+  function buildAnnotationPayload() {
     const dataset = selected();
-    const itemId = Number(byId("annotationItemId").value);
-    if (!dataset || !itemId) return;
+    if (!dataset || state.annotation.loading) throw new Error("图片未加载成功，暂不能保存标注");
     let annotationJson;
     const type = annotationType(dataset);
     if (type === "DETECTION") {
       const invalidBox = state.annotation.boxes.find((box) => !box.label.trim() || box.width <= 0 || box.height <= 0);
       if (invalidBox) {
-        notify("每个检测框都需要填写类别名称。", "warning");
-        return;
+        throw new Error("每个检测框都需要填写类别名称");
       }
       annotationJson = {
         boxes: state.annotation.boxes.map((box) => ({
@@ -1866,34 +1960,29 @@
     } else if (type === "CLASSIFICATION") {
       const label = byId("classificationAnnotationLabel").value.trim();
       if (!label) {
-        notify("请选择数据集已维护的图片类别。", "warning");
-        return;
+        throw new Error("请选择数据集已维护的图片类别");
       }
       annotationJson = { label };
     } else {
       try {
         annotationJson = JSON.parse(byId("annotationJson").value);
       } catch {
-        notify("分割标注 JSON 格式不正确。", "warning");
-        return;
+        throw new Error("分割标注 JSON 格式不正确");
       }
     }
     if (state.annotation.preannotationMeta) {
       annotationJson._meta = { ...state.annotation.preannotationMeta, review_required: false, confirmed_at: new Date().toISOString() };
     }
+    return annotationJson;
+  }
+
+  async function saveAnnotation() {
+    if (state.annotation.busy || state.annotation.interaction || !state.annotation.autosave) return;
+    if (!state.annotation.autosave.dirty()) setAnnotationDirty();
     try {
-      const result = await request(`${api}/datasets/${dataset.id}/items/${itemId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ annotation_status: "LABELED", annotation_json: annotationJson }),
-      });
-      setAnnotationDirty(false);
-      closeModal("datasetAnnotationModal");
-      await selectDataset(dataset.id);
-      const invalidated = Number(result.invalidated_augmented_count || 0);
-      notify(invalidated ? `训练标注已保存；${invalidated} 张旧增强图已失效，可重新生成。` : "训练标注已保存。");
-    } catch (error) {
-      notify(error.message, "danger");
+      await state.annotation.autosave.flush();
+    } catch {
+      byId("annotationSaveError").scrollIntoView({ block: "nearest" });
     }
   }
 
@@ -2086,6 +2175,18 @@
       saveDatasetLabels(remaining);
     });
     byId("saveDatasetAnnotation").addEventListener("click", saveAnnotation);
+    byId("classificationAnnotationLabel").addEventListener("change", () => {
+      renderClassificationButtons();
+      setAnnotationDirty();
+    });
+    byId("classificationLabelButtons").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-classification-label]");
+      if (!button) return;
+      byId("classificationAnnotationLabel").value = button.dataset.classificationLabel;
+      renderClassificationButtons();
+      setAnnotationDirty();
+    });
+    byId("annotationJson").addEventListener("input", () => setAnnotationDirty());
     byId("runAnnotationPrelabel").addEventListener("click", runAnnotationPrelabel);
     byId("addAnnotationLabel").addEventListener("click", addAnnotationLabel);
     byId("undoDetectionBox").addEventListener("click", undoAnnotationChange);
@@ -2115,6 +2216,30 @@
     byId("annotationCanvasWrap").addEventListener("dblclick", fitAnnotationViewport);
     byId("datasetAnnotationModal").addEventListener("shown.bs.modal", () => {
       if (state.annotation.type === "DETECTION") fitAnnotationViewport();
+    });
+    byId("datasetAnnotationModal").addEventListener("hide.bs.modal", (event) => {
+      const session = state.annotation;
+      if (session.allowClose) return;
+      if (session.busy || session.interaction) { event.preventDefault(); return; }
+      if (!session.autosave?.dirty()) return;
+      event.preventDefault();
+      setAnnotationBusy(true);
+      session.autosave.flush().then(() => {
+        session.allowClose = true;
+        closeModal("datasetAnnotationModal");
+      }).catch(() => {
+        byId("annotationSaveError").scrollIntoView({ block: "nearest" });
+      }).finally(() => setAnnotationBusy(false));
+    });
+    byId("datasetAnnotationModal").addEventListener("hidden.bs.modal", () => {
+      state.annotation.autosave?.dispose();
+      state.annotation.autosave = null;
+      if (selected()) selectDataset(selected().id).catch((error) => notify(error.message, "danger"));
+    });
+    window.addEventListener("beforeunload", (event) => {
+      if (!state.annotation.autosave?.dirty()) return;
+      event.preventDefault();
+      event.returnValue = "";
     });
     window.addEventListener("resize", () => {
       if (byId("datasetAnnotationModal").classList.contains("show") && state.annotation.type === "DETECTION") {
@@ -2171,8 +2296,14 @@
     byId("annotationRemoveSelected").addEventListener("click", deleteSelectedAnnotationBox);
     document.addEventListener("keydown", (event) => {
       const modalOpen = byId("datasetAnnotationModal").classList.contains("show");
-      if (!modalOpen || state.annotation.type !== "DETECTION") return;
+      if (!modalOpen || state.annotation.busy) return;
       const editing = event.target.matches?.("input, textarea, select, [contenteditable='true']");
+      if (!editing && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        navigateAnnotation(event.key === "ArrowLeft" ? -1 : 1);
+        return;
+      }
+      if (state.annotation.type !== "DETECTION" || state.annotation.loading) return;
       if (event.code === "Space" && !editing) {
         state.annotation.viewport.spacePressed = true;
         event.preventDefault();
