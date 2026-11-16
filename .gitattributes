@@ -1,2 +1,3 @@
 vision-models/paddleocr/**/inference.* -text
 vision-models/paddleocr/**/*.pdiparams binary
+*.sh text eol=lf

@@ -18,10 +18,12 @@ OCR 依赖不加入主平台 requirements，避免 Paddle 与 YOLO/PyTorch 冲�
 ```bash
 python -m venv ocr_service/.venv
 ocr_service/.venv/bin/python -m pip install -r ocr_service/requirements.txt
-bash start-ocr.sh
+bash start.sh
 ```
 
-Windows 使用 `ocr_service\.venv\Scripts\python.exe -m pip install -r ocr_service\requirements.txt`，然后执行 `powershell -File start-ocr.ps1`。也可用 `OCR_PYTHON` 指定已有 OCR Python；Linux 支持复用激活的 conda 环境。GPU 部署需按服务器 CUDA 环境安装官方匹配的 Paddle GPU 包，不能同时安装 CPU/GPU Paddle 包。
+完成主平台环境准备后，`bash start.sh` 一次启动主平台和本地 OCR，`bash stop.sh` 一次停止。Windows 准备好 `ocr_service\.venv` 后安装 `ocr_service\requirements.txt`，执行 `powershell -File start.ps1` / `powershell -File stop.ps1`。可用 `OCR_PYTHON` 指定已有 OCR Python；未指定且没有 OCR 独立 venv 时，复用主平台选中的 venv 或当前 Conda。主平台环境始终优先检查项目 `.venv` / `venv`，没有才使用当前 Conda。环境需事先安装对应依赖，不会自动下载。GPU 部署需按服务器 CUDA 环境安装官方匹配的 Paddle GPU 包，不能同时安装 CPU/GPU Paddle 包。
+
+`START_LOCAL_OCR=auto` 根据 `OCR_SERVICE_BASE_URL` 判断是否启动本地 OCR；远程 OCR 不启动也不停止。原 `start-ocr.sh` / `start-ocr.ps1` 仍可用于单独调试 OCR。统一启动的日志在 `logs/services/ocr.log`；不要再重复运行独立启动命令。
 
 `.env`：
 
@@ -59,7 +61,7 @@ OCR_RECOGNITION_MODEL_DIR=
 
 服务 `GET /health` 返回进程状态和 `model_loaded`，尚未加载模型不等于识别已可用；首个 `/ocr` 请求加载模型。平台以 multipart 的 `image` 字段上传图片内容，跨服务器不依赖同名本地路径。默认仅监听回环；远程部署必须配置双方相同的 `OCR_SERVICE_API_KEY`、网络访问限制及 TLS 代理。请求头为 `X-OCR-API-Key`。单图片上限 20 MB、3200 万像素；单推理实例串行使用模型，最多接收两项并发工作，额外请求 429，不无限积压。
 
-主平台日志记录请求失败原因；OCR 启动终端记录模型错误详情。缺依赖、目录错误或模型推理失败返回 503；超时不会返回伪造文字。
+主平台日志记录请求失败原因；统一启停时 OCR 的错误详情记录在 `logs/services/ocr.log`，独立调试时显示在启动终端。缺依赖、目录错误或模型推理失败返回 503；超时不会返回伪造文字。
 
 ## VLM API Key 自动加密保存
 

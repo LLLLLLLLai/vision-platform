@@ -97,7 +97,7 @@ PaddleOCR
 本地 Qwen3-VL
 ```
 
-当前平台通过“VLM 模型配置”调用用户维护的 **OpenAI 兼容 VLM 接口**，并通过流程场景调用已发布的 YOLO 权重。新增加的 **OCR 文字识别节点** 使用独立环境中的 `ocr_service/server.py`，与旧版算法接口无关。默认监听本机 `9024`，通过 `start-ocr.ps1` 或 `bash start-ocr.sh` 启动；输入图片，输出文字、置信度和文字坐标，不自动判断 OK/NG。模型目录配置为空时自动读取仓库附带权重，详见 [OCR 部署说明](docs/OCR-Node-and-VLM-Keys.md)。
+当前平台通过“VLM 模型配置”调用用户维护的 **OpenAI 兼容 VLM 接口**，并通过流程场景调用已发布的 YOLO 权重。**OCR 文字识别节点** 使用 `ocr_service/server.py`，与旧版算法接口无关，默认监听本机 `9024`。现在由统一的 `start.ps1` / `start.sh` 连同主平台一起启动，无需再单独启动 OCR；原 `start-ocr` 脚本保留用于独立调试。OCR 输入图片，输出文字、置信度和文字坐标，不自动判断 OK/NG。模型目录配置为空时自动读取仓库附带权重，详见 [OCR 部署说明](docs/OCR-Node-and-VLM-Keys.md)。
 
 - `GET /api/v1/algorithms/status` 仅返回旧服务已下线说明。
 - `POST /api/v1/algorithms/vlm/judge` 返回 `410 Gone`，请改用已发布 VLM 场景接口。
@@ -143,8 +143,12 @@ Windows：
 cd C:\Users\Administrator\Desktop\vision-platform
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
+python -m venv ocr_service\.venv
+.\ocr_service\.venv\Scripts\python.exe -m pip install -r ocr_service\requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 .\start.ps1
+# 停止本项目主平台和 OCR
+.\stop.ps1
 ```
 
 Linux：
@@ -153,25 +157,39 @@ Linux：
 # 方案一：项目 .venv（优先使用）
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-cp .env.example .env
+python3.11 -m venv ocr_service/.venv
+ocr_service/.venv/bin/python -m pip install -r ocr_service/requirements.txt
+test -f .env || cp .env.example .env
 chmod +x start.sh stop.sh
 ./start.sh
 # 需要停止服务时再执行
 ./stop.sh
 ```
 
-如果项目没有 `.venv/bin/python`，可复用 Conda 环境：
+如果项目没有 `.venv` / `venv`，直接复用当前已激活的 Conda 环境，不会创建环境、切换到 Conda base 或自动下载依赖：
 
 ```bash
 conda activate vision-platform
 python -m pip install -r requirements.txt
+# 如果没有 OCR 独立环境，当前环境也需提前安装 OCR 依赖
+python -m pip install -r ocr_service/requirements.txt
 test -f .env || cp .env.example .env
 chmod +x start.sh stop.sh
 ./start.sh
 # 需要停止服务时再执行 ./stop.sh
 ```
 
-非交互式终端可先设置 `VISION_CONDA_PREFIX=/opt/miniconda3/envs/vision-platform`。脚本启动前初始化数据库，后台运行服务，PID 和日志分别保存在 `logs/platform.pid`、`logs/platform.log`；重复启动不会创建第二个进程，`stop.sh` 只停止该 PID 对应的本项目进程。若 `.venv` 存在，它始终优先于 Conda。拆分为控制端和检测端的生产部署仍建议使用 `deploy/application-server/` 中的 systemd 单元；这两个脚本只管理当前项目的一份服务进程，不启动外部 VLM 或 YOLO 服务。
+Windows 的 `start.ps1` / `stop.ps1` 与 Linux 的 `start.sh` / `stop.sh` 使用同一套服务管理逻辑：
+
+- 主平台 Python 选择顺序：项目 `.venv` → 项目 `venv` → 当前 `CONDA_PREFIX` → 显式 `VISION_CONDA_PREFIX`。非交互式终端可配置 `VISION_CONDA_PREFIX=/opt/miniconda3/envs/vision-platform`。已有环境缺依赖会报错，不会偷偷改用其他 Python。
+- OCR Python 选择顺序：显式 `OCR_PYTHON` → `ocr_service/.venv` → `ocr_service/venv` → 主平台选中的 Python。推荐保留独立 OCR 环境，避免 Paddle 与 YOLO/PyTorch 依赖冲突；只有一个 Conda 环境时，需自行确认两套依赖兼容。
+- 一次启动本地 OCR、主平台（数据库初始化在应用启动阶段执行，异步任务 worker 随主平台启动，不另起重复 worker）。两项健康检查均通过才显示成功；OCR 权重仍在首次识别时加载，服务就绪不代表已经完成模型推理验证。端口沿用 `.env` 的 `APP_PORT` / `OCR_PORT`；统一后台启动禁用开发热重载。
+- `START_LOCAL_OCR=auto` 为默认值：`OCR_SERVICE_BASE_URL` 为本机 loopback 地址时启动本地 OCR，远程地址则跳过。可设 `false` 禁止本地 OCR，或 `true` 显式要求本地 OCR；本地地址端口必须与 `OCR_PORT` 一致。VLM、远程 YOLO、MySQL 等外部服务不由脚本启动或停止，请先保证它们可用。
+- 日志追加到 `logs/services/platform.log`、`logs/services/ocr.log`，进程身份保存在同目录的 JSON 文件。启动/停止有互斥锁；重复启动不创建副本，启动失败只回收本次新建的进程，保留原先运行的服务。发现端口被其他服务占用或 PID 归属不符会明确拒绝操作。
+- 停止按“主平台 → OCR”顺序执行，只处理当前项目入口及其子进程，不使用全局 `pkill python`。支持识别旧脚本启动的同项目进程；用其他方式启动（例如直接 `uvicorn`、systemd、Docker）的进程请仍使用原管理方式，脚本不会根据端口强杀。停止会中断当前服务与训练子进程，应避开生产检测和训练任务执行期间。
+- 默认每项服务等待 60 秒；Linux 可用 `bash start.sh --timeout 120` / `bash stop.sh --timeout 120`，Windows 可用 `./start.ps1 -TimeoutSeconds 120` / `./stop.ps1 -TimeoutSeconds 120`。停止不读取 `.env`，也不要求 OCR 环境仍存在，只需主平台 venv 或当前 Conda 内安装了 `psutil`。
+
+拆分为控制端和检测端的生产部署仍使用 `deploy/application-server/` 中的 systemd 单元；不要同时用两种管理方式启动同一套应用。此次一键脚本针对当前原平台，不额外复制启动 CONTROL / INSPECTION 两份进程。
 
 访问地址：
 

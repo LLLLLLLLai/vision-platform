@@ -1,10 +1,14 @@
+param([int]$TimeoutSeconds = 60)
 $ErrorActionPreference = "Stop"
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
-
-if (-not (Test-Path -LiteralPath $python)) {
-    throw "Python virtual environment not found: $python"
+$projectRoot = $PSScriptRoot
+. (Join-Path $projectRoot "scripts\python_environment.ps1")
+$python = Get-PlatformPython -ProjectRoot $projectRoot
+Push-Location $projectRoot
+try {
+    Write-Host "Using Python: $python"
+    & $python (Join-Path $projectRoot "scripts\manage_services.py") start --timeout $TimeoutSeconds
+    $serviceExitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
 }
-
-& $python (Join-Path $projectRoot "scripts\init_db.py")
-& $python (Join-Path $projectRoot "scripts\run.py")
+exit $serviceExitCode

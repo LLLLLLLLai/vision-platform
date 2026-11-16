@@ -1,6 +1,8 @@
 .venv/
 .venv-*/
 **/.venv/
+venv/
+**/venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -21,6 +23,7 @@ logs/*.json
 logs/*.pid
 logs/model_services/
 logs/platform/
+logs/services/
 uploads/*
 !uploads/.gitkeep
 detection_results/*
