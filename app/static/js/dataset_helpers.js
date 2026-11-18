@@ -69,6 +69,26 @@
     return `hsl(${seed % 360}, ${70 + ((seed >>> 8) % 15)}%, ${45 + ((seed >>> 16) % 10)}%)`;
   }
 
+  async function withAnnotationSaveTimeout(operation, timeoutMs = 30000) {
+    const controller = new AbortController();
+    const timeoutError = new Error("标注保存超时，请检查网络或服务后重试");
+    timeoutError.name = "TimeoutError";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      const result = await operation(controller.signal);
+      if (timedOut) throw timeoutError;
+      return result;
+    } catch (error) {
+      throw timedOut ? timeoutError : error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function createAnnotationAutosave({ read, write, onState, delay = 500 }) {
     let revision = 0;
     let savedRevision = 0;
@@ -115,7 +135,7 @@
     };
   }
 
-  const helpers = { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave };
+  const helpers = { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave, withAnnotationSaveTimeout };
   if (typeof module !== "undefined" && module.exports) module.exports = helpers;
   if (typeof window !== "undefined") window.VisionDatasetHelpers = helpers;
 })();

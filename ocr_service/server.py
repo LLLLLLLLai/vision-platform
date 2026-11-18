@@ -17,7 +17,11 @@ logger = logging.getLogger("uvicorn.error")
 _engine = None
 _engine_features = {"use_orientation_classify": False, "use_doc_unwarping": False}
 _engine_lock = threading.Lock()
-_admission = threading.BoundedSemaphore(2)
+_queue_capacity = max(1, int(os.getenv("OCR_MAX_PENDING_REQUESTS", "32")))
+_queue_wait_seconds = max(0.01, float(os.getenv("OCR_QUEUE_WAIT_SECONDS", "60")))
+_admission = threading.BoundedSemaphore(_queue_capacity)
+_execution = threading.BoundedSemaphore(1)
+_inflight: set[asyncio.Task] = set()
 
 
 def _model_directory(kind: str, name: str) -> str:
@@ -117,7 +121,22 @@ def recognize_image(image: np.ndarray, *, use_orientation_classify: bool = False
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ready", "model_loaded": _engine is not None, "engine": "PaddleOCR"}
+    return {"status": "ready", "model_loaded": _engine is not None, "engine": "PaddleOCR",
+            "max_pending_requests": _queue_capacity, "queue_wait_seconds": _queue_wait_seconds}
+
+
+def _recognize_admitted(pixels: np.ndarray, **flags) -> dict:
+    try:
+        return recognize_image(pixels, **flags)
+    finally:
+        _execution.release()
+        _admission.release()
+
+
+def _finish_inference(task: asyncio.Task) -> None:
+    _inflight.discard(task)
+    if not task.cancelled():
+        task.exception()
 
 
 @app.post("/ocr")
@@ -130,8 +149,17 @@ async def ocr(
     if expected_key and not secrets.compare_digest(x_ocr_api_key, expected_key):
         raise HTTPException(status_code=401, detail="OCR authentication failed")
     if not _admission.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="OCR service busy")
+        await image.close()
+        raise HTTPException(status_code=429, detail="OCR service busy: waiting queue is full", headers={"Retry-After": "1"})
+    owns_admission = True
+    owns_execution = False
     try:
+        deadline = asyncio.get_running_loop().time() + _queue_wait_seconds
+        while not _execution.acquire(blocking=False):
+            if asyncio.get_running_loop().time() >= deadline:
+                raise HTTPException(status_code=429, detail="OCR service busy: queue wait timed out", headers={"Retry-After": "1"})
+            await asyncio.sleep(0.02)
+        owns_execution = True
         data = await image.read(20 * 1024 * 1024 + 1)
         if len(data) > 20 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Image exceeds 20 MB")
@@ -142,10 +170,14 @@ async def ocr(
                 pixels = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))[:, :, ::-1].copy()
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
             raise HTTPException(status_code=400, detail="Invalid image") from exc
-        return await asyncio.to_thread(
-            recognize_image, pixels,
+        task = asyncio.create_task(asyncio.to_thread(
+            _recognize_admitted, pixels,
             use_orientation_classify=use_orientation_classify, use_doc_unwarping=use_doc_unwarping,
-        )
+        ))
+        _inflight.add(task)
+        task.add_done_callback(_finish_inference)
+        owns_execution = owns_admission = False
+        return await asyncio.shield(task)
     except HTTPException:
         raise
     except OcrModelConfigurationError as exc:
@@ -155,5 +187,8 @@ async def ocr(
         logger.exception("PaddleOCR recognition failed")
         raise HTTPException(status_code=503, detail="PaddleOCR unavailable; check service logs") from exc
     finally:
+        if owns_execution:
+            _execution.release()
+        if owns_admission:
+            _admission.release()
         await image.close()
-        _admission.release()

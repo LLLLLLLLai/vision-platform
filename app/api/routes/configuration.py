@@ -1,3 +1,4 @@
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.services.world_model_service import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 algorithm_client = AlgorithmServiceClient()
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -903,50 +905,36 @@ def upload_recipe_image(
     _ensure_recipe_editable(recipe)
     _ensure_recipe_supports_inspection_configuration(recipe)
     path = _save_upload(file, Path(PROJECT_ROOT / "uploads" / "recipes" / str(recipe_id)))
-    old_image_path = recipe.base_image_path
-    old_rois = list(recipe.rois)
-    reference_codes = [
-        f"{recipe.code}_{roi.code}_AUTO"[:100]
-        for roi in old_rois
-    ]
-    reference_groups = (
-        database.scalars(
-            select(ReferenceGroup).where(ReferenceGroup.code.in_(reference_codes))
-        ).all()
-        if reference_codes
-        else []
-    )
-    reference_directories = [
-        Path(PROJECT_ROOT / "uploads" / "references" / str(group.id))
-        for group in reference_groups
-    ]
-    with Image.open(path) as image:
-        recipe.reference_width = image.width
-        recipe.reference_height = image.height
-    recipe.base_image_path = str(path)
-    recipe.status = "DRAFT"
-    if recipe.feature_anchor is not None:
-        database.delete(recipe.feature_anchor)
     try:
+        old_rois = list(recipe.rois)
+        with Image.open(path) as image:
+            width, height = image.size
+        recipe.reference_width = width
+        recipe.reference_height = height
+        recipe.base_image_path = str(path)
+        recipe.status = "DRAFT"
+        if recipe.feature_anchor is not None:
+            database.delete(recipe.feature_anchor)
         for roi in old_rois:
-            database.delete(roi)
-        database.flush()
-        for group in reference_groups:
-            database.delete(group)
+            roi.is_deleted = True
+            roi.enabled = False
+        old_roi_ids = [roi.id for roi in old_rois]
+        if old_roi_ids:
+            bindings = database.scalars(select(RoiScenarioBinding).where(RoiScenarioBinding.roi_id.in_(old_roi_ids))).all()
+            for binding in bindings:
+                binding.enabled = False
         database.commit()
-    except Exception:
+    except Exception as error:
         database.rollback()
         path.unlink(missing_ok=True)
-        raise
-    if old_image_path and Path(old_image_path).resolve() != path.resolve():
-        _delete_upload_path(old_image_path)
-    for directory in reference_directories:
-        _delete_upload_path(directory)
+        logger.exception("Recipe image replacement failed: recipe_id=%s", recipe_id)
+        raise HTTPException(status_code=500, detail="配方图片更新失败，原图片和 ROI 配置已保留。请检查服务日志后重试。") from error
+    database.expire(recipe, ["rois", "feature_anchor"])
     return {
         "image_path": str(path),
         "image_url": _file_url(str(path)),
-        "width": recipe.reference_width,
-        "height": recipe.reference_height,
+        "width": width,
+        "height": height,
         "cleared_roi_count": len(old_rois),
         "cleared_feature_anchor": True,
     }

@@ -2,7 +2,7 @@
   const api = "/api/v1";
   const itemPageSize = 48;
   const augmentationBatchImageLimit = 200;
-  const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave } = window.VisionDatasetHelpers;
+  const { augmentationNumber, augmentationBatches, formatRequestError, annotationColor, createAnnotationAutosave, withAnnotationSaveTimeout } = window.VisionDatasetHelpers;
   const state = {
     datasets: [],
     selectedId: null,
@@ -1855,12 +1855,12 @@
     session.autosave = createAnnotationAutosave({
       read: buildAnnotationPayload,
       write: async (annotationJson) => {
-        const result = await request(`${api}/datasets/${dataset.id}/items/${item.id}`, {
+        const result = await withAnnotationSaveTimeout((signal) => request(`${api}/datasets/${dataset.id}/items/${item.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ annotation_status: "LABELED", annotation_json: annotationJson }),
-          signal: AbortSignal.timeout(30000),
-        });
+          signal,
+        }));
         Object.assign(item, result);
         const latestItem = selected()?.id === dataset.id ? selected().items.find((candidate) => candidate.id === item.id) : null;
         if (latestItem && latestItem !== item) Object.assign(latestItem, result);

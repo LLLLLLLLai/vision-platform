@@ -140,7 +140,7 @@ class YoloTrainingExportTests(unittest.TestCase):
                 second_path = export_yolo_dataset(spec)
                 self.assertEqual(first_path, second_path)
                 dataset_dir = first_path if task_type == "YOLO_CLASSIFICATION" else first_path.parent
-                self.assertIn("dataset_v2", dataset_dir.parts)
+                self.assertIn("dataset_v3" if task_type == "YOLO_CLASSIFICATION" else "dataset_v2", dataset_dir.parts)
                 images = list(dataset_dir.rglob("*.png"))
                 self.assertEqual(len(images), 4)
                 self.assertEqual({image.name for image in images}, {f"item_{identifier}.png" for identifier in range(1, 5)})
@@ -176,3 +176,35 @@ class YoloTrainingExportTests(unittest.TestCase):
                 dataset_annotation_type="DETECTION",
                 items=[sample],
             )
+
+    def test_classification_preserves_symbols_and_does_not_merge_classes(self):
+        labels = ["ac2+", "ac2", "ac2-", "线束 A"]
+        source = self._image("source.png", "white")
+        samples = [{
+            "dataset_item_id": index + 1, "media_path": str(source),
+            "annotation_status": "LABELED", "annotation_json": {"label": label}, "split": "TRAIN",
+        } for index, label in enumerate(labels)]
+        spec = build_training_spec(
+            job_id=55, vision_model_id=1, model_code="LABELS", task_type="YOLO_CLASSIFICATION",
+            base_model="test.pt", labels=labels, dataset_id=1, dataset_code="LABELS",
+            version="1.0", samples=samples, config={"epochs": 1}, device="cpu", artifact_root=self.root,
+        )
+        legacy = spec.run_dir / "dataset_v2" / "classification" / "train" / "ac2"
+        legacy.mkdir(parents=True)
+        (legacy / "old.png").write_bytes(source.read_bytes())
+        directory = export_yolo_dataset(spec)
+        self.assertEqual(sorted(path.name for path in (directory / "train").iterdir()), sorted(labels))
+        for index, label in enumerate(labels):
+            self.assertTrue((directory / "train" / label / f"item_{index + 1}.png").is_file())
+            self.assertTrue((directory / "val" / label).is_dir())
+            self.assertTrue((directory / "test" / label).is_dir())
+        self.assertEqual(len(list(directory.rglob("*.png"))), 4)
+        self.assertTrue((legacy / "old.png").is_file())
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("train/ac2+/item_1.png", [row["exported_path"] for row in manifest])
+
+    def test_unsafe_or_case_colliding_labels_fail_instead_of_changing_names(self):
+        for labels in (["AC2", "ac2"], ["ac/2", "ac2"], ["CON", "ac2"], ["..", "ac2"]):
+            with self.subTest(labels=labels), self.assertRaisesRegex(YoloTrainingError, "类别"):
+                validate_training_dataset(task_type="YOLO_CLASSIFICATION", labels=labels,
+                                          dataset_annotation_type="CLASSIFICATION", items=[])

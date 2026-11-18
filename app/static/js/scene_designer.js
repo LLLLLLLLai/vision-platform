@@ -13,6 +13,7 @@
   const state = {
     scene: null,
     versionId: null,
+    publishing: false,
     vlms: [],
     vlmVersions: [],
     publishedScenes: [],
@@ -418,15 +419,18 @@
     byId("designerSceneName").textContent = state.scene.name;
     byId("designerSceneMeta").textContent = `${state.scene.category || "GENERAL"} · ${modeLabel(state.scene.mode)} · ${state.scene.description || "未填写说明"}`;
     byId("designerVersionSelect").innerHTML = state.scene.versions.map((item) => `<option value="${item.id}" ${item.id === version.id ? "selected" : ""}>V${escapeHtml(item.version)} · ${escapeHtml(item.status)}</option>`).join("");
+    byId("designerVersionSelect").disabled = state.publishing;
     const status = byId("designerVersionStatus");
     status.textContent = version.status;
     status.className = `status-pill ${statusClass(version.status)}`;
     const saveButton = byId("designerSave");
-    saveButton.disabled = !isDraft();
+    saveButton.disabled = !isDraft() || state.publishing;
     saveButton.textContent = state.scene.mode === "WORKFLOW" ? "保存当前节点" : "保存草稿";
     saveButton.title = state.scene.mode === "WORKFLOW" ? "保存当前选中的节点配置" : "保存当前草稿";
     byId("designerPublish").hidden = !isDraft();
-    byId("designerClone").disabled = false;
+    byId("designerPublish").disabled = state.publishing;
+    byId("designerPublish").textContent = state.publishing ? "保存并发布中…" : "发布";
+    byId("designerClone").disabled = state.publishing;
     const validateButton = byId("designerValidate");
     validateButton.textContent = state.scene.mode === "WORKFLOW" ? "检查编排" : "检查配置";
     validateButton.title = state.scene.mode === "WORKFLOW"
@@ -2575,19 +2579,19 @@
       return true;
     } catch (error) { notify(error.message, "danger"); return false; }
   }
-  async function saveDesigner() {
+  async function saveDesigner({ quiet = false } = {}) {
     if (collectionOnly()) {
-      try { await saveRunMode(); notify("仅采集模式草稿已保存，发布后生效。"); return true; }
+      try { await saveRunMode(); if (!quiet) notify("仅采集模式草稿已保存，发布后生效。"); return true; }
       catch (error) { notify(error.message, "danger"); return false; }
     }
-    if (state.scene.mode === "VLM_DIRECT") return saveDirect();
+    if (state.scene.mode === "VLM_DIRECT") return saveDirect({ quiet });
     if (!isDraft()) { notify("已发布版本不能直接修改，请先新建草稿版本。", "warning"); return false; }
     try { await saveRunMode(); } catch (error) { notify(error.message, "danger"); return false; }
     if (!nodeById(state.selectedNodeId)) {
-      notify("场景草稿已保存。", "info");
+      if (!quiet) notify("场景草稿已保存。", "info");
       return true;
     }
-    return saveNodeConfig();
+    return saveNodeConfig({ quiet });
   }
 
   async function cloneVersion() {
@@ -2614,23 +2618,30 @@
     }
   }
   async function publishVersion() {
-    if (!isDraft()) return;
-    if (!await saveDesigner()) return;
-    const preflight = await runDesignerPreflight({ openModal: false, quiet: true });
-    if (!preflight?.ready) {
-      if (preflight) {
-        const modal = window.bootstrap?.Modal?.getOrCreateInstance(byId("workflowPreflightModal"));
-        modal?.show();
-      }
-      notify("发布前检查未通过，请先处理标记的问题。", "warning");
-      return;
-    }
-    if (!confirm(`发布后将同步切换 ${preflight.affected_roi_count || 0} 个 ROI 的场景版本，旧版本归档。${collectionOnly() ? "仅采集模式不会调用模型，detect 将返回 NG。" : "正常检测模式将执行模型或流程。"}确认发布吗？`)) return;
+    if (!isDraft() || state.publishing) return false;
+    state.publishing = true;
+    updateHeader();
     try {
+      if (!await saveDesigner({ quiet: true })) return false;
+      const preflight = await runDesignerPreflight({ openModal: false, quiet: true });
+      if (!preflight?.ready) {
+        if (preflight) {
+          const modal = window.bootstrap?.Modal?.getOrCreateInstance(byId("workflowPreflightModal"));
+          modal?.show();
+        }
+        notify(preflight ? "发布前检查未通过，请先处理标记的问题。" : "发布前检查未完成，请检查网络或服务状态后重试。", "warning");
+        return false;
+      }
+      if (!confirm(`发布后将同步切换 ${preflight.affected_roi_count || 0} 个 ROI 的场景版本，旧版本归档。${collectionOnly() ? "仅采集模式不会调用模型，detect 将返回 NG。" : "正常检测模式将执行模型或流程。"}确认发布吗？`)) return false;
       const published = await request(`${api}/scenarios/versions/${currentVersion().id}/publish`, { method: "POST" });
       await loadData();
       notify(`场景版本已发布。外部调用地址：${published.api_endpoint_path || "已生成"}`);
-    } catch (error) { notify(error.message, "danger"); }
+      return true;
+    } catch (error) { notify(error.message, "danger"); return false; }
+    finally {
+      state.publishing = false;
+      updateHeader();
+    }
   }
 
   function previewSelectedImage(file) {
@@ -2943,8 +2954,8 @@
       notify(error.message, "danger");
     }
   }
-  async function saveNodeConfig() {
-    const node = nodeById(state.selectedNodeId); if (!node || !isDraft()) return;
+  async function saveNodeConfig({ quiet = false } = {}) {
+    const node = nodeById(state.selectedNodeId); if (!node || !isDraft()) return false;
     closeSubflowCanvas();
     let config = deepCopy(node.config_json);
     try {
@@ -3108,8 +3119,10 @@
         await Promise.all(branchSelects.map((select) => request(`${api}/scenarios/versions/${currentVersion().id}/edges/${select.dataset.edgeBranch}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mapping_json: select.value ? { branch: select.value } : {} }) })));
       }
       state.loopBodyNodeId = null;
-      await loadData(); notify("节点配置已保存。");
-    } catch (error) { notify(error.message, "danger"); }
+      await loadData();
+      if (!quiet) notify("节点配置已保存。");
+      return true;
+    } catch (error) { notify(error.message, "danger"); return false; }
   }
   async function deleteSelectedNode() {
     const node = nodeById(state.selectedNodeId); if (!node || !isDraft()) return;

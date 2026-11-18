@@ -67,8 +67,21 @@ const imageSurface = byId("imageTransformSurface");
 
 async function request(url, options = {}) {
   const response = await fetch(url, options);
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.detail || payload.message || "请求失败");
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (_error) {
+    throw new Error(response.status === 413
+      ? "图片过大，服务器拒绝上传（HTTP 413）。请调整上传大小限制或使用较小的图片。"
+      : `服务响应异常（HTTP ${response.status}），请检查服务日志后重试。`);
+  }
+  if (!response.ok) {
+    const detail = payload?.detail || payload?.message;
+    const message = Array.isArray(detail)
+      ? detail.map((item) => typeof item === "string" ? item : `${(item.loc || []).filter((key) => key !== "body").join(".")}：${item.msg || "参数不合法"}`).join("；")
+      : typeof detail === "string" ? detail : `请求失败（HTTP ${response.status}），请检查服务日志后重试。`;
+    throw new Error(message);
+  }
   return payload;
 }
 
@@ -725,6 +738,7 @@ async function ensureStation(lineCode, processCode) {
 }
 
 async function ensureWorkingRecipe() {
+  if (state.editorReadOnly) throw new Error("当前为配方详情，只能查看，不能保存修改。");
   const fields = recipeFields();
   if (!fields.lineCode || !fields.materialCode || !fields.processCode || !fields.cameraCode) {
     throw new Error("请先填写拉线、物料、工序和相机信息");
@@ -747,7 +761,12 @@ async function ensureWorkingRecipe() {
     execution_mode: fields.executionMode,
     skip_reason: fields.skipReason || null,
   };
-  let recipeId = state.recipe?.id;
+  const originalRecipeId = state.recipe?.id;
+  let recipeId = originalRecipeId;
+  if (recipeId && !["DRAFT", "SAVED"].includes(state.recipe.status)) {
+    const draft = await request(`${api}/configuration/recipes/${recipeId}/draft`, { method: "POST" });
+    recipeId = draft.id;
+  }
   if (recipeId) {
     await request(`${api}/configuration/recipes/${recipeId}`, {
       method: "PUT",
@@ -763,6 +782,12 @@ async function ensureWorkingRecipe() {
     recipeId = created.id;
   }
   await loadData(recipeId);
+  if (originalRecipeId && originalRecipeId !== recipeId) {
+    const address = new URL(window.location.href);
+    address.searchParams.set("recipe_id", recipeId);
+    address.searchParams.delete("mode");
+    window.history.replaceState(null, "", `${address.pathname}${address.search}${address.hash}`);
+  }
   return state.recipe;
 }
 
@@ -803,11 +828,11 @@ async function uploadBaseImage(file) {
     return;
   }
   const replacingConfiguredImage = Boolean(
-    state.recipe?.base_image_url && state.recipe.rois?.length,
+    state.recipe?.base_image_url && (state.recipe.rois?.length || state.recipe.feature_anchor),
   );
   if (
     replacingConfiguredImage
-    && !window.confirm("更换图片会清除当前配方的全部 ROI、校验规则和自动参考图，是否继续？")
+    && !await confirmWorkspaceAction("更换配方图片", "更换后需重新配置当前草稿的 ROI、场景关联和定位特征点。已发布版本、历史检测记录及参考图片保留，生产检测不受影响。是否继续？")
   ) {
     byId("baseImageInput").value = "";
     byId("emptyImageInput").value = "";
@@ -817,18 +842,19 @@ async function uploadBaseImage(file) {
     const recipe = await ensureWorkingRecipe();
     const data = new FormData();
     data.append("file", file);
-    const result = await request(`${api}/configuration/recipes/${recipe.id}/image`, {
+    await request(`${api}/configuration/recipes/${recipe.id}/image`, {
       method: "POST",
       body: data,
     });
-    byId("baseImageInput").value = "";
-    byId("emptyImageInput").value = "";
     baseImage.removeAttribute("data-source-url");
     state.imageView.resetOnLoad = true;
     await loadRecipe(recipe.id);
     notify("图片上传成功。选择“绘制 ROI”或“绘制特征点”后，按住 Ctrl 并拖动鼠标开始配置。", "success", false);
   } catch (error) {
     notify(error.message, "danger");
+  } finally {
+    byId("baseImageInput").value = "";
+    byId("emptyImageInput").value = "";
   }
 }
 

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -5,6 +7,9 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.config import PROJECT_ROOT, settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class OcrRequestError(RuntimeError):
@@ -33,6 +38,26 @@ class OcrResponse(BaseModel):
     preprocessing: OcrPreprocessing | None = None
 
 
+async def _request_ocr(source: Path, headers: dict, flags: dict) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=settings.ocr_service_timeout_seconds, trust_env=False) as client:
+        for attempt in range(3):
+            with source.open("rb") as image:
+                response = await client.post(
+                    f"{settings.ocr_service_base_url.rstrip('/')}/ocr",
+                    files={"image": (source.name, image, "application/octet-stream")},
+                    data={key: str(value).lower() for key, value in flags.items()},
+                    headers=headers,
+                )
+            if response.status_code != 429 or attempt == 2:
+                return response
+            try:
+                delay = min(5.0, max(0.1, float(response.headers.get("Retry-After", attempt + 1))))
+            except ValueError:
+                delay = float(attempt + 1)
+            logger.warning("OCR service busy (429), retry %s/2 in %.1fs", attempt + 1, delay)
+            await asyncio.sleep(delay)
+
+
 async def recognize_text(
     image_path: str, *, min_score: float = 0.0,
     use_orientation_classify: bool = False, use_doc_unwarping: bool = False,
@@ -50,20 +75,18 @@ async def recognize_text(
         raise OcrRequestError("OCR 图片不能超过 20 MB。")
     headers = {"X-OCR-API-Key": settings.ocr_service_api_key} if settings.ocr_service_api_key else {}
     try:
-        async with httpx.AsyncClient(timeout=settings.ocr_service_timeout_seconds, trust_env=False) as client:
-            with source.open("rb") as image:
-                response = await client.post(
-                    f"{settings.ocr_service_base_url.rstrip('/')}/ocr",
-                    files={"image": (source.name, image, "application/octet-stream")},
-                    data={"use_orientation_classify": str(use_orientation_classify).lower(), "use_doc_unwarping": str(use_doc_unwarping).lower()},
-                    headers=headers,
-                )
+        response = await asyncio.wait_for(
+            _request_ocr(source, headers, {"use_orientation_classify": use_orientation_classify, "use_doc_unwarping": use_doc_unwarping}),
+            timeout=settings.ocr_service_timeout_seconds,
+        )
         if response.status_code != 200:
             try:
                 detail = response.json().get("detail")
             except (ValueError, AttributeError):
                 detail = None
             explanation = detail[:1000] if isinstance(detail, str) else "请检查 OCR 服务日志。"
+            if response.status_code == 429:
+                explanation = f"服务排队繁忙，已重试 2 次；请降低 OCR 请求并发或检查服务负载。{explanation}"
             raise OcrRequestError(f"PaddleOCR 服务返回 HTTP {response.status_code}：{explanation}")
         payload = OcrResponse.model_validate(response.json())
         if payload.status != "COMPLETED":
@@ -76,7 +99,7 @@ async def recognize_text(
             or payload.preprocessing.use_doc_unwarping != use_doc_unwarping
         ):
             raise OcrRequestError("OCR 服务实际预处理配置与节点不一致，请检查 OCR 服务版本。")
-    except httpx.TimeoutException as exc:
+    except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
         raise OcrRequestError("PaddleOCR 识别超时，请检查 OCR 服务负载或调整 OCR_SERVICE_TIMEOUT_SECONDS。") from exc
     except httpx.RequestError as exc:
         raise OcrRequestError("无法连接 PaddleOCR 服务，请启动 start-ocr 脚本并检查 OCR_SERVICE_BASE_URL。") from exc

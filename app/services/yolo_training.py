@@ -53,6 +53,25 @@ def _safe_component(value: str) -> str:
     return cleaned.strip("._") or "unnamed"
 
 
+def _classification_label_directories(labels: Iterable[str]) -> dict[str, str]:
+    directories: dict[str, str] = {}
+    used: set[str] = set()
+    reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}
+    for label in labels:
+        if (
+            not label or label in {".", ".."} or label.endswith((".", " "))
+            or any(ord(character) < 32 or character in '<>:"/\\|?*' for character in label)
+            or label.split(".", 1)[0].upper() in reserved
+            or len(label.encode("utf-8")) > 200
+        ):
+            raise YoloTrainingError(f"分类类别“{label}”不能安全用作训练目录，请修改类别名称；不会自动删改类别字符。")
+        if label.casefold() in used:
+            raise YoloTrainingError(f"分类类别“{label}”与其他类别仅大小写不同，可能合并目录，请修改类别名称。")
+        used.add(label.casefold())
+        directories[label] = label
+    return directories
+
+
 def _resolve_path(raw_path: str | Path) -> Path:
     path = Path(raw_path)
     return path if path.is_absolute() else PROJECT_ROOT / path
@@ -128,6 +147,8 @@ def validate_training_dataset(
         raise YoloTrainingError("训练模型至少需要配置一个识别类别。")
     if len(set(normalized_labels)) != len(normalized_labels):
         raise YoloTrainingError("训练模型的识别类别存在重复名称。")
+    if normalized_task == "YOLO_CLASSIFICATION":
+        _classification_label_directories(normalized_labels)
     if str(dataset_annotation_type or "").upper() != expected_annotation_type:
         raise YoloTrainingError(
             f"当前模型需要 {expected_annotation_type} 标注，但数据集标注类型为 "
@@ -440,7 +461,11 @@ def _export_detection_or_segmentation(spec: YoloTrainingSpec) -> Path:
 
 
 def _export_classification(spec: YoloTrainingSpec) -> Path:
-    dataset_dir = spec.run_dir / "dataset_v2" / "classification"
+    dataset_dir = spec.run_dir / "dataset_v3" / "classification"
+    directories = _classification_label_directories(spec.labels)
+    for split in ("train", "val", "test"):
+        for directory in directories.values():
+            (dataset_dir / split / directory).mkdir(parents=True, exist_ok=True)
     for sample in spec.samples:
         split = str(sample.get("split") or "TRAIN").upper()
         if split not in {"TRAIN", "VAL", "TEST"}:
@@ -453,7 +478,7 @@ def _export_classification(spec: YoloTrainingSpec) -> Path:
         target = (
             dataset_dir
             / split.lower()
-            / _safe_component(label)
+            / directories[label]
             / f"item_{int(sample['dataset_item_id'])}{suffix}"
         )
         _copy_or_link(source, target)
@@ -485,7 +510,7 @@ def export_yolo_dataset(spec: YoloTrainingSpec) -> Path:
         image_name = f"item_{int(sample['dataset_item_id'])}{source.suffix.lower() or '.jpg'}"
         split = str(sample.get("split") or "TRAIN").lower()
         relative_path = (
-            Path(split) / _safe_component(_label_from_annotation(sample.get("annotation_json") or {})) / image_name
+            Path(split) / _label_from_annotation(sample.get("annotation_json") or {}) / image_name
             if spec.task_type == "YOLO_CLASSIFICATION"
             else Path("images") / split / image_name
         )
