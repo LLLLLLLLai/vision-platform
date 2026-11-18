@@ -290,6 +290,11 @@ def init_database() -> None:
     _upgrade_report_selection_schema()
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as database:
+        from app.models.intelligence import VlmModelConfig
+        from app.services.model_selection import snapshot_vlm_config
+        for model in database.scalars(select(VlmModelConfig).with_for_update()).all():
+            snapshot_vlm_config(database, model)
+        database.commit()
         migrate_ai_annotations(database)
     _migrate_legacy_alignment_anchors()
     _seed_reference_object_types()

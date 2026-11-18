@@ -19,6 +19,7 @@ from app.models.reference import ReferenceGroup, ReferenceImage, ReferenceObject
 from app.models.system import Product, Station
 from app.services.algorithm_client import AlgorithmServiceClient
 from app.services.image_processing import analyze_roi_color
+from app.services.recipe_scene_bindings import recipe_scene_bindings
 from app.services.reference_embedding_service import write_reference_matrix
 from app.services.world_model_service import (
     sync_recipe_world_model,
@@ -699,6 +700,7 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
         .where(Recipe.is_deleted.is_(False))
         .order_by(Recipe.id.desc())
     ).all()
+    bindings = recipe_scene_bindings(database, [recipe.id for recipe in recipes])
     payload = []
     for item in recipes:
         product = database.get(Product, item.product_id)
@@ -716,6 +718,8 @@ def list_recipes(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "station_id": item.station_id,
             "base_image_url": _file_url(item.base_image_path),
             "roi_count": len(item.rois),
+            "scenarios": list({binding["scenario_id"]: binding for roi in item.rois
+                               if (binding := bindings.get(roi.id))}.values()),
             "rule_count": sum(len(roi.inspection_items) for roi in item.rois),
             "material_code": item.material_code or (product.code if product else ""),
             "line_code": item.line_code or (station.line_code if station else ""),
@@ -809,6 +813,7 @@ def recipe_detail(
         raise HTTPException(status_code=404, detail="Recipe not found.")
     product = database.get(Product, recipe.product_id)
     station = database.get(Station, recipe.station_id)
+    bindings = recipe_scene_bindings(database, [recipe.id])
     return {
         "id": recipe.id,
         "code": recipe.code,
@@ -835,6 +840,7 @@ def recipe_detail(
         "rois": [
             {
                 **_roi_payload(roi),
+                "scenario_binding": bindings.get(roi.id),
                 "reference": _latest_auto_reference(database, recipe, roi),
             }
             for roi in recipe.rois

@@ -215,6 +215,7 @@ def _model_payload(model: VisionModel) -> dict[str, Any]:
 @router.get("/published")
 def list_published_vision_model_versions(
     database: Session = Depends(get_db),
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     rows = database.execute(
         select(VisionModel, VisionModelVersion)
@@ -223,7 +224,7 @@ def list_published_vision_model_versions(
             VisionModel.is_deleted.is_(False),
             VisionModel.enabled.is_(True),
             VisionModelVersion.is_deleted.is_(False),
-            VisionModelVersion.status == "PUBLISHED",
+            VisionModelVersion.status.in_(["PUBLISHED", "ARCHIVED"] if include_archived else ["PUBLISHED"]),
         )
         .order_by(VisionModel.name, VisionModelVersion.id.desc())
     ).all()
@@ -235,6 +236,7 @@ def list_published_vision_model_versions(
                 "id": version.id,
                 "version_id": version.id,
                 "version": version.version,
+                "status": version.status,
                 "model_id": model.id,
                 "model_code": model.code,
                 "model_name": model.name,

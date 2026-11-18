@@ -1,5 +1,23 @@
 # Vision Platform
 
+## 训练文件名、场景版本与人工确认（2026-11-18）
+
+- YOLO 目标检测、分割、分类训练导出统一使用短文件名 `item_<素材ID>.<后缀>`，图片与标签同名；不改变原素材名称、类别或训练/验证/测试划分。新导出目录为任务下的 `dataset_v2`，避免重试时混入旧导出的残留文件；`manifest.json` 记录短文件名与原素材名称/路径的对应关系。文件名过长而失败的旧任务需重新启动。
+- 场景“新建草稿版本”由后端自动按现有最高数字版本递增：V1.0 → V1.1 → … → V1.9 → V2.0。复制历史版本也使用新的递增编号，不再追加 draft 后缀；历史版本不重命名。API 省略 `version` 即自动编号，显式版本参数继续兼容。
+- 检测记录人工确认修复保存点击被选项事件拦截的问题，支持 OK / NG / 暂不确定，并在面板内反馈保存结果；暂不确定不计入人工确认准确率，原检测与 VLM 复核结论仍保留。
+- 配方 ROI 关联的是逻辑场景的当前发布版本：新建或保存草稿不影响生产，发布后自动切换已启用 ROI 和关联数据集；历史执行仍记录旧版本。发布前应核对场景输入参数与现有 ROI 参数映射是否兼容。
+
+## 配方关联与模型版本选择
+
+- 工艺配方详情、编辑首次打开即展示 ROI 关联场景，不再依赖打开单个明细刷新；配方库可按场景筛选当前草稿或生产版本。
+- 流程中的训练模型、VLM 节点（含遍历/循环体）使用“模型名称 + 使用版本”两级选择。
+- 最新版本：训练模型跟随当前已发布版本（含模型回退后的发布版本）；VLM 跟随最新保存的接口配置。
+- 指定版本：固定所选历史版本；原有训练模型节点仍固定原版本，不自动改为最新。
+- VLM 配置每次实质修改自动保留新版本，原配置初始化为 V1。它固定的是接口配置，无法阻止远端同名服务替换权重；需要严格锁定时请使用版本独立的模型名/地址。
+- 仅采集场景切换正常检测后先保存草稿模式，再展示设计器；不会修改已发布版本。
+- 升级新增 `vlm_model_versions` 表；应用启动自动建表并初始化已有 VLM 配置快照。先备份数据库；无建表权限时执行 `docs/mysql/upgrade_vlm_model_versions.sql` 后启动。
+
+
 面向汽车电子装配错装、漏装、混装检测的工业视觉智能平台。
 
 ## 当前文档
@@ -70,7 +88,7 @@ OpenAI 兼容 VLM             已发布 YOLO 模型
 
 ## MySQL 表结构维护
 
-`docs/mysql/vision_platform_mysql8.sql` 是 SQLAlchemy ORM 生成的 **31 张表的空库建表基线**，不是升级现有 MySQL 库的 `ALTER` 脚本；逐字段说明见 `docs/MySQL-Table-Structure.md`。模型定义或字段变更后运行 `python scripts/generate_mysql_schema.py`，再运行 `python -m unittest discover -s tests -p test_mysql_schema_generator.py` 校验两个文档与 ORM 一致。对现有生产库升级前必须备份并执行受控迁移；`init_database()` 不会自动给已有 MySQL 表补字段。
+`docs/mysql/vision_platform_mysql8.sql` 是 SQLAlchemy ORM 生成的 **32 张表的空库建表基线**，不是升级现有 MySQL 库的 `ALTER` 脚本；逐字段说明见 `docs/MySQL-Table-Structure.md`。模型定义或字段变更后运行 `python scripts/generate_mysql_schema.py`，再运行 `python -m unittest discover -s tests -p test_mysql_schema_generator.py` 校验两个文档与 ORM 一致。对现有生产库升级前必须备份并执行受控迁移；`init_database()` 不会自动给已有 MySQL 表补字段。
 
 ## 静态资源与离线部署
 

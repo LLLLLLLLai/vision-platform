@@ -37,6 +37,7 @@ from app.models.recipe import Recipe, RegionOfInterest
 from app.services.loop_body_graph import loop_body_connections
 from app.services.node_trace_status import with_node_trace_states
 from app.services.openai_compatible_vlm import VlmConfigurationError, VlmRequestError
+from app.services.model_selection import ModelSelectionError, resolve_vision_version, resolve_vlm_config
 from app.services.scene_design_assistant import (
     DesignConversation, SceneDesign, generate_scene_design, validate_design_references,
 )
@@ -153,7 +154,7 @@ class ScenarioUpdate(BaseModel):
 
 
 class VersionCreate(BaseModel):
-    version: str = Field(min_length=1, max_length=50)
+    version: str | None = Field(default=None, min_length=1, max_length=50)
     source_version_id: int | None = None
     prompt_template: str | None = Field(default=None, max_length=8000)
     primary_vlm_model_id: int | None = None
@@ -172,7 +173,7 @@ class VersionCreate(BaseModel):
     @field_validator("version", mode="before")
     @classmethod
     def trim_version(cls, value: Any) -> Any:
-        return _trim_text(value)
+        return _blank_to_none(value)
 
     @field_validator("prompt_template", mode="before")
     @classmethod
@@ -342,30 +343,10 @@ def _validate_vlm(database: Session, model_id: int | None) -> None:
 
 
 def _validate_published_vision_model_node(database: Session, node: ScenarioNode) -> None:
-    raw_version_id = (node.config_json or {}).get("model_version_id")
     try:
-        version_id = int(raw_version_id)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"模型节点“{node.name}”必须选择一个已发布模型版本。",
-        ) from exc
-    version = database.scalar(
-        select(VisionModelVersion)
-        .options(selectinload(VisionModelVersion.vision_model))
-        .where(VisionModelVersion.id == version_id)
-    )
-    if version is None or version.is_deleted or version.status not in {"PUBLISHED", "ARCHIVED"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"模型节点“{node.name}”引用的模型版本不存在或尚未发布。",
-        )
-    model: VisionModel | None = version.vision_model
-    if model is None or model.is_deleted or not model.enabled:
-        raise HTTPException(
-            status_code=400,
-            detail=f"模型节点“{node.name}”引用的训练模型不存在或已停用。",
-        )
+        version = resolve_vision_version(database, node.config_json or {})
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=400, detail=f"模型节点“{node.name}”：{exc}") from exc
     weights_path = resolve_weights_path(version.weights_path)
     if weights_path is None or not weights_path.is_file():
         raise HTTPException(
@@ -440,22 +421,10 @@ def _validate_image_crop_node(
         if source_node.node_type.upper() != "VISION_MODEL":
             # Web/API nodes may legitimately declare their own bbox contract.
             continue
-        raw_version_id = (source_node.config_json or {}).get("model_version_id")
         try:
-            model_version_id = int(raw_version_id)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"上游模型节点“{source_node.name}”尚未选择已发布模型版本。",
-            ) from exc
-        model_version = database.scalar(
-            select(VisionModelVersion)
-            .options(selectinload(VisionModelVersion.vision_model))
-            .where(VisionModelVersion.id == model_version_id)
-        )
-        model = model_version.vision_model if model_version is not None else None
-        if model is None:
-            continue
+            model = resolve_vision_version(database, source_node.config_json or {}).vision_model
+        except ModelSelectionError as exc:
+            raise HTTPException(status_code=400, detail=f"上游模型节点“{source_node.name}”：{exc}") from exc
         profile = task_output_profile(model.task_type)
         if not profile[capability]:
             noun = "bbox" if capability == "supports_bbox" else "目标列表"
@@ -517,22 +486,10 @@ def _validate_image_annotate_node(
             )
         if source_node.node_type.upper() != "VISION_MODEL":
             continue
-        raw_version_id = (source_node.config_json or {}).get("model_version_id")
         try:
-            model_version_id = int(raw_version_id)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"上游模型节点“{source_node.name}”尚未选择已发布模型版本。",
-            ) from exc
-        model_version = database.scalar(
-            select(VisionModelVersion)
-            .options(selectinload(VisionModelVersion.vision_model))
-            .where(VisionModelVersion.id == model_version_id)
-        )
-        model = model_version.vision_model if model_version is not None else None
-        if model is None:
-            continue
+            model = resolve_vision_version(database, source_node.config_json or {}).vision_model
+        except ModelSelectionError as exc:
+            raise HTTPException(status_code=400, detail=f"上游模型节点“{source_node.name}”：{exc}") from exc
         profile = task_output_profile(model.task_type)
         capability = "supports_objects" if expected_capability == "objects" else "supports_bbox"
         if not profile[capability]:
@@ -581,7 +538,7 @@ def _validate_vlm_node(database: Session, node: ScenarioNode) -> None:
     if not config.get("prompt"):
         raise HTTPException(status_code=400, detail=f"VLM 节点“{node.name}”必须填写检测提示词。")
     try:
-        _validate_vlm(database, int(config["vlm_model_id"]))
+        resolve_vlm_config(database, config)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=400,
@@ -684,11 +641,9 @@ def _configured_node_references(value: Any) -> set[str]:
 
 def _vision_model_for_node(database: Session, node: ScenarioNode) -> VisionModel | None:
     try:
-        version_id = int((node.config_json or {}).get("model_version_id"))
-    except (TypeError, ValueError):
+        return resolve_vision_version(database, node.config_json or {}).vision_model
+    except ModelSelectionError:
         return None
-    version = database.get(VisionModelVersion, version_id)
-    return version.vision_model if version is not None else None
 
 
 def _vision_output_field_contract(database: Session, node: ScenarioNode, field: str) -> tuple[bool, str | None]:
@@ -2067,15 +2022,20 @@ async def assist_scene_design(
 def apply_assisted_scene_design(
     scenario_id: int, design: SceneDesign, database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    scene = database.get(InspectionScenario, scenario_id)
+    scene = database.scalar(
+        select(InspectionScenario).where(InspectionScenario.id == scenario_id).with_for_update()
+    )
     if scene is None or scene.is_deleted:
         raise HTTPException(status_code=404, detail="检测场景不存在。")
     try:
         generated = _check_assistant_design(database, scene.mode, design)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    existing_versions = list(database.scalars(
+        select(InspectionScenarioVersion.version).where(InspectionScenarioVersion.scenario_id == scene.id)
+    ).all())
     version = InspectionScenarioVersion(
-        scenario_id=scene.id, version=f"AI-{datetime.utcnow():%Y%m%d-%H%M%S}-{uuid4().hex[:6]}",
+        scenario_id=scene.id, version=_next_scene_version(existing_versions),
         status="DRAFT", prompt_template=generated.prompt_template,
         primary_vlm_model_id=generated.primary_vlm_model_id,
         input_schema_json=generated.input_schema_json, output_schema_json={},
@@ -2135,21 +2095,33 @@ def update_scenario(
     return {"id": scene.id, "updated": True}
 
 
+def _next_scene_version(versions: list[str]) -> str:
+    numbers = []
+    for value in versions:
+        match = re.match(r"^[vV]?(\d+)(?:\.(\d+))?(?:$|-)", str(value).strip())
+        if match:
+            numbers.append(int(match.group(1)) * 10 + int(match.group(2) or 0))
+    sequence = max(numbers) + 1 if numbers else 10
+    major, minor = divmod(sequence, 10)
+    return f"{major}.{minor}"
+
+
 @router.post("/{scenario_id}/versions")
 def create_scenario_version(
     scenario_id: int,
     payload: VersionCreate,
     database: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    scene = database.get(InspectionScenario, scenario_id)
+    scene = database.scalar(
+        select(InspectionScenario).where(InspectionScenario.id == scenario_id).with_for_update()
+    )
     if scene is None or scene.is_deleted:
         raise HTTPException(status_code=404, detail="检测场景不存在。")
-    if database.scalar(
-        select(InspectionScenarioVersion.id).where(
-            InspectionScenarioVersion.scenario_id == scene.id,
-            InspectionScenarioVersion.version == payload.version,
-        )
-    ):
+    existing_versions = list(database.scalars(
+        select(InspectionScenarioVersion.version).where(InspectionScenarioVersion.scenario_id == scene.id)
+    ).all())
+    version_name = payload.version or _next_scene_version(existing_versions)
+    if version_name in existing_versions:
         raise HTTPException(status_code=409, detail="该场景版本已存在。")
     _validate_vlm(database, payload.primary_vlm_model_id)
     _validate_vlm(database, payload.review_vlm_model_id)
@@ -2159,6 +2131,7 @@ def create_scenario_version(
         if source_version.scenario_id != scene.id:
             raise HTTPException(status_code=400, detail="新版本只能复制当前场景的版本定义。")
     version_values = payload.model_dump(exclude={"source_version_id"})
+    version_values["version"] = version_name
     if source_version is not None:
         for field in ("definition_json", "input_schema_json", "output_schema_json", "prompt_template", "primary_vlm_model_id", "review_vlm_model_id"):
             if field not in payload.model_fields_set:

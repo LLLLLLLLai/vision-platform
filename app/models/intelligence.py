@@ -234,6 +234,20 @@ class VlmModelConfig(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class VlmModelVersion(TimestampMixin, Base):
+    __tablename__ = "vlm_model_versions"
+    __table_args__ = (
+        UniqueConstraint("vlm_model_id", "version", name="uq_vlm_config_version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vlm_model_id: Mapped[int] = mapped_column(ForeignKey("vlm_model_configs.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    api_key_ciphertext: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    api_key_env_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
 class VisionModel(TimestampMixin, Base):
     """A logical user-maintained trainable vision model definition."""
 

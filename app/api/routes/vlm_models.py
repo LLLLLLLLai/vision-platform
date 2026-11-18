@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.intelligence import VlmModelConfig
+from app.models.intelligence import VlmModelConfig, VlmModelVersion
+from app.services.model_selection import snapshot_vlm_config
 from app.services.openai_compatible_vlm import (
     VlmConfigurationError,
     api_key_hint,
@@ -82,6 +83,8 @@ def _apply_api_key(database: Session, model: VlmModelConfig, api_key: str | None
     try:
         with database.no_autoflush:
             existing = database.scalar(select(VlmModelConfig.id).where(VlmModelConfig.api_key_ciphertext.is_not(None)).limit(1))
+            if existing is None:
+                existing = database.scalar(select(VlmModelVersion.id).where(VlmModelVersion.api_key_ciphertext.is_not(None)).limit(1))
         model.api_key_ciphertext = encrypt_api_key(api_key.strip(), allow_create=existing is None)
         model.api_key_hint = api_key_hint(api_key.strip())
         model.api_key_env_name = None
@@ -97,6 +100,19 @@ def list_vlm_models(database: Session = Depends(get_db)) -> list[dict[str, Any]]
         .order_by(VlmModelConfig.id.desc())
     ).all()
     return [_payload(model) for model in models]
+
+
+@router.get("/versions/catalog")
+def vlm_versions_catalog(database: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    versions = database.scalars(select(VlmModelVersion).join(
+        VlmModelConfig, VlmModelVersion.vlm_model_id == VlmModelConfig.id,
+    ).where(VlmModelConfig.is_deleted.is_(False), VlmModelConfig.enabled.is_(True),
+            VlmModelVersion.is_deleted.is_(False)).order_by(VlmModelVersion.version.desc())).all()
+    return [{
+        "id": version.id, "model_id": version.vlm_model_id, "version": version.version,
+        "model_name": version.config_json.get("model_name"),
+        "created_at": version.created_at.isoformat(),
+    } for version in versions]
 
 
 @router.post("")
@@ -124,6 +140,7 @@ def create_vlm_model(
     if model.api_key_env_name:
         model.api_key_hint = f"env:{model.api_key_env_name}"
     database.add(model)
+    snapshot_vlm_config(database, model)
     database.commit()
     database.refresh(model)
     return _payload(model)
@@ -149,6 +166,8 @@ def update_vlm_model(
     model = database.get(VlmModelConfig, model_id)
     if model is None or model.is_deleted:
         raise HTTPException(status_code=404, detail="VLM 模型不存在。")
+    database.scalar(select(VlmModelConfig).where(VlmModelConfig.id == model.id).with_for_update().execution_options(populate_existing=True))
+    snapshot_vlm_config(database, model)
     values = payload.model_dump(exclude_unset=True)
     _validate_secret_inputs(values.get("api_key"), values.get("api_key_env_name"))
     if values.pop("clear_saved_api_key", False):
@@ -170,6 +189,7 @@ def update_vlm_model(
             if key == "base_url":
                 value = value.rstrip("/")
         setattr(model, key, value)
+    snapshot_vlm_config(database, model)
     database.commit()
     return _payload(model)
 

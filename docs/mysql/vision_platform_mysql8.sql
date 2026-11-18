@@ -1,5 +1,5 @@
 -- Vision Platform MySQL 8 schema generated from SQLAlchemy metadata.
--- Includes 31 tables; apply only to a new MySQL 8.0.17+ database.
+-- Includes 32 tables; apply only to a new MySQL 8.0.17+ database.
 -- This is a full baseline, not an ALTER migration for existing databases.
 SET NAMES utf8mb4;
 
@@ -302,6 +302,23 @@ CREATE TABLE reference_images (
 	CONSTRAINT fk_reference_images_group_id_reference_groups FOREIGN KEY(group_id) REFERENCES reference_groups (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE INDEX ix_reference_images_group_id ON reference_images (group_id);
+
+-- vlm_model_versions: VLM 接口配置的不可变版本快照；密钥只保存加密值或环境变量名称。
+CREATE TABLE vlm_model_versions (
+	id INTEGER NOT NULL AUTO_INCREMENT,
+	vlm_model_id INTEGER NOT NULL,
+	version INTEGER NOT NULL,
+	config_json JSON NOT NULL,
+	api_key_ciphertext VARCHAR(2000),
+	api_key_env_name VARCHAR(200),
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	is_deleted BOOL NOT NULL,
+	CONSTRAINT pk_vlm_model_versions PRIMARY KEY (id),
+	CONSTRAINT uq_vlm_config_version UNIQUE (vlm_model_id, version),
+	CONSTRAINT fk_vlm_model_versions_vlm_model_id_vlm_model_configs FOREIGN KEY(vlm_model_id) REFERENCES vlm_model_configs (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE INDEX ix_vlm_model_versions_vlm_model_id ON vlm_model_versions (vlm_model_id);
 
 -- datasets: 场景评测集和 YOLO 训练集定义。
 CREATE TABLE datasets (

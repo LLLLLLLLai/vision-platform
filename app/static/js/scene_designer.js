@@ -14,6 +14,7 @@
     scene: null,
     versionId: null,
     vlms: [],
+    vlmVersions: [],
     publishedScenes: [],
     visionVersions: [],
     sceneApiContract: null,
@@ -1633,6 +1634,45 @@
       variableScope,
     });
   }
+  function modelPickerMarkup(kind, config, readonly, loop = false) {
+    const vision = kind === "VISION_MODEL";
+    const legacy = selectedVisionModelVersion(config.model_version_id);
+    const modelId = Number(vision ? config.vision_model_id || legacy?.model_id : config.vlm_model_id) || "";
+    const versions = (vision ? state.visionVersions : state.vlmVersions).filter((item) => Number(item.model_id) === Number(modelId));
+    const mode = vision ? (config.model_version_mode || (config.model_version_id ? "FIXED" : "LATEST")) : (config.vlm_version_mode || "LATEST");
+    const selected = mode === "LATEST" ? "LATEST" : String(vision ? config.model_version_id : config.vlm_version_id);
+    const models = vision ? [...new Map(state.visionVersions.map((item) => [item.model_id, { id: item.model_id, name: item.model_name }])).values()] : state.vlms.filter((item) => item.enabled);
+    if (modelId && !models.some((item) => Number(item.id) === Number(modelId))) {
+      models.push({ id: modelId, name: "原模型已停用或不可用，请重新选择" });
+    }
+    if (mode === "FIXED" && !versions.some((item) => String(item.version_id || item.id) === selected)) {
+      versions.push({ id: selected, version: "不可用（原指定版本）" });
+    }
+    const nameId = loop ? "" : `id="${vision ? "nodeVisionModelName" : "nodeVlmModel"}"`;
+    const versionId = loop ? "" : `id="${vision ? "nodeVisionModelVersion" : "nodeVlmVersion"}"`;
+    return `<div class="model-version-picker" data-model-picker="${kind}" data-picker-loop="${loop}"><div class="form-row"><label><span>模型名称</span><select ${nameId} data-model-name class="form-select" ${readonly ? "disabled" : ""}><option value="">请选择模型</option>${models.map((item) => `<option value="${item.id}" ${Number(modelId) === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select></label><label><span>使用版本</span><select ${versionId} data-model-version class="form-select" ${readonly || !modelId ? "disabled" : ""}><option value="LATEST" ${selected === "LATEST" ? "selected" : ""}>最新版本（自动跟随）</option>${versions.map((item) => `<option value="${item.version_id || item.id}" ${selected === String(item.version_id || item.id) ? "selected" : ""}>指定版本 · V${escapeHtml(item.version)}${item.status === "ARCHIVED" ? "（历史）" : ""}</option>`).join("")}</select></label></div><small class="text-muted">${vision ? "最新版本跟随当前发布版本；指定版本保持不变。" : "版本固定接口配置；远端服务需使用独立模型名或地址才能锁定权重。"}</small></div>`;
+  }
+
+  function modelPickerValue(picker, config = {}) {
+    if (!picker) return {};
+    const vision = picker.dataset.modelPicker === "VISION_MODEL";
+    const modelId = Number(picker.querySelector("[data-model-name]").value) || null;
+    const choice = picker.querySelector("[data-model-version]").value;
+    const latest = choice === "LATEST";
+    if (!vision) return { vlm_model_id: modelId, vlm_version_mode: latest ? "LATEST" : "FIXED", vlm_version_id: latest ? null : Number(choice) || null };
+    const version = latest ? state.visionVersions.find((item) => Number(item.model_id) === modelId && item.status === "PUBLISHED") : selectedVisionModelVersion(choice);
+    return { vision_model_id: modelId, model_version_mode: latest ? "LATEST" : "FIXED", model_version_id: version?.version_id || (latest ? null : Number(choice) || null) };
+  }
+
+  function captureVisionInspector(config) {
+    return {
+      ...config, confidence: Number(byId("nodeConfidence")?.value ?? config.confidence ?? 0.25),
+      ...(byId("nodeIou") ? { iou: Number(byId("nodeIou").value) } : {}),
+      input_mapping: readParameterRows("nodeInputParameters", "节点输入参数"),
+      output_mapping: readParameterRows("nodeOutputParameters", "节点输出参数"),
+    };
+  }
+
   function modelVersionOptions(selected) {
     return `<option value="">请选择已发布模型版本</option>${state.visionVersions.filter((item) => item.available).map((item) => `<option value="${item.version_id}" ${Number(selected) === item.version_id ? "selected" : ""}>${escapeHtml(item.model_name)} · V${escapeHtml(item.version)} · ${escapeHtml(visionOutputProfile(item).display_name)}</option>`).join("")}`;
   }
@@ -1737,6 +1777,7 @@
     const maxTokensValue = byId("nodeMaxTokens")?.value;
     if (validate && (!modelId || !prompt)) throw new Error("自定义 VLM 节点需要选择模型并填写提示词。");
     config.vlm_model_id = modelId;
+    Object.assign(config, modelPickerValue(byId("nodeVlmModel")?.closest("[data-model-picker]"), config));
     config.prompt = prompt;
     config.vlm_parameters = {
       temperature: Number(temperatureValue ?? config.vlm_parameters?.temperature ?? 0),
@@ -1946,8 +1987,8 @@
   function loopBodyNodeFields(entry) {
     const config = entry.config_json || {};
     const imageField = () => loopBodyField("输入图片", "image_path", config.image_path || "{{ input.image_path }}", { placeholder: "{{ input.image_path }}" });
-    if (entry.node_type === "VLM") return `${imageField()}<label><span>VLM 模型</span><select class="form-select form-select-sm" data-loop-field="vlm_model_id"><option value="">请选择</option>${state.vlms.filter((item) => item.enabled).map((item) => `<option value="${item.id}" ${Number(config.vlm_model_id) === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select></label>${loopBodyField("检测提示词", "prompt", config.prompt || "", { multiline: true, placeholder: "检查 {{ item.label }}，返回 result 和 reason" })}${loopBodyField("温度", "temperature", config.vlm_parameters?.temperature ?? 0, { type: "number" })}${loopBodyField("最大输出 Token", "max_tokens", config.vlm_parameters?.max_tokens ?? 1024, { type: "number" })}`;
-    if (entry.node_type === "VISION_MODEL") return `${imageField()}<label><span>已发布模型</span><select class="form-select form-select-sm" data-loop-field="model_version_id">${modelVersionOptions(config.model_version_id)}</select></label>${loopBodyField("置信度阈值", "confidence", config.confidence ?? 0.25, { type: "number" })}${loopBodyField("IoU 阈值", "iou", config.iou ?? 0.45, { type: "number" })}`;
+    if (entry.node_type === "VLM") return `${imageField()}${modelPickerMarkup("VLM", config, !isDraft(), true)}${loopBodyField("检测提示词", "prompt", config.prompt || "", { multiline: true, placeholder: "检查 {{ item.label }}，返回 result 和 reason" })}${loopBodyField("温度", "temperature", config.vlm_parameters?.temperature ?? 0, { type: "number" })}${loopBodyField("最大输出 Token", "max_tokens", config.vlm_parameters?.max_tokens ?? 1024, { type: "number" })}`;
+    if (entry.node_type === "VISION_MODEL") return `${imageField()}${modelPickerMarkup("VISION_MODEL", config, !isDraft(), true)}${loopBodyField("置信度阈值", "confidence", config.confidence ?? 0.25, { type: "number" })}${loopBodyField("IoU 阈值", "iou", config.iou ?? 0.45, { type: "number" })}`;
     if (entry.node_type === "IMAGE_CROP") return `${imageField()}${loopBodyField("目标列表（批量裁剪）", "objects", config.objects || "", { placeholder: "{{ nodes.body_model_1.objects }}" })}${loopBodyField("单个 bbox（与目标列表二选一）", "bbox", config.bbox || "", { placeholder: "{{ input.item.bbox }}" })}${loopBodyField("边缘扩展比例", "padding_ratio", config.padding_ratio ?? 0.05, { type: "number" })}`;
     if (entry.node_type === "IMAGE_ANNOTATE") return `${imageField()}${loopBodyField("目标列表", "objects", config.objects || "", { placeholder: "{{ nodes.body_model_1.objects }}" })}${loopBodyField("单个 bbox", "bbox", config.bbox || "", { placeholder: "{{ input.item.bbox }}" })}`;
     if (["RULE", "IF"].includes(entry.node_type)) return `${loopBodyField("实际值", "actual", config.actual || "", { placeholder: "{{ nodes.body_model_1.predicted_label }}" })}<label><span>运算符</span><select class="form-select form-select-sm" data-loop-field="operator">${ruleOperators.map(([operator, label]) => `<option value="${operator}" ${config.operator === operator ? "selected" : ""}>${label}</option>`).join("")}</select></label>${loopBodyField("期望值", "expected", config.expected ?? "", { placeholder: "{{ input.expected_label }}" })}`;
@@ -2049,6 +2090,7 @@
           config.vlm_parameters = { ...(config.vlm_parameters || {}), [key]: value };
         } else config[key] = value;
       });
+      Object.assign(config, modelPickerValue(card.querySelector("[data-model-picker]"), config));
       card.querySelectorAll("[data-loop-route]").forEach((field) => {
         const route = field.dataset.loopRoute;
         const nextKey = state.loopBodyDraft[Number(card.dataset.loopIndex) + 1]?.node_key || "loop_end";
@@ -2310,7 +2352,7 @@
       const useScene = workflowVlmMode(config) === "SCENE";
       fields = `<label><span>调用方式</span><select id="nodeVlmMode" class="form-select" ${readonly ? "disabled" : ""}><option value="CUSTOM" ${useScene ? "" : "selected"}>自定义 VLM 检测</option><option value="SCENE" ${useScene ? "selected" : ""}>引用已发布 VLM 场景</option></select></label>
         <div id="nodeVlmSceneFields" ${useScene ? "" : "hidden"}><label><span>已发布 VLM 场景</span><select id="nodeReferencedScene" class="form-select" ${readonly ? "disabled" : ""}>${directSceneOptions(config.referenced_scenario_version_id)}</select></label><p class="muted-copy">引用后复用该场景的模型、提示词和参数；本节点仍可映射前序输出作为上下文。</p></div>
-        <div id="nodeVlmCustomFields" ${useScene ? "hidden" : ""}><label><span>VLM 模型</span><select id="nodeVlmModel" class="form-select" ${readonly ? "disabled" : ""}>${state.vlms.filter((item) => item.enabled).map((item) => `<option value="${item.id}" ${Number(config.vlm_model_id) === item.id ? "selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.model_name)}</option>`).join("")}</select></label>${promptTemplateFieldMarkup({ label: "检测提示词", id: "nodePrompt", value: config.prompt || "", placeholder: "输入检测说明，点击 { } 插入变量", ariaLabel: "检测提示词", readonly })}<p class="node-prompt-mapping-tip">变量会以标签显示；点击标签右侧 × 可删除。执行时自动替换为“输入”页签中的参数映射值。</p><div class="form-row"><label><span>温度</span><input id="nodeTemperature" class="form-control" type="number" min="0" max="2" step="0.1" value="${escapeHtml(config.vlm_parameters?.temperature ?? 0)}" ${readonly ? "readonly" : ""}></label><label><span>最大输出 Token</span><input id="nodeMaxTokens" class="form-control" type="number" min="64" max="8192" step="64" value="${escapeHtml(config.vlm_parameters?.max_tokens ?? 1024)}" ${readonly ? "readonly" : ""}></label></div></div>${promptParameterMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
+        <div id="nodeVlmCustomFields" ${useScene ? "hidden" : ""}>${modelPickerMarkup("VLM", config, readonly)}${promptTemplateFieldMarkup({ label: "检测提示词", id: "nodePrompt", value: config.prompt || "", placeholder: "输入检测说明，点击 { } 插入变量", ariaLabel: "检测提示词", readonly })}<p class="node-prompt-mapping-tip">变量会以标签显示；点击标签右侧 × 可删除。执行时自动替换为“输入”页签中的参数映射值。</p><div class="form-row"><label><span>温度</span><input id="nodeTemperature" class="form-control" type="number" min="0" max="2" step="0.1" value="${escapeHtml(config.vlm_parameters?.temperature ?? 0)}" ${readonly ? "readonly" : ""}></label><label><span>最大输出 Token</span><input id="nodeMaxTokens" class="form-control" type="number" min="64" max="8192" step="64" value="${escapeHtml(config.vlm_parameters?.max_tokens ?? 1024)}" ${readonly ? "readonly" : ""}></label></div></div>${promptParameterMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "VISION_MODEL") {
       const selectedModel = selectedVisionModelVersion(config.model_version_id);
       const profile = visionOutputProfile(selectedModel);
@@ -2320,7 +2362,7 @@
         : profile.supports_objects
           ? `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>${profile.supports_mask ? '分割模型输出目标类别、置信度、bbox 和 mask；流程调试会显示轮廓预览。' : '目标检测只输出目标数量、类别、置信度和 bbox；流程调试会显示画框预览。'}需要质量判定时，再单独连接规则节点。</p></div><div class="form-row"><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label><label><span>IoU 阈值</span><input id="nodeIou" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.iou ?? 0.45)}" ${readonly ? "readonly" : ""}></label></div>`
           : `<div class="node-model-task-note"><strong>${escapeHtml(visionTaskLabel(selectedModel))}</strong>${visionCapabilityMarkup(profile)}<p>请先由该模型适配器声明实际输出字段后，再把特定字段映射给后续节点。</p></div><label><span>置信度阈值</span><input id="nodeConfidence" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.confidence ?? 0.25)}" ${readonly ? "readonly" : ""}></label>`;
-      fields = `<label><span>已发布训练模型版本</span><select id="nodeVisionModelVersion" class="form-select" ${readonly ? "disabled" : ""}>${modelVersionOptions(config.model_version_id)}</select></label>${taskFields}${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
+      fields = `${modelPickerMarkup("VISION_MODEL", config, readonly)}${taskFields}${inputMappingMarkup(config, node, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "OCR") {
       fields = `<div class="node-model-task-note"><strong>PaddleOCR 文字识别</strong><p>只识别文字，不判断 OK/NG。后续节点可引用 text 或 texts；多张裁剪图可放入遍历节点逐张识别。</p></div>${variableFieldMarkup({ label: "输入图片", id: "nodeOcrImagePath", value: config.image_path || "{{ input.image_path }}", placeholder: "{{ nodes.crop_1.image_path }}", scope: "INPUT", acceptedTypes: "IMAGE", ariaLabel: "OCR 输入图片", readonly })}<label><span>最低文字置信度</span><input id="nodeOcrMinScore" class="form-control" type="number" min="0" max="1" step="0.01" value="${escapeHtml(config.min_score ?? 0)}" ${readonly ? "readonly" : ""}></label>${ocrPreprocessingFields(config, readonly)}${outputMappingMarkup(config, readonly)}`;
     } else if (node.node_type === "IMAGE_CROP") {
@@ -2471,11 +2513,12 @@
 
   async function loadData({ preserveVersion = true } = {}) {
     closeSubflowCanvas();
-    const [scene, vlms, publishedScenes, visionVersions] = await Promise.all([
-      request(`${api}/scenarios/${sceneId}`), request(`${api}/vlm-models`), request(`${api}/scenarios/published`), request(`${api}/vision-models/published`),
+    const [scene, vlms, publishedScenes, visionVersions, vlmVersions] = await Promise.all([
+      request(`${api}/scenarios/${sceneId}`), request(`${api}/vlm-models`), request(`${api}/scenarios/published`), request(`${api}/vision-models/published?include_archived=true`), request(`${api}/vlm-models/versions/catalog`),
     ]);
     state.scene = scene;
     state.vlms = vlms;
+    state.vlmVersions = vlmVersions;
     state.publishedScenes = publishedScenes;
     state.visionVersions = visionVersions;
     if (!preserveVersion || !scene.versions.some((version) => version.id === state.versionId)) {
@@ -2547,22 +2590,9 @@
     return saveNodeConfig();
   }
 
-  function nextDraftVersionName(source) {
-    const prefix = source?.version ? `${source.version}-draft` : "draft";
-    const existing = new Set((state.scene?.versions || []).map((item) => String(item.version || "").toLowerCase()));
-    let sequence = 1;
-    let candidate = `${prefix}-${sequence}`;
-    while (existing.has(candidate.toLowerCase())) {
-      sequence += 1;
-      candidate = `${prefix}-${sequence}`;
-    }
-    return candidate;
-  }
-
   async function cloneVersion() {
     const source = currentVersion();
     if (!source) { notify("当前场景没有可复制的版本。", "warning"); return; }
-    const version = nextDraftVersionName(source);
     const button = byId("designerClone");
     const originalText = button.textContent;
     button.disabled = true;
@@ -2570,7 +2600,7 @@
     try {
       const created = await request(`${api}/scenarios/${state.scene.id}/versions`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-          version, source_version_id: source.id, prompt_template: source.prompt_template, primary_vlm_model_id: source.primary_vlm_model_id, review_vlm_model_id: source.review_vlm_model_id, input_schema_json: source.input_schema_json || {}, output_schema_json: source.output_schema_json || {}, definition_json: source.definition_json || {},
+          source_version_id: source.id, prompt_template: source.prompt_template, primary_vlm_model_id: source.primary_vlm_model_id, review_vlm_model_id: source.review_vlm_model_id, input_schema_json: source.input_schema_json || {}, output_schema_json: source.output_schema_json || {}, definition_json: source.definition_json || {},
         }),
       });
       state.versionId = created.id;
@@ -2932,10 +2962,9 @@
         const mode = byId("nodeVlmMode").value;
         config = readVlmInspectorConfig(node, { mode, validate: true, removeInactive: true });
       } else if (node.node_type === "VISION_MODEL") {
-        const versionId = Number(byId("nodeVisionModelVersion").value);
-        if (!versionId) throw new Error("请选择已发布训练模型版本。");
-        const profile = visionOutputProfile(selectedVisionModelVersion(versionId));
-        config.model_version_id = versionId;
+        Object.assign(config, modelPickerValue(byId("nodeVisionModelVersion").closest("[data-model-picker]"), config));
+        if (!config.vision_model_id || !config.model_version_id) throw new Error("请选择有已发布版本的训练模型。");
+        const profile = visionOutputProfile(selectedVisionModelVersion(config.model_version_id));
         config.confidence = Number(byId("nodeConfidence").value);
         delete config.expected_label;
         delete config.expected_class;
@@ -3136,7 +3165,7 @@
     byId("designerClone").addEventListener("click", cloneVersion);
     byId("designerValidate").addEventListener("click", () => runDesignerPreflight());
     byId("designerPublish").addEventListener("click", publishVersion);
-    byId("designerRunMode").addEventListener("change", (event) => {
+    byId("designerRunMode").addEventListener("change", async (event) => {
       if (!isDraft()) return;
       const version = currentVersion();
       const mode = event.target.value;
@@ -3144,9 +3173,18 @@
         try { Object.assign(version, directPayload()); }
         catch (error) { event.target.value = "DETECT"; notify(error.message, "warning"); return; }
       }
+      const previousDefinition = deepCopy(version.definition_json);
       version.definition_json = { ...(version.definition_json || {}), run_mode: mode };
-      renderAll();
-      byId("collectionTestResult").textContent = "";
+      event.target.disabled = true;
+      try {
+        await saveRunMode();
+        byId("collectionTestResult").textContent = "";
+      } catch (error) {
+        version.definition_json = previousDefinition;
+        notify(`运行模式未保存：${error.message}`, "danger");
+      } finally {
+        renderAll();
+      }
     });
     byId("collectionRefresh").addEventListener("click", async () => {
       try { await saveRunMode(); await loadData(); } catch (error) { notify(error.message, "danger"); }
@@ -3410,15 +3448,25 @@
         renderInspector();
         return;
       }
-      if (event.target.id === "nodeVisionModelVersion") {
-        const node = nodeById(state.selectedNodeId);
-        if (!node) return;
-        node.config_json = {
-          ...(node.config_json || {}),
-          model_version_id: Number(event.target.value) || null,
-        };
-        renderInspector();
+
+    });
+    document.addEventListener("change", (event) => {
+      const picker = event.target.closest("[data-model-picker]");
+      if (!picker || !isDraft()) return;
+      const nameChanged = event.target.matches("[data-model-name]");
+      if (nameChanged) picker.querySelector("[data-model-version]").value = "LATEST";
+      if (picker.dataset.pickerLoop === "true") {
+        syncLoopBodyEditor();
+        renderLoopBodyEditor();
+        return;
       }
+      const node = nodeById(state.selectedNodeId);
+      if (!node) return;
+      try {
+        const config = node.node_type === "VLM" ? readVlmInspectorConfig(node) : captureVisionInspector(node.config_json || {});
+        node.config_json = { ...config, ...modelPickerValue(picker, config) };
+        renderInspector();
+      } catch (error) { notify(error.message, "warning"); }
     });
     loadData({ preserveVersion: false }).catch((error) => notify(error.message, "danger"));
   });

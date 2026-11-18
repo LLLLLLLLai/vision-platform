@@ -636,6 +636,13 @@ function resetEditor() {
   applyEditorAccessMode();
 }
 
+function hydrateRecipeBindings(recipe) {
+  for (const roi of recipe.rois || []) {
+    if (roi.scenario_binding?.scenario_version_id) state.roiScenarioBindings.set(roi.id, roi.scenario_binding);
+    else state.roiScenarioBindings.delete(roi.id);
+  }
+}
+
 async function loadRecipe(recipeId) {
   const recipeUrl = `${api}/configuration/recipes/${recipeId}`;
   state.recipe = await request(recipeUrl);
@@ -643,6 +650,7 @@ async function loadRecipe(recipeId) {
     ? null
     : await request(`${api}/world/recipes/${recipeId}/scene`);
   state.details.set(state.recipe.id, state.recipe);
+  hydrateRecipeBindings(state.recipe);
   state.selectedRoiId = null;
   state.pendingRect = null;
   state.workingRect = null;
@@ -2498,6 +2506,11 @@ function renderInlineRoiTestError(error, roi) {
 }
 
 function populateLibraryFilters() {
+  const sceneSelect = byId("librarySceneFilter");
+  const selectedScene = sceneSelect.value;
+  const scenes = new Map(state.recipes.flatMap((recipe) => recipe.scenarios || []).map((scene) => [String(scene.scenario_id), scene]));
+  sceneSelect.innerHTML = '<option value="">全部场景</option>' + [...scenes.values()].sort((left, right) => left.scenario_name.localeCompare(right.scenario_name, "zh-CN")).map((scene) => `<option value="${scene.scenario_id}">${escapeHtml(scene.scenario_name)}</option>`).join("");
+  if (scenes.has(selectedScene)) sceneSelect.value = selectedScene;
   const definitions = [
     ["libraryLineFilter", "line_code", "全部拉线"],
     ["libraryMaterialFilter", "material_code", "全部物料"],
@@ -2558,6 +2571,10 @@ function recipeFamilies() {
   });
 }
 
+function recipeFamilyHasScene(family, scenarioId) {
+  return !scenarioId || [family.draft, family.published, ...(!family.draft && !family.published ? [family.display] : [])].filter(Boolean).some((version) => (version.scenarios || []).some((scene) => Number(scene.scenario_id) === Number(scenarioId)));
+}
+
 function renderLibrary() {
   const query = byId("librarySearch")?.value.trim().toLowerCase() || "";
   const filters = {
@@ -2567,6 +2584,7 @@ function renderLibrary() {
     process_code: byId("libraryProcessFilter")?.value || "",
     camera_code: byId("libraryCameraFilter")?.value || "",
   };
+  const scenarioId = Number(byId("librarySceneFilter")?.value) || null;
   const sortMode = byId("librarySort")?.value || "UPDATED_DESC";
   const filtered = recipeFamilies().filter((family) => {
     const recipe = family.display;
@@ -2578,7 +2596,8 @@ function renderLibrary() {
     const matchesFields = Object.entries(filters)
       .filter(([field]) => field !== "status")
       .every(([field, value]) => !value || recipe[field] === value);
-    return matchesQuery && matchesStatus && matchesFields;
+    const matchesScene = recipeFamilyHasScene(family, scenarioId);
+    return matchesQuery && matchesStatus && matchesFields && matchesScene;
   });
   filtered.sort((left, right) => {
     if (sortMode === "NAME_ASC") return String(left.display.name).localeCompare(String(right.display.name), "zh-CN");
@@ -2913,12 +2932,12 @@ function renderManualReview(roi) {
   const automatedVerdict = review.vlm_verdict || "未复核";
   const savedAt = review.manually_reviewed_at ? formatDetectionTime(review.manually_reviewed_at) : "尚未保存";
   const choice = (value, label, className) => `<button class="btn btn-sm ${manualVerdict === value ? className : "btn-outline-secondary"}" type="button" data-manual-verdict="${value}">${label}</button>`;
-  return `<section class="record-manual-review" data-manual-review-execution="${review.execution_id}" data-manual-verdict="${manualVerdict}">
+  return `<section class="record-manual-review" data-manual-review-execution="${review.execution_id}" data-selected-manual-verdict="${manualVerdict}">
     <header><div><strong>人工确认</strong><small>人工结论优先于 VLM 复核，并进入生产场景统计。</small></div><span class="record-manual-review-state ${manualVerdict ? manualVerdict.toLowerCase() : "pending"}">${manualReviewLabel(manualVerdict)}</span></header>
     <div class="record-manual-review-facts"><span>原始结果：<b>${escapeHtml(review.primary_result || roi.status || "-")}</b></span><span>VLM 复核：<b>${escapeHtml(automatedVerdict)}</b></span><span>最近确认：<b>${escapeHtml(savedAt)}</b></span></div>
     <div class="record-manual-review-actions">${choice("OK", "确认 OK", "btn-success")}${choice("NG", "确认 NG", "btn-danger")}${choice("UNCERTAIN", "暂不确定", "btn-warning")}</div>
     <textarea class="form-control form-control-sm" data-manual-review-note rows="2" maxlength="2000" placeholder="可选：填写确认依据或异常说明">${escapeHtml(review.manual_note || "")}</textarea>
-    <div class="record-manual-review-footer"><small>“暂不确定”会保留记录，但不会被计入人工确认准确率。</small><button class="btn btn-sm btn-primary" type="button" data-save-manual-review="${review.execution_id}">保存人工确认</button></div>
+    <div class="record-manual-review-footer"><small data-manual-review-feedback role="status" aria-live="polite">“暂不确定”会保留记录，但不会被计入人工确认准确率。</small><button class="btn btn-sm btn-primary" type="button" data-save-manual-review="${review.execution_id}">保存人工确认</button></div>
   </section>`;
 }
 
@@ -3456,11 +3475,11 @@ function resetLibraryPageAndRender() {
 }
 
 byId("librarySearch").addEventListener("input", resetLibraryPageAndRender);
-["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter", "librarySort"]
+["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter", "librarySceneFilter", "librarySort"]
   .forEach((elementId) => byId(elementId).addEventListener("change", resetLibraryPageAndRender));
 byId("clearLibraryFilters").addEventListener("click", () => {
   byId("librarySearch").value = "";
-  ["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter"]
+  ["libraryStatusFilter", "libraryLineFilter", "libraryMaterialFilter", "libraryProcessFilter", "libraryCameraFilter", "librarySceneFilter"]
     .forEach((elementId) => { byId(elementId).value = ""; });
   byId("librarySort").value = "UPDATED_DESC";
   resetLibraryPageAndRender();
@@ -3504,26 +3523,30 @@ byId("detectionRecordDetailContent").addEventListener("click", async (event) => 
     openRecordImageLightbox(imageButton);
     return;
   }
-  const verdictButton = event.target.closest("[data-manual-verdict]");
+  const verdictButton = event.target.closest("button[data-manual-verdict]");
   if (verdictButton) {
     const section = verdictButton.closest("[data-manual-review-execution]");
     if (!section) return;
-    section.dataset.manualVerdict = verdictButton.dataset.manualVerdict || "";
-    section.querySelectorAll("[data-manual-verdict]").forEach((button) => {
-      const selected = button.dataset.manualVerdict === section.dataset.manualVerdict;
+    section.dataset.selectedManualVerdict = verdictButton.dataset.manualVerdict || "";
+    section.querySelectorAll("button[data-manual-verdict]").forEach((button) => {
+      const selected = button.dataset.manualVerdict === section.dataset.selectedManualVerdict;
       button.className = `btn btn-sm ${selected
         ? (button.dataset.manualVerdict === "OK" ? "btn-success" : button.dataset.manualVerdict === "NG" ? "btn-danger" : "btn-warning")
         : "btn-outline-secondary"}`;
     });
+    section.querySelector("[data-manual-review-feedback]").textContent = "已选择，点击保存人工确认后生效。";
     return;
   }
   const saveButton = event.target.closest("[data-save-manual-review]");
   if (!saveButton) return;
   const section = saveButton.closest("[data-manual-review-execution]");
   const executionId = Number(saveButton.dataset.saveManualReview);
-  const verdict = section?.dataset.manualVerdict || "";
+  if (!section || saveButton.disabled) return;
+  const feedback = section.querySelector("[data-manual-review-feedback]");
+  const verdict = section.dataset.selectedManualVerdict || "";
   if (!executionId || !["OK", "NG", "UNCERTAIN"].includes(verdict)) {
     notify("请先选择确认 OK、确认 NG 或暂不确定。", "warning", false);
+    feedback.textContent = "请先选择确认 OK、确认 NG 或暂不确定。";
     return;
   }
   const note = section.querySelector("[data-manual-review-note]")?.value.trim() || null;
@@ -3535,11 +3558,14 @@ byId("detectionRecordDetailContent").addEventListener("click", async (event) => 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ verdict, note }),
     });
+    state.inspectionReports = null;
+    feedback.textContent = "人工确认已保存。";
     notify("人工确认已保存，并将用于场景统计。", "success", false);
     const recordId = Number(byId("detectionRecordDetailContent").dataset.recordId);
     if (recordId) await openDetectionRecordDetail(recordId);
     if (byId("reportsView")?.classList.contains("active")) await loadInspectionReports();
   } catch (error) {
+    feedback.textContent = `保存人工确认失败：${error.message}`;
     notify(`保存人工确认失败：${error.message}`, "danger", false);
   } finally {
     saveButton.disabled = false;

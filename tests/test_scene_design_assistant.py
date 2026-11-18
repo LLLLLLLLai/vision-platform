@@ -95,6 +95,10 @@ class SceneDesignAssistantTests(unittest.TestCase):
         self.assertEqual(applied.status_code, 200, applied.text)
         version_id = applied.json()["version_id"]
         self.assertEqual(applied.json()["status"], "DRAFT")
+        self.assertEqual(applied.json()["version"], "1.1")
+        another = self.client.post(f"{self.endpoint}/apply", json=response.json()["design"])
+        self.assertEqual(another.status_code, 200, another.text)
+        self.assertEqual(another.json()["version"], "1.2")
         self.database.refresh(self.original)
         self.assertEqual(self.original.status, "PUBLISHED")
         self.assertEqual(self.original.prompt_template, "原始提示词")

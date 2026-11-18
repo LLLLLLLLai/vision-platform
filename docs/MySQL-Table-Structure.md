@@ -28,6 +28,7 @@
 | `product_scenes` | 产品二维空间世界模型及图像对齐配置。 |
 | `recipes` | 按拉线、物料、工序、相机、拍照次数管理的工艺配方版本。 |
 | `reference_images` | 历史参考组中的标准图及其向量索引；当前仅保留追溯。 |
+| `vlm_model_versions` | VLM 接口配置的不可变版本快照；密钥只保存加密值或环境变量名称。 |
 | `datasets` | 场景评测集和 YOLO 训练集定义。 |
 | `detection_tasks` | 一次工艺配方检测任务的总记录。 |
 | `recipe_feature_anchors` | 工艺配方的图像定位特征点。 |
@@ -357,6 +358,24 @@ OpenAI 兼容 VLM 的连接、模型与推理参数配置。
 | `is_deleted` | `BOOL` | 否 | - | 应用默认值 |
 
 索引：`ix_reference_images_group_id` (group_id)
+
+## `vlm_model_versions`
+
+VLM 接口配置的不可变版本快照；密钥只保存加密值或环境变量名称。
+
+| 字段 | MySQL 类型 | 可空 | 键 / 关联 | 默认值 |
+| --- | --- | --- | --- | --- |
+| `id` | `INTEGER` | 否 | PK | - |
+| `vlm_model_id` | `INTEGER` | 否 | UNIQUE；INDEX；FK → vlm_model_configs.id | - |
+| `version` | `INTEGER` | 否 | UNIQUE | - |
+| `config_json` | `JSON` | 否 | - | 应用默认值 |
+| `api_key_ciphertext` | `VARCHAR(2000)` | 是 | - | - |
+| `api_key_env_name` | `VARCHAR(200)` | 是 | - | - |
+| `created_at` | `DATETIME` | 否 | - | 应用默认值 |
+| `updated_at` | `DATETIME` | 否 | - | 应用默认值 |
+| `is_deleted` | `BOOL` | 否 | - | 应用默认值 |
+
+索引：`ix_vlm_model_versions_vlm_model_id` (vlm_model_id)
 
 ## `datasets`
 

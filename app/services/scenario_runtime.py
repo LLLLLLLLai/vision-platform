@@ -42,6 +42,7 @@ from app.services.openai_compatible_vlm import (
 )
 from app.services.dataset_collection_service import collect_scene_image, is_collection_only, try_collect_roi_for_matching_datasets
 from app.services.loop_body_graph import loop_body_connections
+from app.services.model_selection import ModelSelectionError, resolve_vision_version, resolve_vlm_config
 from app.services.node_trace_status import node_trace_state
 from app.services.paddle_ocr_client import recognize_text
 from app.services.remote_yolo_inference import run_remote_yolo_inference
@@ -317,41 +318,20 @@ def _select_vlm(
     database: Session,
     version: InspectionScenarioVersion,
     node: ScenarioNode | None = None,
-) -> VlmModelConfig:
-    config = node.config_json if node else {}
-    model_id = (config or {}).get("vlm_model_id") or version.primary_vlm_model_id
-    if not model_id:
-        raise ScenarioRuntimeError("场景未配置 VLM 模型。")
-    model = database.get(VlmModelConfig, int(model_id))
-    if model is None or not model.enabled or model.is_deleted:
-        raise ScenarioRuntimeError("所选 VLM 模型不存在或未启用。")
-    return model
-
-
-def _select_published_vision_model(
-    database: Session,
-    node: ScenarioNode,
 ):
-    raw_version_id = (node.config_json or {}).get("model_version_id")
+    config = (node.config_json or {}) if node else (version.definition_json or {})
     try:
-        version_id = int(raw_version_id)
-    except (TypeError, ValueError) as exc:
-        raise ScenarioRuntimeError(
-            f"模型节点 {node.name} 尚未选择已发布模型版本。"
-        ) from exc
-    version = database.scalar(
-        select(VisionModelVersion)
-        .options(selectinload(VisionModelVersion.vision_model))
-        .where(VisionModelVersion.id == version_id)
-    )
-    if version is None or version.is_deleted or version.status not in {"PUBLISHED", "ARCHIVED"}:
-        raise ScenarioRuntimeError(
-            f"模型节点 {node.name} 引用的模型版本不存在或尚未发布。"
-        )
-    model: VisionModel | None = version.vision_model
-    if model is None or model.is_deleted or not model.enabled:
-        raise ScenarioRuntimeError(f"模型节点 {node.name} 的训练模型不存在或已停用。")
-    return build_published_model_spec(version, model)
+        return resolve_vlm_config(database, config, version.primary_vlm_model_id)
+    except ModelSelectionError as exc:
+        raise ScenarioRuntimeError(str(exc)) from exc
+
+
+def _select_published_vision_model(database: Session, node: ScenarioNode):
+    try:
+        version = resolve_vision_version(database, node.config_json or {})
+    except ModelSelectionError as exc:
+        raise ScenarioRuntimeError(f"模型节点 {node.name}：{exc}") from exc
+    return build_published_model_spec(version, version.vision_model)
 
 
 def _workflow_order(scenario_version: InspectionScenarioVersion) -> list[ScenarioNode]:
@@ -702,6 +682,9 @@ class ScenarioRuntime:
                         node_runtime_context,
                     )
                     trace_input = {
+                        "vlm_model_id": model.id,
+                        "vlm_version_id": model.config_version_id,
+                        "vlm_version": model.config_version,
                         "image_path": node_image_path,
                         "prompt": prompt,
                         "context": node_context,
@@ -746,6 +729,8 @@ class ScenarioRuntime:
                         },
                         node_runtime_context,
                     )
+                    if isinstance(node_parameters, dict):
+                        node_parameters["model_version_id"] = model_spec.version_id
                     trace_input = {
                         "image_path": node_image_path,
                         "model_version_id": model_spec.version_id,

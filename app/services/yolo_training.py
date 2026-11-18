@@ -385,7 +385,7 @@ def _sample_source_path(sample: dict[str, Any]) -> Path:
 
 
 def _export_detection_or_segmentation(spec: YoloTrainingSpec) -> Path:
-    dataset_dir = spec.run_dir / "dataset"
+    dataset_dir = spec.run_dir / "dataset_v2"
     for split in ("TRAIN", "VAL", "TEST"):
         (dataset_dir / "images" / split.lower()).mkdir(parents=True, exist_ok=True)
         (dataset_dir / "labels" / split.lower()).mkdir(parents=True, exist_ok=True)
@@ -397,7 +397,7 @@ def _export_detection_or_segmentation(spec: YoloTrainingSpec) -> Path:
         source = _sample_source_path(sample)
         image_width, image_height = _image_size(source)
         suffix = source.suffix.lower() or ".jpg"
-        stem = f"{int(sample['dataset_item_id'])}_{_safe_component(Path(str(sample.get('original_name') or 'image')).stem)}"
+        stem = f"item_{int(sample['dataset_item_id'])}"
         image_target = dataset_dir / "images" / split.lower() / f"{stem}{suffix}"
         label_target = dataset_dir / "labels" / split.lower() / f"{stem}.txt"
         _copy_or_link(source, image_target)
@@ -440,7 +440,7 @@ def _export_detection_or_segmentation(spec: YoloTrainingSpec) -> Path:
 
 
 def _export_classification(spec: YoloTrainingSpec) -> Path:
-    dataset_dir = spec.run_dir / "dataset" / "classification"
+    dataset_dir = spec.run_dir / "dataset_v2" / "classification"
     for sample in spec.samples:
         split = str(sample.get("split") or "TRAIN").upper()
         if split not in {"TRAIN", "VAL", "TEST"}:
@@ -454,7 +454,7 @@ def _export_classification(spec: YoloTrainingSpec) -> Path:
             dataset_dir
             / split.lower()
             / _safe_component(label)
-            / f"{int(sample['dataset_item_id'])}_{_safe_component(Path(str(sample.get('original_name') or 'image')).stem)}{suffix}"
+            / f"item_{int(sample['dataset_item_id'])}{suffix}"
         )
         _copy_or_link(source, target)
     return dataset_dir
@@ -474,8 +474,32 @@ def export_yolo_dataset(spec: YoloTrainingSpec) -> Path:
         items=validation_items,
     )
     if spec.task_type == "YOLO_CLASSIFICATION":
-        return _export_classification(spec)
-    return _export_detection_or_segmentation(spec)
+        data_path = _export_classification(spec)
+        dataset_dir = data_path
+    else:
+        data_path = _export_detection_or_segmentation(spec)
+        dataset_dir = data_path.parent
+    manifest = []
+    for sample in spec.samples:
+        source = _sample_source_path(sample)
+        image_name = f"item_{int(sample['dataset_item_id'])}{source.suffix.lower() or '.jpg'}"
+        split = str(sample.get("split") or "TRAIN").lower()
+        relative_path = (
+            Path(split) / _safe_component(_label_from_annotation(sample.get("annotation_json") or {})) / image_name
+            if spec.task_type == "YOLO_CLASSIFICATION"
+            else Path("images") / split / image_name
+        )
+        manifest.append({
+            "dataset_item_id": int(sample["dataset_item_id"]),
+            "original_name": sample.get("original_name"),
+            "source_path": str(source),
+            "exported_path": relative_path.as_posix(),
+            "split": split.upper(),
+        })
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    return data_path
 
 
 @dataclass(frozen=True)

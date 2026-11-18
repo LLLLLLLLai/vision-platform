@@ -50,6 +50,7 @@ TABLE_SUMMARIES = {
     "vision_model_versions": "YOLO 训练权重、指标、训练产物及发布状态。",
     "vision_models": "可训练视觉模型的逻辑定义和类别集合。",
     "vlm_model_configs": "OpenAI 兼容 VLM 的连接、模型与推理参数配置。",
+    "vlm_model_versions": "VLM 接口配置的不可变版本快照；密钥只保存加密值或环境变量名称。",
 }
 
 
